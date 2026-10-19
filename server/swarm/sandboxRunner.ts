@@ -101,7 +101,44 @@ export class SandboxRunner {
       }
     }
 
-    // 2. Automated Test Suite Execution (QA & Testing Agent)
+    // If lightweight structural, bracket, or syntax checks failed, abort early to save tokens and compute
+    if (errors.length > 0) {
+      const build = db.getBuild(buildId);
+      if (build) {
+        build.testReport = { total: 0, passed: 0, failed: errors.length, details: [] };
+        build.securityAudit = { passed: false, score: 50, findings: securityFindings };
+        db.saveBuild(build);
+      }
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'sandbox_check',
+        details: `Lightweight validation failed with ${errors.length} syntax/integrity error(s). Skipping full test runner; dispatching immediate fix tasks.`
+      });
+
+      for (const err of errors.slice(0, 5)) {
+        TaskManager.createNewTask(buildId, {
+          title: `Fix Syntax Error in ${err.filePath}`,
+          description: `Lightweight validation caught syntax error: ${err.message}. Patch file with clean code.`,
+          filePaths: [err.filePath],
+          priority: 1,
+          isFixTask: true,
+          assignedRole: 'debugging_specialist'
+        });
+      }
+
+      return {
+        passed: false,
+        errors,
+        summary: `Lightweight syntax validation failed with ${errors.length} error(s). Full test suite deferred until syntax is valid.`,
+        testReport: { total: 0, passed: 0, failed: errors.length, details: [] },
+        securityAudit: { passed: false, score: 50, findings: securityFindings }
+      };
+    }
+
+    // 2. Automated Test Suite Execution (Runs ONLY after passing lightweight validation)
     const testReport = this.runProjectTests(buildId, files);
     if (testReport.failed > 0) {
       for (const t of testReport.details.filter(d => !d.passed)) {

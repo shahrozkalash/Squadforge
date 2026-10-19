@@ -64,6 +64,7 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
   const inProgressTasks = tasks.filter(t => t.status === 'in_progress' || t.status === 'claimed' || t.status === 'testing').length;
   const pendingTasks = tasks.filter(t => t.status === 'pending' || t.status === 'open' || t.status === 'retrying').length;
   const failedTasks = tasks.filter(t => t.status === 'failed').length;
+  const pausedTasks = tasks.filter(t => t.status === 'paused' || t.isPaused).length;
   const progressPercent = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
   const isRunning = activeBuild.status === 'running' || activeBuild.status === 'planning' || activeBuild.status === 'verifying';

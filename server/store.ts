@@ -10,10 +10,16 @@ import {
   SwarmEvent, 
   ModelRunStatus, 
   Checkpoint,
-  PasswordResetToken
+  PasswordResetToken,
+  UsageLogEntry,
+  SwarmUsageStats,
+  LocalLLMConfig
 } from './types.js';
 import { encryptToken, decryptToken, hashSessionToken, generateSessionToken } from './crypto.js';
-import { INITIAL_MODEL_REGISTRY } from './modelRegistry.js';
+import { INITIAL_MODEL_REGISTRY, modelRegistry } from './modelRegistry.js';
+import { quotaManager } from './quotaManager.js';
+import { safeResultCache } from './cache.js';
+import { localLLMService } from './localLLM.js';
 
 interface ClientSSEListener {
   id: string;
@@ -37,6 +43,7 @@ class PersistentDatabase {
   public events: Map<string, SwarmEvent[]> = new Map(); // buildId -> events
   public modelRuns: Map<string, Map<string, ModelRunStatus>> = new Map(); // buildId -> (modelId -> ModelRunStatus)
   public checkpoints: Map<string, Checkpoint[]> = new Map(); // buildId -> Checkpoints
+  public usageLogs: UsageLogEntry[] = []; // In-memory usage log entries
 
   // In-memory rate limiter: identifier -> { attempts: number, lockUntil: number }
   private rateLimits: Map<string, { attempts: number; lockUntil: number }> = new Map();
@@ -521,6 +528,166 @@ class PersistentDatabase {
   getLatestCheckpoint(buildId: string): Checkpoint | undefined {
     const list = this.getCheckpoints(buildId);
     return list[list.length - 1];
+  }
+
+  // --- Usage Logging & Dashboard Aggregation ---
+
+  addUsageLog(entry: UsageLogEntry): void {
+    this.usageLogs.push(entry);
+    // Keep last 5000 entries in memory
+    if (this.usageLogs.length > 5000) {
+      this.usageLogs = this.usageLogs.slice(-4000);
+    }
+    this.broadcast(entry.buildId, 'usage_logged', entry);
+  }
+
+  getUsageLogs(userId?: string, buildId?: string, limit: number = 100): UsageLogEntry[] {
+    let logs = this.usageLogs;
+    if (userId) {
+      logs = logs.filter(l => l.userId === userId || l.userId === 'system');
+    }
+    if (buildId) {
+      logs = logs.filter(l => l.buildId === buildId);
+    }
+    return logs.slice(-limit).reverse();
+  }
+
+  getAggregatedUsageStats(userId?: string, buildId?: string): SwarmUsageStats {
+    let logs = this.usageLogs;
+    if (userId) {
+      logs = logs.filter(l => l.userId === userId || l.userId === 'system');
+    }
+    if (buildId) {
+      logs = logs.filter(l => l.buildId === buildId);
+    }
+
+    let totalRequests = logs.length;
+    let successfulRequests = 0;
+    let failedRequests = 0;
+    let totalEstimatedTokens = 0;
+    let totalActualTokens = 0;
+    let totalEstimatedCost = 0;
+    let totalBilledCost = 0;
+
+    const providerStats: SwarmUsageStats['providerStats'] = {};
+    const modelStats: SwarmUsageStats['modelStats'] = {};
+
+    for (const log of logs) {
+      if (log.success) successfulRequests++;
+      else failedRequests++;
+
+      totalEstimatedTokens += log.estimatedTokens || log.totalTokens || 0;
+      totalActualTokens += log.totalTokens || 0;
+      totalEstimatedCost += log.estimatedCost || 0;
+      totalBilledCost += log.billedCost || 0;
+
+      // Provider aggregation
+      const p = log.provider || 'other';
+      if (!providerStats[p]) {
+        providerStats[p] = {
+          requests: 0,
+          tokens: 0,
+          errors: 0,
+          estimatedCost: 0,
+          billedCost: 0,
+          status: 'healthy'
+        };
+      }
+      providerStats[p].requests++;
+      providerStats[p].tokens += log.totalTokens || 0;
+      providerStats[p].estimatedCost += log.estimatedCost || 0;
+      providerStats[p].billedCost += log.billedCost || 0;
+      if (!log.success) providerStats[p].errors++;
+
+      // Model aggregation
+      const mId = log.requestedModelId || log.modelId;
+      if (!modelStats[mId]) {
+        const cfg = modelRegistry.getById(mId);
+        modelStats[mId] = {
+          modelId: mId,
+          displayName: cfg?.displayName || mId,
+          requests: 0,
+          tokens: 0,
+          errors: 0,
+          estimatedCost: 0,
+          fallbackCount: 0
+        };
+      }
+      modelStats[mId].requests++;
+      modelStats[mId].tokens += log.totalTokens || 0;
+      modelStats[mId].estimatedCost += log.estimatedCost || 0;
+      if (!log.success) modelStats[mId].errors++;
+      if (log.isFallback) modelStats[mId].fallbackCount++;
+
+      // Agent aggregation from logs
+      if (log.agentRole && agentStats[log.agentRole]) {
+        agentStats[log.agentRole].requests++;
+      }
+    }
+
+    // Set provider status from quota manager
+    const allQuotas = quotaManager.getAllStatuses();
+    for (const [pKey, pVal] of Object.entries(allQuotas)) {
+      if (providerStats[pVal.provider]) {
+        providerStats[pVal.provider].status = pVal.status;
+      }
+    }
+
+    // Agent Stats
+    const agentStats: SwarmUsageStats['agentStats'] = {} as any;
+    const allAgents = modelRegistry.getAgentSpecs();
+    for (const [role, spec] of Object.entries(allAgents)) {
+      agentStats[role as any] = {
+        role: role as any,
+        requests: 0,
+        tokens: 0,
+        tasksCompleted: 0,
+        estimatedCost: 0
+      };
+    }
+
+    // Aggregate tasks if buildId provided
+    const taskStats: SwarmUsageStats['taskStats'] = [];
+    if (buildId) {
+      const buildTasks = this.getTasks(buildId);
+      for (const t of buildTasks) {
+        taskStats.push({
+          taskId: t.id,
+          taskTitle: t.title,
+          tokensUsed: t.actualTokensUsed || 0,
+          cost: t.estimatedCost || 0,
+          modelUsed: t.claimedBy || 'unassigned',
+          status: t.status,
+          isPaused: t.isPaused,
+          pausedReason: t.pausedReason
+        });
+
+        if (t.assignedRole && agentStats[t.assignedRole]) {
+          if (t.status === 'completed' || t.status === 'done') {
+            agentStats[t.assignedRole].tasksCompleted++;
+          }
+          agentStats[t.assignedRole].tokens += t.actualTokensUsed || 0;
+          agentStats[t.assignedRole].estimatedCost += t.estimatedCost || 0;
+        }
+      }
+    }
+
+    return {
+      totalRequests,
+      successfulRequests,
+      failedRequests,
+      totalEstimatedTokens,
+      totalActualTokens,
+      totalEstimatedCost,
+      totalBilledCost,
+      cacheStats: safeResultCache.getStats(),
+      providerStats,
+      modelStats,
+      agentStats,
+      taskStats,
+      activeQuotas: allQuotas,
+      localLLM: localLLMService.getConfig()
+    };
   }
 }
 

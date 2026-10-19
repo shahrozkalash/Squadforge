@@ -123,15 +123,24 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
   }
 };
 
-// Pre-configured registry of 10+ AI Models, each mapped to a specialized agent role
+// Pre-configured registry of 10+ AI Models, each mapped to a specialized agent role with tier, pricing, context window, and capability level
 export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
   {
     id: 'gpt-4o',
     displayName: 'GPT-4o (Project Manager)',
     providerModel: 'openai/gpt-4o',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'project_manager',
     strengths: ['architecture', 'backend', 'frontend', 'testing'],
+    capabilityLevel: 'flagship',
+    contextWindow: 128000,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 2.50,
+      outputCostPerMillion: 10.00,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
     badge: 'PM',
@@ -141,9 +150,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'claude',
     displayName: 'Claude 3.5 (Software Architect)',
     providerModel: 'anthropic/claude-3.5-sonnet',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'software_architect',
     strengths: ['architecture', 'security', 'frontend', 'backend', 'docs'],
+    capabilityLevel: 'flagship',
+    contextWindow: 200000,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 3.00,
+      outputCostPerMillion: 15.00,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-amber-500/20 text-amber-300 border-amber-500/30',
     badge: 'ARCH',
@@ -153,9 +171,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'llama',
     displayName: 'Llama 3.3 (Frontend Dev)',
     providerModel: 'meta-llama/llama-3.3-70b-instruct',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'frontend_developer',
     strengths: ['frontend', 'backend', 'docs', 'testing'],
+    capabilityLevel: 'standard',
+    contextWindow: 131072,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 0.40,
+      outputCostPerMillion: 0.40,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-violet-500/20 text-violet-300 border-violet-500/30',
     badge: 'FE',
@@ -165,9 +192,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'mistral',
     displayName: 'Mistral Large (Backend Dev)',
     providerModel: 'mistralai/mistral-large-2407',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'backend_developer',
     strengths: ['backend', 'database', 'security', 'debugging'],
+    capabilityLevel: 'advanced',
+    contextWindow: 128000,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 2.00,
+      outputCostPerMillion: 6.00,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-orange-500/20 text-orange-300 border-orange-500/30',
     badge: 'BE',
@@ -177,9 +213,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'nemotron',
     displayName: 'Nemotron 70B (Database Specialist)',
     providerModel: 'nvidia/llama-3.1-nemotron-70b-instruct',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'database_specialist',
     strengths: ['database', 'backend', 'security', 'docs'],
+    capabilityLevel: 'standard',
+    contextWindow: 131072,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 0.35,
+      outputCostPerMillion: 0.40,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-lime-500/20 text-lime-300 border-lime-500/30',
     badge: 'DB',
@@ -189,9 +234,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'gemini',
     displayName: 'Gemini 3.8 Flash (Integration Agent)',
     providerModel: 'google/gemini-3.8-flash',
+    provider: 'gemini',
+    tier: 'free',
     agentRole: 'integration_specialist',
     strengths: ['frontend', 'backend', 'database', 'debugging', 'docs'],
+    capabilityLevel: 'advanced',
+    contextWindow: 1048576,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 0.15,
+      outputCostPerMillion: 0.60,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-blue-500/20 text-blue-300 border-blue-500/30',
     badge: 'INT',
@@ -201,9 +255,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'deepseek',
     displayName: 'DeepSeek V3 (QA & Testing)',
     providerModel: 'deepseek/deepseek-chat',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'qa_testing_specialist',
     strengths: ['testing', 'backend', 'database', 'debugging'],
+    capabilityLevel: 'standard',
+    contextWindow: 65536,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 0.14,
+      outputCostPerMillion: 0.28,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
     badge: 'QA',
@@ -213,9 +276,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'qwen',
     displayName: 'Qwen 2.5 Coder (Debugging Agent)',
     providerModel: 'qwen/qwen-2.5-coder-32b-instruct',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'debugging_specialist',
     strengths: ['debugging', 'frontend', 'backend', 'testing'],
+    capabilityLevel: 'standard',
+    contextWindow: 32768,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 0.20,
+      outputCostPerMillion: 0.20,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-rose-500/20 text-rose-300 border-rose-500/30',
     badge: 'DBG',
@@ -225,9 +297,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'grok',
     displayName: 'Grok-2 (Security Agent)',
     providerModel: 'x-ai/grok-2',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'security_specialist',
     strengths: ['security', 'backend', 'database', 'debugging'],
+    capabilityLevel: 'advanced',
+    contextWindow: 131072,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 2.00,
+      outputCostPerMillion: 10.00,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30',
     badge: 'SEC',
@@ -237,9 +318,18 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     id: 'codex',
     displayName: 'Codex Turbo (DevOps & Release)',
     providerModel: 'openai/gpt-4o-mini',
+    provider: 'openrouter',
+    tier: 'paid',
     agentRole: 'devops_release_specialist',
     strengths: ['backend', 'frontend', 'debugging', 'docs'],
+    capabilityLevel: 'lightweight',
+    contextWindow: 128000,
     maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 0.15,
+      outputCostPerMillion: 0.60,
+      currency: 'USD'
+    },
     enabled: true,
     avatarColor: 'bg-teal-500/20 text-teal-300 border-teal-500/30',
     badge: 'OPS',
@@ -268,6 +358,54 @@ class ModelRegistryManager {
 
   getEnabled(): ModelConfig[] {
     return this.getAll().filter(m => m.enabled);
+  }
+
+  getByCapabilityLevel(level: string): ModelConfig[] {
+    return this.getEnabled().filter(m => m.capabilityLevel === level);
+  }
+
+  getByTier(tier: string): ModelConfig[] {
+    return this.getEnabled().filter(m => m.tier === tier);
+  }
+
+  getByProvider(provider: string): ModelConfig[] {
+    return this.getEnabled().filter(m => m.provider === provider);
+  }
+
+  registerLocalModel(localModelName: string, endpointUrl: string, contextWindow: number = 32768): ModelConfig {
+    const localId = `local-${localModelName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}`;
+    const config: ModelConfig = {
+      id: localId,
+      displayName: `Local: ${localModelName}`,
+      providerModel: localModelName,
+      provider: 'local',
+      tier: 'local',
+      isLocal: true,
+      strengths: ['backend', 'frontend', 'debugging', 'testing', 'docs'],
+      capabilityLevel: 'standard',
+      contextWindow,
+      maxTokens: Math.min(4096, Math.floor(contextWindow / 2)),
+      pricing: {
+        inputCostPerMillion: 0,
+        outputCostPerMillion: 0,
+        currency: 'USD'
+      },
+      enabled: true,
+      avatarColor: 'bg-purple-500/20 text-purple-300 border-purple-500/30',
+      badge: 'LOCAL',
+      description: `Locally hosted inference model via ${endpointUrl}`
+    };
+    this.registerModel(config);
+    return config;
+  }
+
+  removeLocalModels(): void {
+    const all = this.getAll();
+    for (const m of all) {
+      if (m.isLocal || m.provider === 'local') {
+        this.deleteModel(m.id);
+      }
+    }
   }
 
   registerModel(config: ModelConfig): void {

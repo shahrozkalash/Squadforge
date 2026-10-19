@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext.js';
 import { useSwarm } from '../context/SwarmContext.js';
 import { Github, Play, Square, Activity, GitBranch, LogOut } from 'lucide-react';
 
-export type NavTab = 'dashboard' | 'live' | 'code' | 'merge' | 'builds' | 'settings' | 'test';
+export type NavTab = 'dashboard' | 'live' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
 
 interface NavbarProps {
   currentTab: NavTab;
@@ -39,7 +39,7 @@ export const Navbar: React.FC<NavbarProps> = ({
         </span>
       </div>
 
-      {/* Zone 2: 4–5 clean single-line text navigation links */}
+      {/* Zone 2: clean single-line text navigation links */}
       <nav className="hidden lg:flex items-center gap-6 text-sm font-medium text-neutral-400">
         <button
           onClick={() => onSelectTab('dashboard')}
@@ -83,6 +83,14 @@ export const Navbar: React.FC<NavbarProps> = ({
           }`}
         >
           Build History
+        </button>
+        <button
+          onClick={() => onSelectTab('usage')}
+          className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${
+            currentTab === 'usage' ? 'text-amber-400 border-b border-amber-400 pb-0.5' : ''
+          }`}
+        >
+          Usage & Quotas
         </button>
         <button
           onClick={() => onSelectTab('settings')}

@@ -8,6 +8,7 @@ import { ProjectCodeView } from './components/ProjectCodeView.js';
 import { MergeHistoryView } from './components/MergeHistoryView.js';
 import { BuildHistoryView } from './components/BuildHistoryView.js';
 import { SettingsView } from './components/SettingsView.js';
+import { UsageDashboardView } from './components/UsageDashboardView.js';
 import { AuthModal } from './components/AuthModal.js';
 import { ConcurrencyTestModal } from './components/ConcurrencyTestModal.js';
 import { AuthPage } from './components/AuthPage.js';
@@ -55,6 +56,10 @@ function DashboardContent() {
 
         {currentTab === 'builds' && (
           <BuildHistoryView onSelectBuild={handleSelectBuild} />
+        )}
+
+        {currentTab === 'usage' && (
+          <UsageDashboardView />
         )}
 
         {currentTab === 'settings' && (

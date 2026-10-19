@@ -50,6 +50,7 @@ export interface User {
   githubConnected: boolean;
   defaultRepo?: string;
   costLimitPerBuild: number;
+  routingPreference?: 'cost' | 'latency' | 'quality';
   enabledModelIds: string[];
   createdAt: number;
   updatedAt?: number;
@@ -83,6 +84,7 @@ export type TaskStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
+  | 'paused'
   | 'open'
   | 'claimed'
   | 'done';
@@ -109,6 +111,11 @@ export interface Task {
   dependencies?: string[];
   assignedRole?: AgentRole;
   milestone?: string;
+  tokenBudget?: number;
+  actualTokensUsed?: number;
+  estimatedCost?: number;
+  isPaused?: boolean;
+  pausedReason?: string;
   executionLogs?: string[];
   verificationOutput?: {
     syntaxPassed?: boolean;
@@ -241,6 +248,9 @@ export interface Build {
   totalTokens: number;
   totalCost: number;
   costLimit: number;
+  tokenBudget?: number;
+  routingPreference?: 'cost' | 'latency' | 'quality';
+  budgetWarningEmitted?: boolean;
   maxDurationSeconds: number;
   patchesAppliedCount: number;
   error?: string;
@@ -301,4 +311,135 @@ export interface ConfigStatusResponse {
     username?: string;
     statusText: string;
   };
+}
+
+export type ProviderHealthStatus = 
+  | 'healthy' 
+  | 'rate_limited' 
+  | 'quota_exhausted' 
+  | 'auth_error' 
+  | 'cooldown' 
+  | 'offline';
+
+export interface ProviderQuotaStatus {
+  provider: string;
+  modelId?: string;
+  status: ProviderHealthStatus;
+  consecutiveErrors: number;
+  cooldownUntil?: number;
+  retryAfterSeconds?: number;
+  reportedLimit?: number;
+  reportedRemaining?: number;
+  reportedResetTime?: number;
+  isEstimated: boolean;
+  lastError?: string;
+  lastErrorCode?: string;
+  lastUsedAt?: number;
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+}
+
+export interface LocalLLMConfig {
+  enabled: boolean;
+  endpointUrl: string;
+  modelName: string;
+  timeoutMs: number;
+  contextWindow: number;
+  status: 'untested' | 'connected' | 'disconnected' | 'error';
+  lastChecked?: number;
+  errorMessage?: string;
+  availableModels?: string[];
+}
+
+export interface LocalLLMHealthResult {
+  connected: boolean;
+  endpointUrl: string;
+  availableModels: string[];
+  selectedModelAvailable: boolean;
+  latencyMs: number;
+  error?: string;
+}
+
+export interface CacheStats {
+  hits: number;
+  misses: number;
+  entriesCount: number;
+  tokensSaved: number;
+  estimatedCostSaved: number;
+}
+
+export interface UsageLogEntry {
+  id: string;
+  timestamp: number;
+  buildId: string;
+  taskId?: string;
+  taskTitle?: string;
+  agentRole?: AgentRole;
+  userId: string;
+  modelId: string;
+  requestedModelId: string;
+  actualModelUsed: string;
+  provider: string;
+  isFallback: boolean;
+  fallbackReason?: string;
+  isLocal: boolean;
+  estimatedTokens: number;
+  actualInputTokens?: number;
+  actualOutputTokens?: number;
+  totalTokens: number;
+  estimatedCost: number;
+  billedCost: number;
+  isCached: boolean;
+  latencyMs: number;
+  success: boolean;
+  error?: string;
+  errorCode?: string;
+}
+
+export interface SwarmUsageStats {
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+  totalEstimatedTokens: number;
+  totalActualTokens: number;
+  totalEstimatedCost: number;
+  totalBilledCost: number;
+  cacheStats: CacheStats;
+  providerStats: Record<string, {
+    requests: number;
+    tokens: number;
+    errors: number;
+    estimatedCost: number;
+    billedCost: number;
+    status: ProviderHealthStatus;
+  }>;
+  modelStats: Record<string, {
+    modelId: string;
+    displayName: string;
+    requests: number;
+    tokens: number;
+    errors: number;
+    estimatedCost: number;
+    fallbackCount: number;
+  }>;
+  agentStats: Record<string, {
+    role: AgentRole;
+    requests: number;
+    tokens: number;
+    tasksCompleted: number;
+    estimatedCost: number;
+  }>;
+  taskStats: Array<{
+    taskId: string;
+    taskTitle: string;
+    tokensUsed: number;
+    cost: number;
+    modelUsed: string;
+    status: TaskStatus;
+    isPaused?: boolean;
+    pausedReason?: string;
+  }>;
+  activeQuotas: Record<string, ProviderQuotaStatus>;
+  localLLM: LocalLLMConfig;
 }

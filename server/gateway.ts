@@ -85,12 +85,17 @@ CRITICAL RULES FOR PATCHES:
 
 export interface GatewayCallParams {
   modelId: string;
+  task?: any;
+  taskComplexity?: 'lightweight' | 'standard' | 'flagship';
   systemInstruction?: string;
   prompt: string;
   temperature?: number;
   maxTokens?: number;
   responseMimeType?: string;
   allowFallback?: boolean;
+  bypassCache?: boolean;
+  buildId?: string;
+  userId?: string;
 }
 
 /**
@@ -255,264 +260,24 @@ export function parseVerifierResponse(text: string): VerifierResponse | null {
  * Accurately tracks requested model vs actual model used and provider used.
  * Never silently fabricates responses.
  */
+/**
+ * Unified gateway call for every model in the registry.
+ * Accurately tracks requested model vs actual model used and provider used.
+ * Powered by SmartModelRouter for token optimization, rate limiting, and safe fallbacks.
+ */
 export async function callUnifiedGateway(params: GatewayCallParams): Promise<GatewayResult> {
-  const startTime = Date.now();
-  const requestedModelId = params.modelId;
-  const modelConfig = modelRegistry.getById(requestedModelId);
-
-  // 1. Validate requested model existence
-  if (!modelConfig) {
-    return {
-      success: false,
-      rawText: '',
-      parsedResponse: null,
-      tokensUsed: 0,
-      modelId: requestedModelId,
-      actualModelUsed: 'none',
-      providerUsed: 'none',
-      isFallback: false,
-      latencyMs: Date.now() - startTime,
-      error: `Model "${requestedModelId}" is not registered in the model registry.`,
-      errorCode: 'UNSUPPORTED_MODEL'
-    };
-  }
-
-  const sysPrompt = params.systemInstruction || SILENT_WORKER_SYSTEM_PROMPT;
-  const openRouterKey = process.env.OPENROUTER_API_KEY || '';
-  const genAI = getGoogleGenAI();
-
-  // 2. Determine execution route
-  const isDirectGemini = requestedModelId === 'gemini';
-
-  // Attempt Primary Provider: OpenRouter for 3P models
-  if (!isDirectGemini) {
-    if (openRouterKey) {
-      try {
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${openRouterKey}`,
-            'HTTP-Referer': 'https://squadforge.dev',
-            'X-Title': 'SquadForge Swarm'
-          },
-          body: JSON.stringify({
-            model: modelConfig.providerModel,
-            messages: [
-              { role: 'system', content: sysPrompt },
-              { role: 'user', content: params.prompt }
-            ],
-            temperature: params.temperature ?? 0.2,
-            max_tokens: params.maxTokens ?? 3000,
-            response_format: { type: 'json_object' }
-          })
-        });
-
-        if (!response.ok) {
-          let errCode: GatewayErrorCode = 'PROVIDER_ERROR';
-          let errMsg = `OpenRouter HTTP ${response.status}`;
-
-          if (response.status === 401 || response.status === 403) {
-            errCode = 'INVALID_API_KEY';
-            errMsg = 'OpenRouter API key is invalid or unauthorized.';
-          } else if (response.status === 429) {
-            errCode = 'RATE_LIMITED';
-            errMsg = 'OpenRouter rate limit or credit ceiling exceeded.';
-          } else {
-            try {
-              const errBody = await response.json();
-              if (errBody?.error?.message) {
-                errMsg = `OpenRouter error: ${errBody.error.message}`;
-              }
-            } catch (_) {}
-          }
-
-          // If fallback is not allowed, fail immediately with accurate error
-          if (!params.allowFallback || !genAI) {
-            return {
-              success: false,
-              rawText: '',
-              parsedResponse: null,
-              tokensUsed: 0,
-              modelId: requestedModelId,
-              actualModelUsed: modelConfig.providerModel,
-              providerUsed: 'openrouter',
-              isFallback: false,
-              latencyMs: Date.now() - startTime,
-              error: errMsg,
-              errorCode: errCode
-            };
-          }
-          // Fallback allowed, continue below to Gemini fallback
-        } else {
-          // Success from OpenRouter
-          const data = await response.json();
-          const content = data.choices?.[0]?.message?.content || '';
-          const parsed = extractAndParseJson(content);
-
-          if (!parsed && !params.responseMimeType?.includes('json')) {
-            return {
-              success: true,
-              rawText: content,
-              parsedResponse: null,
-              tokensUsed: data.usage?.total_tokens || 500,
-              modelId: requestedModelId,
-              actualModelUsed: modelConfig.providerModel,
-              providerUsed: 'openrouter',
-              isFallback: false,
-              latencyMs: Date.now() - startTime
-            };
-          }
-
-          if (!parsed) {
-            return {
-              success: false,
-              rawText: content,
-              parsedResponse: null,
-              tokensUsed: data.usage?.total_tokens || 500,
-              modelId: requestedModelId,
-              actualModelUsed: modelConfig.providerModel,
-              providerUsed: 'openrouter',
-              isFallback: false,
-              latencyMs: Date.now() - startTime,
-              error: 'Response from OpenRouter did not contain valid structured JSON actions.',
-              errorCode: 'MALFORMED_OUTPUT'
-            };
-          }
-
-          return {
-            success: true,
-            rawText: content,
-            parsedResponse: parsed,
-            tokensUsed: data.usage?.total_tokens || 500,
-            modelId: requestedModelId,
-            actualModelUsed: modelConfig.providerModel,
-            providerUsed: 'openrouter',
-            isFallback: false,
-            latencyMs: Date.now() - startTime
-          };
-        }
-      } catch (netErr: any) {
-        if (!params.allowFallback || !genAI) {
-          return {
-            success: false,
-            rawText: '',
-            parsedResponse: null,
-            tokensUsed: 0,
-            modelId: requestedModelId,
-            actualModelUsed: modelConfig.providerModel,
-            providerUsed: 'openrouter',
-            isFallback: false,
-            latencyMs: Date.now() - startTime,
-            error: `Network failure connecting to OpenRouter: ${netErr.message || 'Connection error'}`,
-            errorCode: 'NETWORK_ERROR'
-          };
-        }
-      }
-    } else {
-      // OpenRouter API key not configured
-      if (!params.allowFallback || !genAI) {
-        return {
-          success: false,
-          rawText: '',
-          parsedResponse: null,
-          tokensUsed: 0,
-          modelId: requestedModelId,
-          actualModelUsed: 'none',
-          providerUsed: 'none',
-          isFallback: false,
-          latencyMs: Date.now() - startTime,
-          error: `Model "${modelConfig.displayName}" requires OPENROUTER_API_KEY. Configure key or enable fallback.`,
-          errorCode: 'NO_PROVIDER'
-        };
-      }
-    }
-  }
-
-  // 3. Native Gemini call (Either direct Gemini model, or explicitly configured fallback)
-  if (genAI) {
-    const isFallbackRun = !isDirectGemini;
-    const fallbackReason = isFallbackRun 
-      ? `Primary provider for ${modelConfig.displayName} unavailable; executed via configured Gemini fallback` 
-      : undefined;
-
-    try {
-      const specializedSysInstruction = isFallbackRun
-        ? `${sysPrompt}\n\nYou are operating as fallback for AI Model: ${modelConfig.displayName} (${modelConfig.strengths.join(', ')}). Output only JSON.`
-        : sysPrompt;
-
-      const genAiCall = genAI.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: params.prompt,
-        config: {
-          systemInstruction: specializedSysInstruction,
-          temperature: params.temperature ?? 0.2,
-          responseMimeType: 'application/json',
-        }
-      });
-
-      const timeoutPromise = new Promise<never>((_, reject) => 
-        setTimeout(() => reject(new Error('Gateway timeout (8000ms)')), 8000)
-      );
-
-      const response: any = await Promise.race([genAiCall, timeoutPromise]);
-      const text = response?.text || '';
-
-      const parsed = extractAndParseJson(text);
-
-      return {
-        success: true,
-        rawText: text,
-        parsedResponse: parsed,
-        tokensUsed: 650,
-        modelId: requestedModelId,
-        actualModelUsed: 'gemini-3.8-flash',
-        providerUsed: 'gemini',
-        isFallback: isFallbackRun,
-        fallbackReason,
-        latencyMs: Date.now() - startTime
-      };
-    } catch (err: any) {
-      let errCode: GatewayErrorCode = 'PROVIDER_ERROR';
-      const msg = err?.message || String(err);
-
-      if (msg.includes('API_KEY') || msg.includes('401') || msg.includes('403')) {
-        errCode = 'INVALID_API_KEY';
-      } else if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429')) {
-        errCode = 'RATE_LIMITED';
-      } else if (msg.includes('timeout') || msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
-        errCode = 'NETWORK_ERROR';
-      }
-
-      return {
-        success: false,
-        rawText: '',
-        parsedResponse: null,
-        tokensUsed: 0,
-        modelId: requestedModelId,
-        actualModelUsed: 'gemini-3.8-flash',
-        providerUsed: 'gemini',
-        isFallback: isFallbackRun,
-        fallbackReason,
-        latencyMs: Date.now() - startTime,
-        error: `Gemini API execution failed: ${msg}`,
-        errorCode: errCode
-      };
-    }
-  }
-
-  // 4. No provider available
-  return {
-    success: false,
-    rawText: '',
-    parsedResponse: null,
-    tokensUsed: 0,
-    modelId: requestedModelId,
-    actualModelUsed: 'none',
-    providerUsed: 'none',
-    isFallback: false,
-    latencyMs: Date.now() - startTime,
-    error: 'No valid AI provider configured on server (GEMINI_API_KEY or OPENROUTER_API_KEY required).',
-    errorCode: 'NO_PROVIDER'
-  };
+  const { smartRouter } = await import('./smartRouter.js');
+  return smartRouter.executeSmartRequest({
+    requestedModelId: params.modelId,
+    task: params.task,
+    taskComplexity: params.taskComplexity,
+    prompt: params.prompt,
+    systemInstruction: params.systemInstruction,
+    temperature: params.temperature,
+    maxTokens: params.maxTokens,
+    allowFallback: params.allowFallback,
+    bypassCache: params.bypassCache,
+    buildId: params.buildId,
+    userId: params.userId
+  });
 }

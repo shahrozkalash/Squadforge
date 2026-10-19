@@ -9,6 +9,9 @@ import { GitHubService } from './server/github.js';
 import { ConcurrencyTester } from './server/swarm/conflictTest.js';
 import { MergeManager } from './server/swarm/mergeManager.js';
 import { TaskManager } from './server/swarm/taskManager.js';
+import { quotaManager } from './server/quotaManager.js';
+import { localLLMService } from './server/localLLM.js';
+import { safeResultCache } from './server/cache.js';
 import { 
   hashPassword, 
   verifyPassword, 
@@ -392,13 +395,16 @@ app.put('/api/models/:id', requireAuth, (req, res) => {
   res.json({ success: true, model: updated });
 });
 
-// User Settings
 app.put('/api/user/settings', requireAuth, (req, res) => {
   const user = req.user!;
-  const { costLimitPerBuild, defaultRepo, enabledModelIds } = req.body;
-  if (costLimitPerBuild !== undefined) user.costLimitPerBuild = costLimitPerBuild;
+  const { costLimitPerBuild, defaultRepo, enabledModelIds, routingPreference, tokenLimitPerBuild } = req.body;
+  if (costLimitPerBuild !== undefined) user.costLimitPerBuild = Number(costLimitPerBuild);
   if (defaultRepo !== undefined) user.defaultRepo = defaultRepo;
   if (enabledModelIds !== undefined) user.enabledModelIds = enabledModelIds;
+  if (routingPreference !== undefined && ['cost', 'latency', 'quality'].includes(routingPreference)) {
+    user.routingPreference = routingPreference;
+  }
+  if (tokenLimitPerBuild !== undefined) user.tokenLimitPerBuild = Number(tokenLimitPerBuild);
   db.saveUser(user);
   res.json({ success: true, user: db.toSafeUser(user) });
 });
@@ -664,6 +670,143 @@ app.post('/api/test-concurrency', requireAuth, async (req, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Concurrency test failure' });
   }
+});
+
+// --- SMART TOKEN OPTIMIZATION & USAGE DASHBOARD ROUTES ---
+
+// 1. Aggregated Usage Stats (Isolated to current authenticated user)
+app.get('/api/usage/stats', requireAuth, (req, res) => {
+  const buildId = req.query.buildId as string | undefined;
+  const stats = db.getAggregatedUsageStats(req.user!.id, buildId);
+  res.json(stats);
+});
+
+// 2. Audit Trail Usage Logs (Isolated to current user, no secrets leaked)
+app.get('/api/usage/logs', requireAuth, (req, res) => {
+  const buildId = req.query.buildId as string | undefined;
+  const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+  const logs = db.getUsageLogs(req.user!.id, buildId, limit);
+  res.json({ logs });
+});
+
+// 3. Real-time Quota Status for configured providers
+app.get('/api/quota/status', requireAuth, (_req, res) => {
+  const statuses = quotaManager.getAllStatuses();
+  res.json({ quotas: statuses });
+});
+
+// 4. Manually reset cooldown for a provider
+app.post('/api/quota/reset/:provider', requireAuth, (req, res) => {
+  const provider = req.params.provider as any;
+  quotaManager.resetProvider(provider);
+  res.json({ success: true, statuses: quotaManager.getAllStatuses() });
+});
+
+// 5. Local LLM Configuration Status
+app.get('/api/local-llm/status', requireAuth, (_req, res) => {
+  const config = localLLMService.getConfig();
+  res.json({ config });
+});
+
+// 6. Test Local LLM Live Connection
+app.post('/api/local-llm/test', requireAuth, async (_req, res) => {
+  try {
+    const health = await localLLMService.checkHealth();
+    if (health.connected) {
+      // Register local model into registry
+      modelRegistry.registerLocalModel(
+        localLLMService.getConfig().modelName,
+        health.endpointUrl
+      );
+    } else {
+      modelRegistry.removeLocalModels();
+    }
+    res.json(health);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Local LLM connection test failed' });
+  }
+});
+
+// 7. Update Local LLM Configuration
+app.put('/api/local-llm/config', requireAuth, async (req, res) => {
+  const { enabled, endpointUrl, modelName, timeoutMs } = req.body;
+  const updated = localLLMService.updateConfig({
+    enabled: enabled !== undefined ? Boolean(enabled) : undefined,
+    endpointUrl: typeof endpointUrl === 'string' ? endpointUrl.trim() : undefined,
+    modelName: typeof modelName === 'string' ? modelName.trim() : undefined,
+    timeoutMs: typeof timeoutMs === 'number' ? timeoutMs : undefined
+  });
+
+  if (updated.enabled) {
+    const health = await localLLMService.checkHealth();
+    if (health.connected) {
+      modelRegistry.registerLocalModel(updated.modelName, updated.endpointUrl);
+    }
+  } else {
+    modelRegistry.removeLocalModels();
+  }
+
+  res.json({ success: true, config: updated, models: modelRegistry.getAll() });
+});
+
+// 8. Result Cache Statistics & Management
+app.get('/api/cache/stats', requireAuth, (_req, res) => {
+  res.json({ stats: safeResultCache.getStats() });
+});
+
+app.post('/api/cache/clear', requireAuth, (req, res) => {
+  const buildId = req.body.buildId as string | undefined;
+  if (buildId) {
+    safeResultCache.invalidateBuild(buildId);
+  } else {
+    safeResultCache.invalidateUser(req.user!.id);
+  }
+  res.json({ success: true, stats: safeResultCache.getStats() });
+});
+
+// 9. Task Pause & Resume Controls
+app.post('/api/tasks/:id/pause', requireAuth, (req, res) => {
+  const taskId = req.params.id;
+  const { buildId, reason } = req.body;
+  if (!buildId) return res.status(400).json({ error: 'buildId is required' });
+
+  const build = db.getBuild(buildId);
+  if (!build || build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  TaskManager.pauseTask(buildId, taskId, reason || 'Manually paused by user');
+  res.json({ success: true, task: db.getTask(buildId, taskId) });
+});
+
+app.post('/api/tasks/:id/resume', requireAuth, (req, res) => {
+  const taskId = req.params.id;
+  const { buildId } = req.body;
+  if (!buildId) return res.status(400).json({ error: 'buildId is required' });
+
+  const build = db.getBuild(buildId);
+  if (!build || build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const success = TaskManager.resumeTask(buildId, taskId);
+  res.json({ success, task: db.getTask(buildId, taskId) });
+});
+
+// 10. Update Build Budget & Limits
+app.put('/api/builds/:id/budget', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build || build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const { costLimit, tokenBudget, maxDurationSeconds } = req.body;
+  if (typeof costLimit === 'number' && costLimit > 0) build.costLimit = costLimit;
+  if (typeof tokenBudget === 'number' && tokenBudget > 0) build.tokenBudget = tokenBudget;
+  if (typeof maxDurationSeconds === 'number' && maxDurationSeconds > 0) build.maxDurationSeconds = maxDurationSeconds;
+
+  db.saveBuild(build);
+  res.json({ success: true, build });
 });
 
 // Mount Vite in dev mode

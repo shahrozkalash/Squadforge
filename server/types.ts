@@ -28,12 +28,28 @@ export interface AgentSpec {
   responsibilities: string[];
 }
 
+export type ModelTier = 'free' | 'paid' | 'local';
+export type ModelCapabilityLevel = 'lightweight' | 'standard' | 'advanced' | 'flagship';
+export type AIProvider = 'gemini' | 'openrouter' | 'local' | 'direct' | 'none';
+
+export interface ModelPricing {
+  inputCostPerMillion: number;
+  outputCostPerMillion: number;
+  currency: 'USD';
+}
+
 export interface ModelConfig {
   id: string;
   displayName: string;
   providerModel: string;
+  provider?: AIProvider;
+  tier?: ModelTier;
   agentRole?: AgentRole;
   strengths: ModelStrength[];
+  capabilityLevel?: ModelCapabilityLevel;
+  contextWindow?: number;
+  pricing?: ModelPricing;
+  isLocal?: boolean;
   maxTokens: number;
   enabled: boolean;
   avatarColor: string;
@@ -51,6 +67,8 @@ export interface User {
   githubConnected: boolean;
   defaultRepo?: string;
   costLimitPerBuild: number; // in USD
+  tokenLimitPerBuild?: number;
+  routingPreference?: 'cost' | 'latency' | 'quality';
   enabledModelIds: string[];
   createdAt: number;
   updatedAt?: number;
@@ -84,6 +102,7 @@ export type TaskStatus =
   | 'completed'
   | 'failed'
   | 'cancelled'
+  | 'paused'
   | 'open'
   | 'claimed'
   | 'done';
@@ -110,6 +129,12 @@ export interface Task {
   dependencies?: string[]; // IDs of tasks that must be completed first
   assignedRole?: AgentRole;
   milestone?: string;
+  complexity?: 'lightweight' | 'standard' | 'flagship';
+  tokenBudget?: number;
+  actualTokensUsed?: number;
+  estimatedCost?: number;
+  isPaused?: boolean;
+  pausedReason?: string;
   executionLogs?: string[];
   verificationOutput?: {
     syntaxPassed?: boolean;
@@ -156,6 +181,10 @@ export type EventType =
   | 'checkpoint_reverted'
   | 'task_completed'
   | 'task_failed'
+  | 'task_paused'
+  | 'task_resumed'
+  | 'budget_warning'
+  | 'quota_warning'
   | 'verifier_started'
   | 'verifier_rejected'
   | 'verifier_approved'
@@ -242,6 +271,9 @@ export interface Build {
   totalTokens: number;
   totalCost: number;
   costLimit: number;
+  tokenBudget?: number;
+  routingPreference?: 'cost' | 'latency' | 'quality';
+  budgetWarningEmitted?: boolean;
   maxDurationSeconds: number;
   patchesAppliedCount: number;
   error?: string;
@@ -308,19 +340,32 @@ export type GatewayErrorCode =
   | 'UNSUPPORTED_MODEL' 
   | 'MALFORMED_OUTPUT' 
   | 'PROVIDER_ERROR' 
-  | 'NO_PROVIDER';
+  | 'NO_PROVIDER'
+  | 'QUOTA_EXHAUSTED'
+  | 'BUDGET_EXCEEDED'
+  | 'CONTEXT_OVERFLOW'
+  | 'COOLDOWN_ACTIVE'
+  | 'LOCAL_LLM_OFFLINE'
+  | 'AUTHENTICATION_REQUIRED';
 
 export interface GatewayResult {
   success: boolean;
   rawText: string;
   parsedResponse: ModelActionResponse | null;
   tokensUsed: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  isEstimatedTokens?: boolean;
   modelId: string;
   actualModelUsed: string;
-  providerUsed: 'openrouter' | 'gemini' | 'direct' | 'none';
+  providerUsed: 'openrouter' | 'gemini' | 'local' | 'direct' | 'none';
   isFallback: boolean;
   fallbackReason?: string;
+  isLocal?: boolean;
   latencyMs: number;
+  estimatedCost?: number;
+  actualCost?: number;
+  cached?: boolean;
   error?: string;
   errorCode?: GatewayErrorCode;
 }
@@ -330,4 +375,176 @@ export interface VerifierResponse {
   summary: string;
   missingRequirements?: string[];
   confidence?: number;
+}
+
+// --- QUOTA & RATE LIMITING TYPES ---
+export type ProviderHealthStatus = 
+  | 'healthy' 
+  | 'rate_limited' 
+  | 'quota_exhausted' 
+  | 'auth_error' 
+  | 'cooldown' 
+  | 'offline';
+
+export interface ProviderQuotaStatus {
+  provider: AIProvider;
+  modelId?: string;
+  status: ProviderHealthStatus;
+  consecutiveErrors: number;
+  cooldownUntil?: number; // epoch ms
+  retryAfterSeconds?: number;
+  reportedLimit?: number; // requests or tokens per minute/day if reported by provider
+  reportedRemaining?: number; // remaining quota if reported by provider
+  reportedResetTime?: number; // epoch ms if reported by provider
+  isEstimated: boolean; // true if estimated locally, false if provider-reported
+  lastError?: string;
+  lastErrorCode?: GatewayErrorCode;
+  lastUsedAt?: number;
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+}
+
+// --- LOCAL LLM TYPES ---
+export interface LocalLLMConfig {
+  enabled: boolean;
+  endpointUrl: string; // e.g. http://localhost:11434/v1
+  modelName: string;   // e.g. llama3.2, mistral, qwen2.5-coder
+  timeoutMs: number;
+  contextWindow: number;
+  status: 'untested' | 'connected' | 'disconnected' | 'error';
+  lastChecked?: number;
+  errorMessage?: string;
+  availableModels?: string[];
+}
+
+export interface LocalLLMHealthResult {
+  connected: boolean;
+  endpointUrl: string;
+  availableModels: string[];
+  selectedModelAvailable: boolean;
+  latencyMs: number;
+  error?: string;
+}
+
+// --- RESULT CACHING TYPES ---
+export type CacheCategory = 
+  | 'repo_summary' 
+  | 'architecture_analysis' 
+  | 'dependency_info' 
+  | 'file_summary' 
+  | 'deterministic_analysis';
+
+export interface CacheEntry<T = any> {
+  key: string;
+  category: CacheCategory;
+  userId?: string; // strictly isolated between users
+  buildId?: string;
+  modelId: string;
+  inputHash: string;
+  data: T;
+  estimatedTokensSaved: number;
+  hits: number;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface CacheStats {
+  hits: number;
+  misses: number;
+  entriesCount: number;
+  tokensSaved: number;
+  estimatedCostSaved: number;
+}
+
+// --- TOKEN OPTIMIZATION & BUDGETING TYPES ---
+export interface TokenBudgetConfig {
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  reservedForOutput: number;
+}
+
+export interface TokenEstimationResult {
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+  totalEstimatedTokens: number;
+  contextWindow: number;
+  fitsWithinContext: boolean;
+  reason?: string;
+}
+
+// --- USAGE TRACKING & DASHBOARD TYPES ---
+export interface UsageLogEntry {
+  id: string;
+  timestamp: number;
+  buildId: string;
+  taskId?: string;
+  taskTitle?: string;
+  agentRole?: AgentRole;
+  userId: string;
+  modelId: string;
+  requestedModelId: string;
+  actualModelUsed: string;
+  provider: AIProvider;
+  isFallback: boolean;
+  fallbackReason?: string;
+  isLocal: boolean;
+  estimatedTokens: number;
+  actualInputTokens?: number;
+  actualOutputTokens?: number;
+  totalTokens: number;
+  estimatedCost: number;
+  billedCost: number;
+  isCached: boolean;
+  latencyMs: number;
+  success: boolean;
+  error?: string;
+  errorCode?: GatewayErrorCode;
+}
+
+export interface SwarmUsageStats {
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+  totalEstimatedTokens: number;
+  totalActualTokens: number;
+  totalEstimatedCost: number;
+  totalBilledCost: number;
+  cacheStats: CacheStats;
+  providerStats: Record<string, {
+    requests: number;
+    tokens: number;
+    errors: number;
+    estimatedCost: number;
+    billedCost: number;
+    status: ProviderHealthStatus;
+  }>;
+  modelStats: Record<string, {
+    modelId: string;
+    displayName: string;
+    requests: number;
+    tokens: number;
+    errors: number;
+    estimatedCost: number;
+    fallbackCount: number;
+  }>;
+  agentStats: Record<string, {
+    role: AgentRole;
+    requests: number;
+    tokens: number;
+    tasksCompleted: number;
+    estimatedCost: number;
+  }>;
+  taskStats: Array<{
+    taskId: string;
+    taskTitle: string;
+    tokensUsed: number;
+    cost: number;
+    modelUsed: string;
+    status: TaskStatus;
+    isPaused?: boolean;
+    pausedReason?: string;
+  }>;
+  activeQuotas: Record<string, ProviderQuotaStatus>;
+  localLLM: LocalLLMConfig;
 }

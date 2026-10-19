@@ -64,6 +64,7 @@ export class TaskManager {
 
     // 1. Check if there are high-priority Fix tasks first (priority 1) whose dependencies are met
     const fixTasks = tasks.filter(t => 
+      !t.isPaused && t.status !== 'paused' &&
       (t.status === 'pending' || t.status === 'open' || t.status === 'retrying') && 
       t.priority === 1 &&
       this.areDependenciesMet(buildId, t)
@@ -73,6 +74,7 @@ export class TaskManager {
     // 2. If no fix tasks, find an eligible task matching agent role or strengths
     if (!chosenTask) {
       const eligibleTasks = tasks.filter(t => 
+        !t.isPaused && t.status !== 'paused' &&
         (t.status === 'pending' || t.status === 'open' || t.status === 'retrying') &&
         this.areDependenciesMet(buildId, t)
       );
@@ -278,6 +280,58 @@ export class TaskManager {
   }
 
   /**
+   * Pauses a task when its token budget or rate limit is reached
+   */
+  static pauseTask(buildId: string, taskId: string, reason: string): void {
+    const task = db.getTask(buildId, taskId);
+    if (!task) return;
+
+    db.updateTask(buildId, taskId, {
+      status: 'paused',
+      isPaused: true,
+      pausedReason: reason,
+      claimedBy: null,
+      leaseExpiresAt: null
+    });
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'task_released',
+      taskId,
+      details: `Task paused: "${task.title}". Reason: ${reason}`
+    });
+  }
+
+  /**
+   * Resumes a paused task, resetting its lease and making it claimable again
+   */
+  static resumeTask(buildId: string, taskId: string): boolean {
+    const task = db.getTask(buildId, taskId);
+    if (!task) return false;
+
+    db.updateTask(buildId, taskId, {
+      status: 'pending',
+      isPaused: false,
+      pausedReason: undefined,
+      claimedBy: null,
+      leaseExpiresAt: null
+    });
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'task_claimed',
+      taskId,
+      details: `Task resumed: "${task.title}". Returned to open task board.`
+    });
+
+    return true;
+  }
+
+  /**
    * Creates a new task with optional dependencies, role assignment, and milestone
    */
   static createNewTask(buildId: string, task: Omit<Task, 'id' | 'buildId' | 'status' | 'claimedBy' | 'leaseExpiresAt' | 'createdAt'>): Task {
@@ -289,6 +343,8 @@ export class TaskManager {
       status: 'pending',
       claimedBy: null,
       leaseExpiresAt: null,
+      actualTokensUsed: 0,
+      tokenBudget: task.tokenBudget || 25000,
       createdAt: Date.now()
     };
     db.addTask(buildId, fullTask);

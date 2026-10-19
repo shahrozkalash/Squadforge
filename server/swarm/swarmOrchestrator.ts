@@ -9,6 +9,7 @@ import { TaskManager } from './taskManager.js';
 import { MergeManager } from './mergeManager.js';
 import { SandboxRunner } from './sandboxRunner.js';
 import { GitHubService } from '../github.js';
+import { tokenOptimizer } from '../tokenOptimizer.js';
 import { 
   Build, 
   ModelConfig, 
@@ -426,14 +427,35 @@ Output ONLY JSON matching this structure:
       const build = db.getBuild(buildId);
       if (!build || build.status !== 'running') break;
 
-      // Check safety limits: cost & time
-      if (build.totalCost >= build.costLimit) {
+      // Check warning threshold: 80% of budget or tokens
+      const tokenCeiling = build.tokenBudget || 100000;
+      const isNearCostCeiling = build.totalCost >= build.costLimit * 0.8;
+      const isNearTokenCeiling = (build.totalTokens || 0) >= tokenCeiling * 0.8;
+
+      if ((isNearCostCeiling || isNearTokenCeiling) && !build.budgetWarningEmitted) {
+        build.budgetWarningEmitted = true;
+        db.saveBuild(build);
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: Date.now(),
+          type: 'budget_warning',
+          details: `Warning threshold reached: 80% of configured budget consumed ($${build.totalCost.toFixed(3)}/$${build.costLimit.toFixed(2)}, ${build.totalTokens}/${tokenCeiling} tokens). Run can be resumed or budget expanded from Usage Dashboard.`
+        });
+      }
+
+      // Check safety limits: cost, token budget, & time
+      if (build.totalCost >= build.costLimit || ((build.totalTokens || 0) >= tokenCeiling && build.tokenBudget)) {
+        const reason = build.totalCost >= build.costLimit 
+          ? `Cost safety limit reached ($${build.totalCost.toFixed(2)} >= $${build.costLimit.toFixed(2)}).`
+          : `Token budget limit reached (${build.totalTokens} >= ${tokenCeiling} tokens).`;
+
         db.addEvent({
           id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
           buildId,
           timestamp: Date.now(),
           type: 'build_stopped',
-          details: `Cost safety limit reached ($${build.totalCost.toFixed(2)} >= $${build.costLimit.toFixed(2)}). Halting swarm.`
+          details: `${reason} Halting swarm. Increase budget in Usage Dashboard to resume.`
         });
         control.stopRequested = true;
         break;
@@ -551,14 +573,23 @@ Output ONLY JSON matching this structure:
     const build = db.getBuild(buildId);
     if (!build) return;
 
-    // Gather context: existing files relevant to this task
-    const relevantFiles = task.filePaths
-      .map(p => db.getFile(buildId, p))
-      .filter(Boolean);
+    // Check per-task token budget to prevent runaways
+    const taskBudget = task.tokenBudget || 25000;
+    if ((task.actualTokensUsed || 0) >= taskBudget) {
+      TaskManager.pauseTask(buildId, task.id, `Task token budget reached (${task.actualTokensUsed}/${taskBudget} tokens)`);
+      return;
+    }
 
-    const filesContextText = relevantFiles.length > 0
-      ? relevantFiles.map(f => `--- FILE: ${f!.path} (v${f!.version}) ---\n${f!.content}`).join('\n\n')
-      : 'Target file does not exist yet. You must use "create_file".';
+    // Dynamic Context Selection: Selects ONLY target files and outline dependencies
+    const allProjectFiles = db.getAllFiles(buildId);
+    const filesContextText = tokenOptimizer.selectRelevantFilesContext(
+      task.filePaths,
+      allProjectFiles,
+      2800
+    );
+
+    // Compact summary of recent team achievements to prevent repeating work
+    const teamProgressSummary = tokenOptimizer.summarizeSwarmHistory(db.getEvents(buildId), 12);
 
     const roleSpec = model.agentRole ? AGENT_SPECS[model.agentRole] : undefined;
     const roleInstruction = roleSpec ? `YOUR SPECIALIZED ROLE: ${roleSpec.title}\nResponsibilities: ${roleSpec.responsibilities.join('; ')}` : '';
@@ -569,7 +600,10 @@ DESCRIPTION: ${task.description}
 TARGET FILES: ${task.filePaths.join(', ')}
 IS FIX TASK: ${task.isFixTask ? 'YES - Analyze the error and generate exact surgical find/replace fix' : 'NO'}
 
-EXISTING RELEVANT FILES CONTENT:
+TEAM PROGRESS CONTEXT:
+${teamProgressSummary}
+
+RELEVANT SOURCE CODE CONTEXT:
 ${filesContextText}
 
 Output valid JSON action(s) to accomplish this task.
@@ -586,23 +620,36 @@ Never write placeholder comments. Implement functional code.`;
 
       const res = await callUnifiedGateway({
         modelId: model.id,
+        task,
+        taskComplexity: task.complexity || (task.isFixTask ? 'flagship' : 'standard'),
         prompt,
         systemInstruction: SILENT_WORKER_SYSTEM_PROMPT,
-        allowFallback: true
+        allowFallback: true,
+        buildId,
+        userId: build.userId
       });
 
-      // Track usage
+      // Track usage on model and task
       const modelRun = db.getModelRun(buildId, model.id);
       const tokens = (modelRun?.tokensUsed || 0) + res.tokensUsed;
-      const cost = (modelRun?.estimatedCost || 0) + (res.tokensUsed * 0.000003);
+      const cost = (modelRun?.estimatedCost || 0) + (res.estimatedCost || (res.tokensUsed * 0.000003));
       db.updateModelRun(buildId, model.id, {
         tokensUsed: tokens,
         estimatedCost: cost
       });
 
+      // Update build tokens and costs
       build.totalTokens = (build.totalTokens || 0) + res.tokensUsed;
-      build.totalCost = (build.totalCost || 0) + (res.tokensUsed * 0.000003);
+      build.totalCost = (build.totalCost || 0) + (res.estimatedCost || (res.tokensUsed * 0.000003));
       db.saveBuild(build);
+
+      // Update task token usage
+      task.actualTokensUsed = (task.actualTokensUsed || 0) + res.tokensUsed;
+      task.estimatedCost = (task.estimatedCost || 0) + (res.estimatedCost || (res.tokensUsed * 0.000003));
+      db.updateTask(buildId, task.id, {
+        actualTokensUsed: task.actualTokensUsed,
+        estimatedCost: task.estimatedCost
+      });
 
       if (!res.success || !res.parsedResponse) {
         lastError = res.error || 'Generation failed: Model produced no valid JSON response';
@@ -668,6 +715,11 @@ Never write placeholder comments. Implement functional code.`;
         TaskManager.completeTask(buildId, task.id, model.id);
         taskDone = true;
       } else {
+        // Detect unproductive loop if attempts exhausted and zero edits succeeded
+        if (attempts >= 3 && appliedCount === 0 && (task.retryCount || 0) >= 2) {
+          TaskManager.pauseTask(buildId, task.id, `Unproductive agent loop: repeated patch rejections on ${task.filePaths.join(', ')} (${lastError})`);
+          return;
+        }
         await new Promise(r => setTimeout(r, 200));
       }
     }
@@ -695,6 +747,12 @@ Never write placeholder comments. Implement functional code.`;
       t.status === 'retrying'
     );
     if (incompleteTasks.length > 0) return;
+
+    // Check if any tasks are paused (e.g. token budget limit or rate limit)
+    const pausedTasks = tasks.filter(t => t.status === 'paused' || t.isPaused);
+    if (pausedTasks.length > 0) {
+      return; // Do not complete project while tasks are paused
+    }
 
     // 2. Check if any tasks failed
     const failedTasks = tasks.filter(t => t.status === 'failed');
@@ -740,7 +798,7 @@ Never write placeholder comments. Implement functional code.`;
       return;
     }
 
-    // 5. Call Objective Verifier Model
+    // 5. Call Objective Verifier Model (Flagship reasoning task)
     build.status = 'verifying';
     build.verificationAttempts = (build.verificationAttempts || 0) + 1;
     const currentAttempt = build.verificationAttempts;
@@ -773,9 +831,12 @@ Output ONLY JSON in this exact schema:
 
     const verifyResult = await callUnifiedGateway({
       modelId: 'claude',
+      taskComplexity: 'flagship',
       prompt: verifierPrompt,
       systemInstruction: 'You are an objective software verifier. Validate requirement coverage without bias. Output only JSON.',
-      allowFallback: true
+      allowFallback: true,
+      buildId: build.id,
+      userId: build.userId
     });
 
     const verifierData = parseVerifierResponse(verifyResult.rawText);

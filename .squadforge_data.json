@@ -10,8 +10,8 @@
       "enabledModelIds": [
         "gemini"
       ],
-      "createdAt": 1792420893089,
-      "updatedAt": 1792420893089
+      "createdAt": 1792422295683,
+      "updatedAt": 1792422295683
     }
   ],
   "sessions": [],
@@ -23,8 +23,8 @@
       "userId": "test_user",
       "idea": "Test Retry Exhaustion",
       "status": "running",
-      "createdAt": 1792420891706,
-      "updatedAt": 1792420891706,
+      "createdAt": 1792422294104,
+      "updatedAt": 1792422294104,
       "selectedModels": [
         "gemini"
       ],
@@ -40,8 +40,8 @@
       "userId": "test_user",
       "idea": "Test Sandbox Verification",
       "status": "running",
-      "createdAt": 1792420891710,
-      "updatedAt": 1792420891710,
+      "createdAt": 1792422294109,
+      "updatedAt": 1792422294109,
       "selectedModels": [
         "gemini"
       ],
@@ -57,8 +57,8 @@
       "userId": "test_user",
       "idea": "Security Test",
       "status": "running",
-      "createdAt": 1792420891709,
-      "updatedAt": 1792420891709,
+      "createdAt": 1792422294108,
+      "updatedAt": 1792422294108,
       "selectedModels": [
         "gemini"
       ],
@@ -94,8 +94,8 @@
       "userId": "test_user",
       "idea": "Clean Build",
       "status": "running",
-      "createdAt": 1792420891710,
-      "updatedAt": 1792420891710,
+      "createdAt": 1792422294109,
+      "updatedAt": 1792422294109,
       "selectedModels": [
         "gemini"
       ],
@@ -127,8 +127,8 @@
       "userId": "usr_tenant_A",
       "idea": "User A Secret App",
       "status": "planning",
-      "createdAt": 1792420893092,
-      "updatedAt": 1792420893092,
+      "createdAt": 1792422295685,
+      "updatedAt": 1792422295685,
       "selectedModels": [
         "gemini"
       ],
@@ -144,8 +144,8 @@
       "userId": "usr_tenant_B",
       "idea": "User B Public App",
       "status": "planning",
-      "createdAt": 1792420893092,
-      "updatedAt": 1792420893092,
+      "createdAt": 1792422295685,
+      "updatedAt": 1792422295685,
       "selectedModels": [
         "gemini"
       ],
@@ -596,6 +596,233 @@
         "claimedBy": null,
         "leaseExpiresAt": null,
         "createdAt": 1792420891706
+      },
+      {
+        "title": "Flaky Integration Task",
+        "description": "Will fail multiple times",
+        "filePaths": [
+          "src/flaky.ts"
+        ],
+        "priority": 2,
+        "maxRetries": 3,
+        "id": "tsk_1792421364100_55am",
+        "buildId": "test_retry_build_123",
+        "status": "failed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421364100,
+        "retryCount": 2,
+        "error": "Exhausted retries (3/3): Compile error attempt 3",
+        "lastError": "Exhausted retries (3/3): Compile error attempt 3"
+      },
+      {
+        "title": "Successful Task",
+        "description": "Completes cleanly",
+        "filePaths": [
+          "src/success.ts"
+        ],
+        "priority": 2,
+        "id": "tsk_1792421364102_d47j",
+        "buildId": "test_retry_build_123",
+        "status": "completed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421364102,
+        "completedAt": 1792421364103,
+        "verificationOutput": {
+          "syntaxPassed": true,
+          "testsPassed": true
+        }
+      },
+      {
+        "title": "Database Schema Design",
+        "description": "Create initial database schema",
+        "filePaths": [
+          "src/db/schema.ts"
+        ],
+        "priority": 2,
+        "id": "tsk_1792421364104_vk78",
+        "buildId": "test_retry_build_123",
+        "status": "completed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421364104,
+        "completedAt": 1792421364104,
+        "verificationOutput": {
+          "syntaxPassed": true,
+          "testsPassed": true
+        }
+      },
+      {
+        "title": "Backend API using Database",
+        "description": "Endpoints that query the database",
+        "filePaths": [
+          "src/api/routes.ts"
+        ],
+        "priority": 2,
+        "dependencies": [
+          "tsk_1792421364104_vk78"
+        ],
+        "id": "tsk_1792421364104_2wsp",
+        "buildId": "test_retry_build_123",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421364104
+      },
+      {
+        "title": "Flaky Integration Task",
+        "description": "Will fail multiple times",
+        "filePaths": [
+          "src/flaky.ts"
+        ],
+        "priority": 2,
+        "maxRetries": 3,
+        "id": "tsk_1792421869631_bk9y",
+        "buildId": "test_retry_build_123",
+        "status": "failed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421869631,
+        "retryCount": 2,
+        "error": "Exhausted retries (3/3): Compile error attempt 3",
+        "lastError": "Exhausted retries (3/3): Compile error attempt 3"
+      },
+      {
+        "title": "Successful Task",
+        "description": "Completes cleanly",
+        "filePaths": [
+          "src/success.ts"
+        ],
+        "priority": 2,
+        "id": "tsk_1792421869633_ujfh",
+        "buildId": "test_retry_build_123",
+        "status": "completed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421869633,
+        "completedAt": 1792421869633,
+        "verificationOutput": {
+          "syntaxPassed": true,
+          "testsPassed": true
+        }
+      },
+      {
+        "title": "Database Schema Design",
+        "description": "Create initial database schema",
+        "filePaths": [
+          "src/db/schema.ts"
+        ],
+        "priority": 2,
+        "id": "tsk_1792421869634_z3gw",
+        "buildId": "test_retry_build_123",
+        "status": "completed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421869634,
+        "completedAt": 1792421869634,
+        "verificationOutput": {
+          "syntaxPassed": true,
+          "testsPassed": true
+        }
+      },
+      {
+        "title": "Backend API using Database",
+        "description": "Endpoints that query the database",
+        "filePaths": [
+          "src/api/routes.ts"
+        ],
+        "priority": 2,
+        "dependencies": [
+          "tsk_1792421869634_z3gw"
+        ],
+        "id": "tsk_1792421869634_ttog",
+        "buildId": "test_retry_build_123",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421869634
+      },
+      {
+        "title": "Flaky Integration Task",
+        "description": "Will fail multiple times",
+        "filePaths": [
+          "src/flaky.ts"
+        ],
+        "priority": 2,
+        "maxRetries": 3,
+        "id": "tsk_1792422294100_hn5j",
+        "buildId": "test_retry_build_123",
+        "status": "failed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "actualTokensUsed": 0,
+        "tokenBudget": 25000,
+        "createdAt": 1792422294100,
+        "retryCount": 2,
+        "error": "Exhausted retries (3/3): Compile error attempt 3",
+        "lastError": "Exhausted retries (3/3): Compile error attempt 3"
+      },
+      {
+        "title": "Successful Task",
+        "description": "Completes cleanly",
+        "filePaths": [
+          "src/success.ts"
+        ],
+        "priority": 2,
+        "id": "tsk_1792422294103_xp9u",
+        "buildId": "test_retry_build_123",
+        "status": "completed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "actualTokensUsed": 0,
+        "tokenBudget": 25000,
+        "createdAt": 1792422294103,
+        "completedAt": 1792422294103,
+        "verificationOutput": {
+          "syntaxPassed": true,
+          "testsPassed": true
+        }
+      },
+      {
+        "title": "Database Schema Design",
+        "description": "Create initial database schema",
+        "filePaths": [
+          "src/db/schema.ts"
+        ],
+        "priority": 2,
+        "id": "tsk_1792422294104_deh1",
+        "buildId": "test_retry_build_123",
+        "status": "completed",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "actualTokensUsed": 0,
+        "tokenBudget": 25000,
+        "createdAt": 1792422294104,
+        "completedAt": 1792422294104,
+        "verificationOutput": {
+          "syntaxPassed": true,
+          "testsPassed": true
+        }
+      },
+      {
+        "title": "Backend API using Database",
+        "description": "Endpoints that query the database",
+        "filePaths": [
+          "src/api/routes.ts"
+        ],
+        "priority": 2,
+        "dependencies": [
+          "tsk_1792422294104_deh1"
+        ],
+        "id": "tsk_1792422294104_j9a8",
+        "buildId": "test_retry_build_123",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "actualTokensUsed": 0,
+        "tokenBudget": 25000,
+        "createdAt": 1792422294104
       }
     ],
     "test_sandbox_build_456": [
@@ -694,6 +921,56 @@
         "claimedBy": null,
         "leaseExpiresAt": null,
         "createdAt": 1792420891709
+      },
+      {
+        "title": "Fix Error in src/broken.ts",
+        "description": "Sandbox check failed: Unclosed '{' opened at line 1. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/broken.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792421364108_09ab",
+        "buildId": "test_sandbox_build_456",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421364108
+      },
+      {
+        "title": "Fix Error in src/broken.ts",
+        "description": "Sandbox check failed: Unclosed '{' opened at line 1. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/broken.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792421869636_8zx3",
+        "buildId": "test_sandbox_build_456",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421869636
+      },
+      {
+        "title": "Fix Error in src/broken.ts",
+        "description": "Sandbox check failed: Unclosed '{' opened at line 1. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/broken.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792422294107_n74o",
+        "buildId": "test_sandbox_build_456",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "actualTokensUsed": 0,
+        "tokenBudget": 25000,
+        "createdAt": 1792422294107
       }
     ],
     "test_security_audit_build": [
@@ -888,6 +1165,106 @@
         "claimedBy": null,
         "leaseExpiresAt": null,
         "createdAt": 1792420891710
+      },
+      {
+        "title": "Fix Error in src/insecure.ts",
+        "description": "Sandbox check failed: Security vulnerability: Hardcoded API secret key detected in src/insecure.ts. Use environment variables.. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/insecure.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792421364109_j2by",
+        "buildId": "test_security_audit_build",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421364109
+      },
+      {
+        "title": "Fix Error in src/insecure.ts",
+        "description": "Sandbox check failed: Security vulnerability: Use of dangerous eval() detected in src/insecure.ts. Refactor to safe alternative.. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/insecure.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792421364109_gcrw",
+        "buildId": "test_security_audit_build",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421364109
+      },
+      {
+        "title": "Fix Error in src/insecure.ts",
+        "description": "Sandbox check failed: Security vulnerability: Hardcoded API secret key detected in src/insecure.ts. Use environment variables.. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/insecure.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792421869638_d2rq",
+        "buildId": "test_security_audit_build",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421869638
+      },
+      {
+        "title": "Fix Error in src/insecure.ts",
+        "description": "Sandbox check failed: Security vulnerability: Use of dangerous eval() detected in src/insecure.ts. Refactor to safe alternative.. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/insecure.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792421869638_pg3y",
+        "buildId": "test_security_audit_build",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "createdAt": 1792421869638
+      },
+      {
+        "title": "Fix Error in src/insecure.ts",
+        "description": "Sandbox check failed: Security vulnerability: Hardcoded API secret key detected in src/insecure.ts. Use environment variables.. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/insecure.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792422294108_78ax",
+        "buildId": "test_security_audit_build",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "actualTokensUsed": 0,
+        "tokenBudget": 25000,
+        "createdAt": 1792422294108
+      },
+      {
+        "title": "Fix Error in src/insecure.ts",
+        "description": "Sandbox check failed: Security vulnerability: Use of dangerous eval() detected in src/insecure.ts. Refactor to safe alternative.. Analyze root cause and patch cleanly.",
+        "filePaths": [
+          "src/insecure.ts"
+        ],
+        "priority": 1,
+        "isFixTask": true,
+        "assignedRole": "debugging_specialist",
+        "id": "tsk_1792422294108_a20c",
+        "buildId": "test_security_audit_build",
+        "status": "pending",
+        "claimedBy": null,
+        "leaseExpiresAt": null,
+        "actualTokensUsed": 0,
+        "tokenBudget": 25000,
+        "createdAt": 1792422294108
       }
     ]
   },
@@ -1430,6 +1807,237 @@
         "taskId": "tsk_1792420891706_cfbf",
         "modelId": "nemotron",
         "details": "nemotron completed task: \"Database Schema Design\""
+      },
+      {
+        "id": "evt_1792421364100_u104i",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364100,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421364100_55am",
+        "details": "New task added to living board: \"Flaky Integration Task\""
+      },
+      {
+        "id": "evt_1792421364101_gca5m",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364101,
+        "type": "task_released",
+        "taskId": "tsk_1792421364100_55am",
+        "modelId": "model-1",
+        "details": "model-1 released task \"Flaky Integration Task\" (attempt 1/3): Compile error attempt 1"
+      },
+      {
+        "id": "evt_1792421364101_qmh4n",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364101,
+        "type": "task_released",
+        "taskId": "tsk_1792421364100_55am",
+        "modelId": "model-2",
+        "details": "model-2 released task \"Flaky Integration Task\" (attempt 2/3): Compile error attempt 2"
+      },
+      {
+        "id": "evt_1792421364101_m0hw2",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364101,
+        "type": "task_failed",
+        "taskId": "tsk_1792421364100_55am",
+        "modelId": "model-3",
+        "details": "Task failed: \"Flaky Integration Task\". Reason: Exhausted retries (3/3): Compile error attempt 3"
+      },
+      {
+        "id": "evt_1792421364102_83t55",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364102,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421364102_d47j",
+        "details": "New task added to living board: \"Successful Task\""
+      },
+      {
+        "id": "evt_1792421364103_vzw7g",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364103,
+        "type": "task_completed",
+        "taskId": "tsk_1792421364102_d47j",
+        "modelId": "gemini",
+        "details": "gemini completed task: \"Successful Task\""
+      },
+      {
+        "id": "evt_1792421364104_dqy85",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364104,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421364104_vk78",
+        "details": "New task added to living board: \"Database Schema Design\""
+      },
+      {
+        "id": "evt_1792421364104_nx9a3",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364104,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421364104_2wsp",
+        "details": "New task added to living board: \"Backend API using Database\""
+      },
+      {
+        "id": "evt_1792421364104_flbzv",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421364104,
+        "type": "task_completed",
+        "taskId": "tsk_1792421364104_vk78",
+        "modelId": "nemotron",
+        "details": "nemotron completed task: \"Database Schema Design\""
+      },
+      {
+        "id": "evt_1792421869631_pff5o",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869631,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421869631_bk9y",
+        "details": "New task added to living board: \"Flaky Integration Task\""
+      },
+      {
+        "id": "evt_1792421869632_x9lzz",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869632,
+        "type": "task_released",
+        "taskId": "tsk_1792421869631_bk9y",
+        "modelId": "model-1",
+        "details": "model-1 released task \"Flaky Integration Task\" (attempt 1/3): Compile error attempt 1"
+      },
+      {
+        "id": "evt_1792421869632_7nluq",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869632,
+        "type": "task_released",
+        "taskId": "tsk_1792421869631_bk9y",
+        "modelId": "model-2",
+        "details": "model-2 released task \"Flaky Integration Task\" (attempt 2/3): Compile error attempt 2"
+      },
+      {
+        "id": "evt_1792421869632_1yaqb",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869632,
+        "type": "task_failed",
+        "taskId": "tsk_1792421869631_bk9y",
+        "modelId": "model-3",
+        "details": "Task failed: \"Flaky Integration Task\". Reason: Exhausted retries (3/3): Compile error attempt 3"
+      },
+      {
+        "id": "evt_1792421869633_l6xvg",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869633,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421869633_ujfh",
+        "details": "New task added to living board: \"Successful Task\""
+      },
+      {
+        "id": "evt_1792421869633_o7svi",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869633,
+        "type": "task_completed",
+        "taskId": "tsk_1792421869633_ujfh",
+        "modelId": "gemini",
+        "details": "gemini completed task: \"Successful Task\""
+      },
+      {
+        "id": "evt_1792421869634_5ec0c",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869634,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421869634_z3gw",
+        "details": "New task added to living board: \"Database Schema Design\""
+      },
+      {
+        "id": "evt_1792421869634_k2g1b",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869634,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421869634_ttog",
+        "details": "New task added to living board: \"Backend API using Database\""
+      },
+      {
+        "id": "evt_1792421869634_7p6df",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792421869634,
+        "type": "task_completed",
+        "taskId": "tsk_1792421869634_z3gw",
+        "modelId": "nemotron",
+        "details": "nemotron completed task: \"Database Schema Design\""
+      },
+      {
+        "id": "evt_1792422294100_wcrv0",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294100,
+        "type": "task_claimed",
+        "taskId": "tsk_1792422294100_hn5j",
+        "details": "New task added to living board: \"Flaky Integration Task\""
+      },
+      {
+        "id": "evt_1792422294101_3mxqa",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294102,
+        "type": "task_released",
+        "taskId": "tsk_1792422294100_hn5j",
+        "modelId": "model-1",
+        "details": "model-1 released task \"Flaky Integration Task\" (attempt 1/3): Compile error attempt 1"
+      },
+      {
+        "id": "evt_1792422294102_w9d5t",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294102,
+        "type": "task_released",
+        "taskId": "tsk_1792422294100_hn5j",
+        "modelId": "model-2",
+        "details": "model-2 released task \"Flaky Integration Task\" (attempt 2/3): Compile error attempt 2"
+      },
+      {
+        "id": "evt_1792422294102_cg2d2",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294102,
+        "type": "task_failed",
+        "taskId": "tsk_1792422294100_hn5j",
+        "modelId": "model-3",
+        "details": "Task failed: \"Flaky Integration Task\". Reason: Exhausted retries (3/3): Compile error attempt 3"
+      },
+      {
+        "id": "evt_1792422294103_h3m17",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294103,
+        "type": "task_claimed",
+        "taskId": "tsk_1792422294103_xp9u",
+        "details": "New task added to living board: \"Successful Task\""
+      },
+      {
+        "id": "evt_1792422294103_huo2d",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294103,
+        "type": "task_completed",
+        "taskId": "tsk_1792422294103_xp9u",
+        "modelId": "gemini",
+        "details": "gemini completed task: \"Successful Task\""
+      },
+      {
+        "id": "evt_1792422294104_hk7y0",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294104,
+        "type": "task_claimed",
+        "taskId": "tsk_1792422294104_deh1",
+        "details": "New task added to living board: \"Database Schema Design\""
+      },
+      {
+        "id": "evt_1792422294104_m8kli",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294104,
+        "type": "task_claimed",
+        "taskId": "tsk_1792422294104_j9a8",
+        "details": "New task added to living board: \"Backend API using Database\""
+      },
+      {
+        "id": "evt_1792422294104_8tm83",
+        "buildId": "test_retry_build_123",
+        "timestamp": 1792422294104,
+        "type": "task_completed",
+        "taskId": "tsk_1792422294104_deh1",
+        "modelId": "nemotron",
+        "details": "nemotron completed task: \"Database Schema Design\""
       }
     ],
     "test_sandbox_build_456": [
@@ -1575,6 +2183,78 @@
         "timestamp": 1792420891709,
         "type": "task_claimed",
         "taskId": "tsk_1792420891709_nu0i",
+        "details": "New task added to living board: \"Fix Error in src/broken.ts\""
+      },
+      {
+        "id": "evt_1792421364106_vjxan",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792421364106,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/broken.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792421364108_oktf6",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792421364108,
+        "type": "sandbox_check",
+        "details": "Sandbox detected 1 issue(s) (0 failed tests, 0 security warnings). Scheduling targeted fix tasks."
+      },
+      {
+        "id": "evt_1792421364108_pz2hf",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792421364108,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421364108_09ab",
+        "details": "New task added to living board: \"Fix Error in src/broken.ts\""
+      },
+      {
+        "id": "evt_1792421869635_enw0s",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792421869635,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/broken.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792421869636_84uic",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792421869636,
+        "type": "sandbox_check",
+        "details": "Sandbox detected 1 issue(s) (0 failed tests, 0 security warnings). Scheduling targeted fix tasks."
+      },
+      {
+        "id": "evt_1792421869636_efxj2",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792421869636,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421869636_8zx3",
+        "details": "New task added to living board: \"Fix Error in src/broken.ts\""
+      },
+      {
+        "id": "evt_1792422294106_dmhcp",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792422294106,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/broken.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792422294107_doayg",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792422294107,
+        "type": "sandbox_check",
+        "details": "Sandbox detected 1 issue(s) (0 failed tests, 0 security warnings). Scheduling targeted fix tasks."
+      },
+      {
+        "id": "evt_1792422294107_g96ob",
+        "buildId": "test_sandbox_build_456",
+        "timestamp": 1792422294107,
+        "type": "task_claimed",
+        "taskId": "tsk_1792422294107_n74o",
         "details": "New task added to living board: \"Fix Error in src/broken.ts\""
       }
     ],
@@ -1770,6 +2450,102 @@
         "type": "task_claimed",
         "taskId": "tsk_1792420891710_ufo4",
         "details": "New task added to living board: \"Fix Error in src/insecure.ts\""
+      },
+      {
+        "id": "evt_1792421364109_o9tsp",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792421364109,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/insecure.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792421364109_lom65",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792421364109,
+        "type": "sandbox_check",
+        "details": "Sandbox detected 2 issue(s) (0 failed tests, 2 security warnings). Scheduling targeted fix tasks."
+      },
+      {
+        "id": "evt_1792421364109_qysmd",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792421364109,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421364109_j2by",
+        "details": "New task added to living board: \"Fix Error in src/insecure.ts\""
+      },
+      {
+        "id": "evt_1792421364109_mltag",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792421364109,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421364109_gcrw",
+        "details": "New task added to living board: \"Fix Error in src/insecure.ts\""
+      },
+      {
+        "id": "evt_1792421869637_78q7z",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792421869637,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/insecure.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792421869637_7qdhl",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792421869637,
+        "type": "sandbox_check",
+        "details": "Sandbox detected 2 issue(s) (0 failed tests, 2 security warnings). Scheduling targeted fix tasks."
+      },
+      {
+        "id": "evt_1792421869638_mbvu1",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792421869638,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421869638_d2rq",
+        "details": "New task added to living board: \"Fix Error in src/insecure.ts\""
+      },
+      {
+        "id": "evt_1792421869638_o8eip",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792421869638,
+        "type": "task_claimed",
+        "taskId": "tsk_1792421869638_pg3y",
+        "details": "New task added to living board: \"Fix Error in src/insecure.ts\""
+      },
+      {
+        "id": "evt_1792422294108_qo636",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792422294108,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/insecure.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792422294108_k1c31",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792422294108,
+        "type": "sandbox_check",
+        "details": "Sandbox detected 2 issue(s) (0 failed tests, 2 security warnings). Scheduling targeted fix tasks."
+      },
+      {
+        "id": "evt_1792422294108_ih6sz",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792422294108,
+        "type": "task_claimed",
+        "taskId": "tsk_1792422294108_78ax",
+        "details": "New task added to living board: \"Fix Error in src/insecure.ts\""
+      },
+      {
+        "id": "evt_1792422294108_y3nt5",
+        "buildId": "test_security_audit_build",
+        "timestamp": 1792422294108,
+        "type": "task_claimed",
+        "taskId": "tsk_1792422294108_a20c",
+        "details": "New task added to living board: \"Fix Error in src/insecure.ts\""
       }
     ],
     "test_clean_build_789": [
@@ -1964,6 +2740,102 @@
         "timestamp": 1792420891711,
         "type": "checkpoint_saved",
         "details": "Checkpoint saved: \"Build verified: 2 files, 1 tests passing\" (2 files verified)"
+      },
+      {
+        "id": "evt_1792421364110_gob1m",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421364110,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/clean.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792421364110_w6wou",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421364110,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "tests/engine.test.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792421364111_dzize",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421364111,
+        "type": "sandbox_check",
+        "details": "Sandbox checks passed cleanly (0 errors across 2 files, 1 tests passed, security score: 100/100)."
+      },
+      {
+        "id": "evt_1792421364111_q22fy",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421364111,
+        "type": "checkpoint_saved",
+        "details": "Checkpoint saved: \"Build verified: 2 files, 1 tests passing\" (2 files verified)"
+      },
+      {
+        "id": "evt_1792421869638_kac2u",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421869638,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/clean.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792421869638_aqygi",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421869638,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "tests/engine.test.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792421869639_9yk2f",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421869639,
+        "type": "sandbox_check",
+        "details": "Sandbox checks passed cleanly (0 errors across 2 files, 1 tests passed, security score: 100/100)."
+      },
+      {
+        "id": "evt_1792421869639_skwpg",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421869639,
+        "type": "checkpoint_saved",
+        "details": "Checkpoint saved: \"Build verified: 2 files, 1 tests passing\" (2 files verified)"
+      },
+      {
+        "id": "evt_1792422294109_u70gl",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792422294109,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "src/clean.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792422294109_n1c2r",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792422294109,
+        "type": "patch_rejected",
+        "modelId": "test-model",
+        "filePath": "tests/engine.test.ts",
+        "details": "Rejected create_file from test-model: File already exists. Use patch_file."
+      },
+      {
+        "id": "evt_1792422294109_mdrte",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792422294109,
+        "type": "sandbox_check",
+        "details": "Sandbox checks passed cleanly (0 errors across 2 files, 1 tests passed, security score: 100/100)."
+      },
+      {
+        "id": "evt_1792422294110_wfx3e",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792422294110,
+        "type": "checkpoint_saved",
+        "details": "Checkpoint saved: \"Build verified: 2 files, 1 tests passing\" (2 files verified)"
       }
     ]
   },
@@ -2028,6 +2900,39 @@
         "id": "chk_1792420891711_1u46",
         "buildId": "test_clean_build_789",
         "timestamp": 1792420891711,
+        "description": "Build verified: 2 files, 1 tests passing",
+        "filesSnapshot": {
+          "src/clean.ts": "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+          "tests/engine.test.ts": "import test from \"node:test\";\ntest(\"adds numbers\", () => {});\n"
+        },
+        "patchCount": 0
+      },
+      {
+        "id": "chk_1792421364111_3ylq",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421364111,
+        "description": "Build verified: 2 files, 1 tests passing",
+        "filesSnapshot": {
+          "src/clean.ts": "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+          "tests/engine.test.ts": "import test from \"node:test\";\ntest(\"adds numbers\", () => {});\n"
+        },
+        "patchCount": 0
+      },
+      {
+        "id": "chk_1792421869639_w430",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792421869639,
+        "description": "Build verified: 2 files, 1 tests passing",
+        "filesSnapshot": {
+          "src/clean.ts": "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+          "tests/engine.test.ts": "import test from \"node:test\";\ntest(\"adds numbers\", () => {});\n"
+        },
+        "patchCount": 0
+      },
+      {
+        "id": "chk_1792422294110_eym9",
+        "buildId": "test_clean_build_789",
+        "timestamp": 1792422294110,
         "description": "Build verified: 2 files, 1 tests passing",
         "filesSnapshot": {
           "src/clean.ts": "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
