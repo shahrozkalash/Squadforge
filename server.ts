@@ -1,3 +1,4 @@
+import http from 'node:http';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
@@ -26,7 +27,17 @@ import { HonestVerificationService } from './server/verificationService.js';
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+
+function resolvePort(): number {
+  const portArgIndex = process.argv.indexOf('--port');
+  if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
+    const val = parseInt(process.argv[portArgIndex + 1], 10);
+    if (!isNaN(val) && val > 0) return val;
+  }
+  return 3000;
+}
+
+const PORT = resolvePort();
 const SESSION_COOKIE_NAME = 'squadforge_session';
 
 // Augment express request type for authenticated user
@@ -1227,14 +1238,27 @@ app.put('/api/builds/:id/budget', requireAuth, (req, res) => {
 
 // Mount Vite in dev mode
 async function startServer() {
+  const server = http.createServer(app);
+
   const vite = await createViteServer({
-    server: { middlewareMode: true },
+    server: { 
+      middlewareMode: true,
+      hmr: { server }
+    },
     appType: 'spa',
   });
 
   app.use(vite.middlewares);
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use by another process.`);
+    } else {
+      console.error('Server error encountered:', err);
+    }
+  });
+
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`SquadForge Autonomous Team Server running on http://0.0.0.0:${PORT}`);
   });
 
@@ -1254,4 +1278,7 @@ async function startServer() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('Fatal error starting server:', err);
+  process.exit(1);
+});
