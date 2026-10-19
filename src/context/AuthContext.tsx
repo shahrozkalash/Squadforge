@@ -4,8 +4,12 @@ import { User } from '../types/index.js';
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  login: (email: string, name?: string) => Promise<void>;
+  isAuthenticated: boolean;
+  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  register: (name: string, email: string, password: string, confirmPassword: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
+  requestPasswordReset: (email: string) => Promise<{ success: boolean; message: string; error?: string; devToken?: string }>;
+  resetPassword: (token: string, newPassword: string, confirmPassword: string) => Promise<{ success: boolean; message?: string; error?: string }>;
   connectGitHubOAuth: () => Promise<void>;
   connectGitHubPAT: (token: string, username?: string) => Promise<boolean>;
   disconnectGitHub: () => Promise<void>;
@@ -25,9 +29,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (res.ok) {
         const data = await res.json();
         setUser(data.user);
+      } else {
+        setUser(null);
       }
     } catch (err) {
-      console.error('Failed to load user:', err);
+      console.error('Failed to load user session:', err);
+      setUser(null);
     } finally {
       setLoading(false);
     }
@@ -41,7 +48,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost')) {
+      if (!origin.endsWith('.run.app') && !origin.includes('localhost') && !origin.includes('0.0.0.0')) {
         return;
       }
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
@@ -52,21 +59,97 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  const login = async (email: string, name?: string) => {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, name: name || email.split('@')[0] })
-    });
-    if (res.ok) {
+  const login = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
       const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Invalid email or password.' };
+      }
       setUser(data.user);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error occurred during login.' };
+    }
+  };
+
+  const register = async (
+    name: string, 
+    email: string, 
+    password: string, 
+    confirmPassword: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const res = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, password, confirmPassword })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Failed to create account.' };
+      }
+      setUser(data.user);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error occurred during registration.' };
     }
   };
 
   const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
-    setUser(null);
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (err) {
+      console.warn('Logout network error:', err);
+    } finally {
+      setUser(null);
+    }
+  };
+
+  const requestPasswordReset = async (email: string): Promise<{ success: boolean; message: string; error?: string; devToken?: string }> => {
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, message: '', error: data.error || 'Failed to request password reset.' };
+      }
+      return { 
+        success: true, 
+        message: data.message || 'If an account exists, instructions have been sent.',
+        devToken: data.devToken
+      };
+    } catch (err: any) {
+      return { success: false, message: '', error: err.message || 'Network error occurred.' };
+    }
+  };
+
+  const resetPassword = async (
+    token: string, 
+    newPassword: string, 
+    confirmPassword: string
+  ): Promise<{ success: boolean; message?: string; error?: string }> => {
+    try {
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, newPassword, confirmPassword })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return { success: false, error: data.error || 'Failed to reset password.' };
+      }
+      return { success: true, message: data.message };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error occurred.' };
+    }
   };
 
   const connectGitHubOAuth = async () => {
@@ -75,7 +158,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!res.ok) throw new Error('Failed to get GitHub auth URL');
       const { url } = await res.json();
 
-      // Open OAuth provider directly in popup per OAuth skill
       const authWindow = window.open(
         url,
         'oauth_popup',
@@ -83,7 +165,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       );
 
       if (!authWindow) {
-        alert('Please allow popups for this site to connect GitHub.');
+        console.warn('Popup blocked by browser. Please allow popups.');
       }
     } catch (err) {
       console.error('OAuth initiation error:', err);
@@ -129,8 +211,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <AuthContext.Provider value={{
       user,
       loading,
+      isAuthenticated: Boolean(user),
       login,
+      register,
       logout,
+      requestPasswordReset,
+      resetPassword,
       connectGitHubOAuth,
       connectGitHubPAT,
       disconnectGitHub,

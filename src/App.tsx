@@ -10,6 +10,8 @@ import { BuildHistoryView } from './components/BuildHistoryView.js';
 import { SettingsView } from './components/SettingsView.js';
 import { AuthModal } from './components/AuthModal.js';
 import { ConcurrencyTestModal } from './components/ConcurrencyTestModal.js';
+import { AuthPage } from './components/AuthPage.js';
+import { Cpu } from 'lucide-react';
 
 function DashboardContent() {
   const [currentTab, setCurrentTab] = useState<NavTab>('dashboard');
@@ -86,12 +88,37 @@ function DashboardContent() {
   );
 }
 
+function AppRoot() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center p-6 text-neutral-400 font-sans">
+        <div className="w-14 h-14 rounded-2xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center text-amber-400 mb-4 animate-pulse">
+          <Cpu className="w-7 h-7" />
+        </div>
+        <p className="text-sm font-semibold text-neutral-200">Verifying SquadForge secure session...</p>
+        <p className="text-xs text-neutral-500 font-mono mt-1">Zero-Trust Environment Security Gate</p>
+      </div>
+    );
+  }
+
+  // Mandatory Authentication: Unauthenticated visitors must not be able to access the dashboard or features
+  if (!user) {
+    return <AuthPage />;
+  }
+
+  return (
+    <SwarmProvider>
+      <DashboardContent />
+    </SwarmProvider>
+  );
+}
+
 export default function App() {
   return (
     <AuthProvider>
-      <SwarmProvider>
-        <DashboardContent />
-      </SwarmProvider>
+      <AppRoot />
     </AuthProvider>
   );
 }

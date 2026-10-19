@@ -45,12 +45,33 @@ export interface User {
   id: string;
   email: string;
   name: string;
+  passwordHash?: string;
   avatarUrl?: string;
   githubUsername?: string;
   githubConnected: boolean;
   defaultRepo?: string;
   costLimitPerBuild: number; // in USD
   enabledModelIds: string[];
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export type SafeUser = Omit<User, 'passwordHash'>;
+
+export interface Session {
+  id: string; // SHA-256 of session token
+  userId: string;
+  expiresAt: number; // epoch ms
+  createdAt: number;
+  ip?: string;
+  userAgent?: string;
+}
+
+export interface PasswordResetToken {
+  id: string; // SHA-256 of reset token
+  userId: string;
+  email: string;
+  expiresAt: number; // epoch ms
   createdAt: number;
 }
 

@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext.js';
 import { useSwarm } from '../context/SwarmContext.js';
-import { Github, Play, Square, Activity, GitBranch } from 'lucide-react';
+import { Github, Play, Square, Activity, GitBranch, LogOut } from 'lucide-react';
 
 export type NavTab = 'dashboard' | 'live' | 'code' | 'merge' | 'builds' | 'settings' | 'test';
 
@@ -18,7 +18,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAuth,
   onOpenTestModal
 }) => {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const { activeBuild, stopBuild } = useSwarm();
 
   const isRunning = activeBuild?.status === 'running' || activeBuild?.status === 'planning' || activeBuild?.status === 'verifying';
@@ -135,12 +135,25 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         )}
 
-        <button
-          onClick={onOpenAuth}
-          className="px-3.5 py-1.5 text-xs font-medium text-neutral-950 bg-amber-400 rounded-lg hover:bg-amber-300 transition-colors whitespace-nowrap shrink-0 font-sans"
-        >
-          {user ? user.name.split(' ')[0] : 'Sign In'}
-        </button>
+        <div className="flex items-center gap-2 pl-1 border-l border-neutral-800">
+          <div className="hidden sm:flex flex-col text-right">
+            <span className="text-xs font-semibold text-white leading-tight">
+              {user ? user.name : 'Authenticated'}
+            </span>
+            <span className="text-[10px] font-mono text-neutral-400 leading-tight truncate max-w-[120px]">
+              {user?.email}
+            </span>
+          </div>
+
+          <button
+            onClick={() => logout()}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-neutral-400 bg-neutral-900 border border-neutral-800 rounded-lg hover:text-rose-400 hover:border-rose-500/30 hover:bg-rose-500/10 transition-colors whitespace-nowrap shrink-0"
+            title="Log out of SquadForge"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">Sign Out</span>
+          </button>
+        </div>
       </div>
     </header>
   );

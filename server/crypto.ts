@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import bcrypt from 'bcryptjs';
 
 // Server-side secret key derived or loaded from environment
 const ENCRYPTION_KEY_RAW = process.env.ENCRYPTION_SECRET || 'squadforge-production-master-encryption-key-2026';
@@ -38,4 +39,34 @@ export function decryptToken(cipherPackage: string): string {
     console.error('Failed to decrypt token securely');
     return '';
   }
+}
+
+/**
+ * Hashes a plain password using secure bcrypt with salt rounds 12
+ */
+export async function hashPassword(plainPassword: string): Promise<string> {
+  const salt = await bcrypt.genSalt(12);
+  return bcrypt.hash(plainPassword, salt);
+}
+
+/**
+ * Compares a plaintext password against a stored bcrypt hash
+ */
+export async function verifyPassword(plainPassword: string, hash: string): Promise<boolean> {
+  if (!plainPassword || !hash) return false;
+  return bcrypt.compare(plainPassword, hash);
+}
+
+/**
+ * Generates a cryptographically secure random session token
+ */
+export function generateSessionToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+/**
+ * Hashes a session token for safe storage at rest
+ */
+export function hashSessionToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
 }

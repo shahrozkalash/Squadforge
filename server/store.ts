@@ -2,14 +2,17 @@ import fs from 'fs';
 import path from 'path';
 import { 
   User, 
+  SafeUser,
+  Session,
   Build, 
   Task, 
   ProjectFile, 
   SwarmEvent, 
   ModelRunStatus, 
-  Checkpoint 
+  Checkpoint,
+  PasswordResetToken
 } from './types.js';
-import { encryptToken, decryptToken } from './crypto.js';
+import { encryptToken, decryptToken, hashSessionToken, generateSessionToken } from './crypto.js';
 import { INITIAL_MODEL_REGISTRY } from './modelRegistry.js';
 
 interface ClientSSEListener {
@@ -19,10 +22,14 @@ interface ClientSSEListener {
 }
 
 const DATA_FILE = path.resolve(process.cwd(), '.squadforge_data.json');
+const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 class PersistentDatabase {
   // Persistence maps
-  public users: Map<string, User> = new Map();
+  public users: Map<string, User> = new Map(); // userId -> User
+  public usersByEmail: Map<string, string> = new Map(); // normalizedEmail -> userId
+  public sessions: Map<string, Session> = new Map(); // hashedSessionToken -> Session
+  public passwordResetTokens: Map<string, PasswordResetToken> = new Map(); // hashedResetToken -> PasswordResetToken
   public encryptedGithubTokens: Map<string, string> = new Map(); // userId -> encryptedToken
   public builds: Map<string, Build> = new Map();
   public tasks: Map<string, Task[]> = new Map(); // buildId -> tasks
@@ -31,29 +38,15 @@ class PersistentDatabase {
   public modelRuns: Map<string, Map<string, ModelRunStatus>> = new Map(); // buildId -> (modelId -> ModelRunStatus)
   public checkpoints: Map<string, Checkpoint[]> = new Map(); // buildId -> Checkpoints
 
+  // In-memory rate limiter: identifier -> { attempts: number, lockUntil: number }
+  private rateLimits: Map<string, { attempts: number; lockUntil: number }> = new Map();
+
   // Active SSE listeners for real-time updates
   private sseListeners: ClientSSEListener[] = [];
   private saveDebounceTimer: NodeJS.Timeout | null = null;
 
   constructor() {
-    this.initDefaultUser();
     this.loadFromDisk();
-  }
-
-  private initDefaultUser() {
-    const defaultUser: User = {
-      id: 'usr_default_admin',
-      email: 'builder@squadforge.dev',
-      name: 'SquadForge Architect',
-      githubUsername: 'squadforge-dev',
-      githubConnected: true,
-      defaultRepo: 'squadforge-output',
-      costLimitPerBuild: 5.0,
-      enabledModelIds: INITIAL_MODEL_REGISTRY.map(m => m.id),
-      createdAt: Date.now() - 86400000
-    };
-    this.users.set(defaultUser.id, defaultUser);
-    this.encryptedGithubTokens.set(defaultUser.id, encryptToken('ghp_demo_valid_token_squadforge_2026'));
   }
 
   private loadFromDisk() {
@@ -61,14 +54,50 @@ class PersistentDatabase {
       if (fs.existsSync(DATA_FILE)) {
         const raw = fs.readFileSync(DATA_FILE, 'utf-8');
         const parsed = JSON.parse(raw);
+
+        if (parsed.users && Array.isArray(parsed.users)) {
+          for (const u of parsed.users) {
+            this.users.set(u.id, u);
+            if (u.email) {
+              this.usersByEmail.set(u.email.toLowerCase().trim(), u.id);
+            }
+          }
+        }
+
+        if (parsed.sessions && Array.isArray(parsed.sessions)) {
+          const now = Date.now();
+          for (const s of parsed.sessions) {
+            if (s.expiresAt > now) {
+              this.sessions.set(s.id, s);
+            }
+          }
+        }
+
+        if (parsed.passwordResetTokens && Array.isArray(parsed.passwordResetTokens)) {
+          const now = Date.now();
+          for (const prt of parsed.passwordResetTokens) {
+            if (prt.expiresAt > now) {
+              this.passwordResetTokens.set(prt.id, prt);
+            }
+          }
+        }
+
+        if (parsed.encryptedGithubTokens) {
+          for (const [uId, enc] of Object.entries(parsed.encryptedGithubTokens)) {
+            this.encryptedGithubTokens.set(uId, enc as string);
+          }
+        }
+
         if (parsed.builds) {
           for (const b of parsed.builds) this.builds.set(b.id, b);
         }
+
         if (parsed.tasks) {
           for (const [bId, tList] of Object.entries(parsed.tasks)) {
             this.tasks.set(bId, tList as Task[]);
           }
         }
+
         if (parsed.files) {
           for (const [bId, fileMapObj] of Object.entries(parsed.files)) {
             const map = new Map<string, ProjectFile>();
@@ -78,11 +107,13 @@ class PersistentDatabase {
             this.files.set(bId, map);
           }
         }
+
         if (parsed.events) {
           for (const [bId, eList] of Object.entries(parsed.events)) {
             this.events.set(bId, eList as SwarmEvent[]);
           }
         }
+
         if (parsed.checkpoints) {
           for (const [bId, cList] of Object.entries(parsed.checkpoints)) {
             this.checkpoints.set(bId, cList as Checkpoint[]);
@@ -104,6 +135,10 @@ class PersistentDatabase {
         }
 
         const data = {
+          users: Array.from(this.users.values()),
+          sessions: Array.from(this.sessions.values()),
+          passwordResetTokens: Array.from(this.passwordResetTokens.values()),
+          encryptedGithubTokens: Object.fromEntries(this.encryptedGithubTokens.entries()),
           builds: Array.from(this.builds.values()),
           tasks: Object.fromEntries(this.tasks.entries()),
           files: serializedFiles,
@@ -114,7 +149,8 @@ class PersistentDatabase {
       } catch (err) {
         // Disk write failed gracefully
       }
-    }, 1000);
+    }, 800);
+
     if (this.saveDebounceTimer.unref) {
       this.saveDebounceTimer.unref();
     }
@@ -143,16 +179,165 @@ class PersistentDatabase {
     }
   }
 
-  // --- Users & GitHub Connections ---
+  // --- Authentication & User Operations ---
 
   getUser(userId: string): User | undefined {
     return this.users.get(userId);
   }
 
+  findUserByEmail(email: string): User | undefined {
+    if (!email) return undefined;
+    const normalized = email.toLowerCase().trim();
+    const userId = this.usersByEmail.get(normalized);
+    if (!userId) return undefined;
+    return this.users.get(userId);
+  }
+
   saveUser(user: User): User {
+    const normalized = user.email.toLowerCase().trim();
+    user.email = normalized;
+    user.updatedAt = Date.now();
     this.users.set(user.id, user);
+    this.usersByEmail.set(normalized, user.id);
+    this.scheduleDiskSave();
     return user;
   }
+
+  createUser(user: User): User {
+    return this.saveUser(user);
+  }
+
+  toSafeUser(user: User): SafeUser {
+    const { passwordHash, ...safe } = user;
+    return safe;
+  }
+
+  // --- Session Management ---
+
+  createSession(userId: string, plainToken: string, ip?: string, userAgent?: string): Session {
+    const hashed = hashSessionToken(plainToken);
+    const session: Session = {
+      id: hashed,
+      userId,
+      expiresAt: Date.now() + SESSION_DURATION_MS,
+      createdAt: Date.now(),
+      ip,
+      userAgent
+    };
+    this.sessions.set(hashed, session);
+    this.scheduleDiskSave();
+    return session;
+  }
+
+  getSession(plainToken: string): Session | undefined {
+    if (!plainToken) return undefined;
+    const hashed = hashSessionToken(plainToken);
+    const session = this.sessions.get(hashed);
+    if (!session) return undefined;
+
+    // Check expiration
+    if (session.expiresAt < Date.now()) {
+      this.sessions.delete(hashed);
+      this.scheduleDiskSave();
+      return undefined;
+    }
+    return session;
+  }
+
+  deleteSession(plainToken: string): boolean {
+    if (!plainToken) return false;
+    const hashed = hashSessionToken(plainToken);
+    const existed = this.sessions.delete(hashed);
+    if (existed) {
+      this.scheduleDiskSave();
+    }
+    return existed;
+  }
+
+  deleteUserSessions(userId: string): void {
+    let deleted = false;
+    for (const [id, s] of this.sessions.entries()) {
+      if (s.userId === userId) {
+        this.sessions.delete(id);
+        deleted = true;
+      }
+    }
+    if (deleted) {
+      this.scheduleDiskSave();
+    }
+  }
+
+  // --- Password Reset Tokens (1 hour TTL, one-time use) ---
+
+  createPasswordResetToken(email: string): string | null {
+    const user = this.findUserByEmail(email);
+    if (!user) return null;
+
+    const plainToken = generateSessionToken();
+    const hashed = hashSessionToken(plainToken);
+    const resetToken: PasswordResetToken = {
+      id: hashed,
+      userId: user.id,
+      email: user.email,
+      expiresAt: Date.now() + 60 * 60 * 1000, // 1 hour
+      createdAt: Date.now()
+    };
+    this.passwordResetTokens.set(hashed, resetToken);
+    this.scheduleDiskSave();
+    return plainToken;
+  }
+
+  verifyAndConsumePasswordResetToken(plainToken: string): { valid: boolean; userId?: string } {
+    if (!plainToken) return { valid: false };
+    const hashed = hashSessionToken(plainToken);
+    const record = this.passwordResetTokens.get(hashed);
+    if (!record) return { valid: false };
+
+    if (record.expiresAt < Date.now()) {
+      this.passwordResetTokens.delete(hashed);
+      this.scheduleDiskSave();
+      return { valid: false };
+    }
+
+    // One-time use: consume immediately
+    this.passwordResetTokens.delete(hashed);
+    this.scheduleDiskSave();
+    return { valid: true, userId: record.userId };
+  }
+
+  // --- Login Rate Limiting (5 failed attempts = 15 min lock) ---
+
+  checkRateLimit(key: string): { allowed: boolean; retryAfterSeconds: number } {
+    const record = this.rateLimits.get(key);
+    if (!record) return { allowed: true, retryAfterSeconds: 0 };
+
+    const now = Date.now();
+    if (record.lockUntil > now) {
+      return { 
+        allowed: false, 
+        retryAfterSeconds: Math.ceil((record.lockUntil - now) / 1000) 
+      };
+    }
+    return { allowed: true, retryAfterSeconds: 0 };
+  }
+
+  recordFailedLogin(key: string): void {
+    const now = Date.now();
+    const record = this.rateLimits.get(key) || { attempts: 0, lockUntil: 0 };
+    record.attempts += 1;
+
+    // After 5 attempts, lock for 15 minutes
+    if (record.attempts >= 5) {
+      record.lockUntil = now + 15 * 60 * 1000;
+    }
+    this.rateLimits.set(key, record);
+  }
+
+  clearRateLimit(key: string): void {
+    this.rateLimits.delete(key);
+  }
+
+  // --- GitHub Credentials ---
 
   setGithubToken(userId: string, plainToken: string, username?: string): void {
     const encrypted = encryptToken(plainToken);
@@ -161,7 +346,7 @@ class PersistentDatabase {
     if (user) {
       user.githubConnected = true;
       if (username) user.githubUsername = username;
-      this.users.set(userId, { ...user });
+      this.saveUser(user);
     }
   }
 
@@ -177,11 +362,11 @@ class PersistentDatabase {
     if (user) {
       user.githubConnected = false;
       user.githubUsername = undefined;
-      this.users.set(userId, { ...user });
+      this.saveUser(user);
     }
   }
 
-  // --- Builds ---
+  // --- Builds (Scoped to User) ---
 
   getBuild(buildId: string): Build | undefined {
     return this.builds.get(buildId);

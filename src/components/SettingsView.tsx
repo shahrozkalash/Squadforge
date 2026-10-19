@@ -14,12 +14,13 @@ import {
   Save,
   KeyRound,
   ShieldCheck,
-  Info
+  Info,
+  LogOut
 } from 'lucide-react';
 import { ModelConfig, ModelStrength } from '../types/index.js';
 
 export const SettingsView: React.FC = () => {
-  const { user, connectGitHubOAuth, connectGitHubPAT, disconnectGitHub, updateSettings } = useAuth();
+  const { user, logout, connectGitHubOAuth, connectGitHubPAT, disconnectGitHub, updateSettings } = useAuth();
   const { allModels, refreshModels, configStatus, refreshConfigStatus } = useSwarm();
 
   const [costLimit, setCostLimit] = useState(user?.costLimitPerBuild || 5.0);
@@ -117,6 +118,44 @@ export const SettingsView: React.FC = () => {
         <p className="text-xs text-neutral-400 mt-0.5">
           Provider status, GitHub credentials, cost limits, and team model registry configuration.
         </p>
+      </div>
+
+      {/* User Account Profile & Session Card */}
+      <div className="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4">
+        <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+          <div className="flex items-center gap-2">
+            <UserIcon className="w-4 h-4 text-amber-400" />
+            <h2 className="text-sm font-semibold text-white">Authenticated Profile & Session Security</h2>
+          </div>
+          <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">
+            Active Session
+          </span>
+        </div>
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-neutral-950 border border-neutral-800 rounded-lg">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-white">{user?.name || 'Engineer'}</span>
+              <span className="text-xs font-mono text-neutral-400">({user?.email})</span>
+            </div>
+            <div className="text-xs text-neutral-500 flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span>Security: Bcrypt (12 rounds)</span>
+              <span>•</span>
+              <span>Vault: AES-256-GCM Encrypted</span>
+              <span>•</span>
+              <span>Session: HTTP-Only Cookie</span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => logout()}
+            className="flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-rose-300 bg-rose-500/10 border border-rose-500/20 hover:bg-rose-500/20 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Sign Out of SquadForge</span>
+          </button>
+        </div>
       </div>
 
       {/* Provider Configuration Status Screen (Safe, never displays secret keys) */}

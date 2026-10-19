@@ -11,7 +11,14 @@ import { TaskManager } from '../server/swarm/taskManager.js';
 import { MergeManager } from '../server/swarm/mergeManager.js';
 import { SandboxRunner } from '../server/swarm/sandboxRunner.js';
 import { db } from '../server/store.js';
-import { Build, Task, ProjectFile } from '../server/types.js';
+import { Build, Task, ProjectFile, User } from '../server/types.js';
+import { 
+  hashPassword, 
+  verifyPassword, 
+  generateSessionToken, 
+  encryptToken, 
+  decryptToken 
+} from '../server/crypto.js';
 
 describe('SquadForge Model Routing & Gateway Reliability', () => {
   test('Unsupported model identifier returns UNSUPPORTED_MODEL error', async () => {
@@ -374,3 +381,150 @@ describe('Multi-Agent Development Team & Registry Architecture', () => {
     }
   });
 });
+
+describe('SquadForge Secure Authentication, Sessions & Multi-Tenant Isolation', () => {
+  test('Password hashing produces secure salted hash and verifies correctly', async () => {
+    const plain = 'SquadForgeMaster2026!';
+    const hash = await hashPassword(plain);
+
+    assert.notEqual(hash, plain);
+    assert.ok(hash.startsWith('$2')); // Bcrypt format
+
+    const isMatch = await verifyPassword(plain, hash);
+    assert.equal(isMatch, true);
+
+    const isBadMatch = await verifyPassword('WrongPassword123', hash);
+    assert.equal(isBadMatch, false);
+  });
+
+  test('User creation normalizes email and prevents duplicate account registration', () => {
+    const testUser: User = {
+      id: 'usr_test_auth_1',
+      name: 'Auth Tester',
+      email: '  TEST.USER@Domain.COM  ',
+      passwordHash: 'dummy_hash',
+      githubConnected: false,
+      costLimitPerBuild: 5,
+      enabledModelIds: ['gemini'],
+      createdAt: Date.now()
+    };
+
+    db.createUser(testUser);
+
+    const retrieved = db.findUserByEmail('test.user@domain.com');
+    assert.ok(retrieved);
+    assert.equal(retrieved.email, 'test.user@domain.com');
+
+    // Case-insensitive query
+    const retrievedUpper = db.findUserByEmail('TEST.USER@DOMAIN.COM');
+    assert.ok(retrievedUpper);
+    assert.equal(retrievedUpper.id, 'usr_test_auth_1');
+  });
+
+  test('Brute-force login rate limiter locks out after 5 consecutive failures', () => {
+    const rateLimitKey = 'test_ip_bruteforce_email@test.com';
+    db.clearRateLimit(rateLimitKey);
+
+    let check = db.checkRateLimit(rateLimitKey);
+    assert.equal(check.allowed, true);
+
+    // 4 failed attempts
+    for (let i = 0; i < 4; i++) {
+      db.recordFailedLogin(rateLimitKey);
+      check = db.checkRateLimit(rateLimitKey);
+      assert.equal(check.allowed, true);
+    }
+
+    // 5th failed attempt locks out
+    db.recordFailedLogin(rateLimitKey);
+    check = db.checkRateLimit(rateLimitKey);
+    assert.equal(check.allowed, false);
+    assert.ok(check.retryAfterSeconds > 800); // 15 minute lock
+
+    // Clearing rate limit restores access
+    db.clearRateLimit(rateLimitKey);
+    assert.equal(db.checkRateLimit(rateLimitKey).allowed, true);
+  });
+
+  test('Password reset token is cryptographically secure and consumed strictly once', () => {
+    const userEmail = 'test.user@domain.com';
+    const plainToken = db.createPasswordResetToken(userEmail);
+
+    assert.ok(plainToken);
+    assert.equal(typeof plainToken, 'string');
+    assert.ok(plainToken.length >= 32);
+
+    // First consumption succeeds
+    const firstVerify = db.verifyAndConsumePasswordResetToken(plainToken);
+    assert.equal(firstVerify.valid, true);
+    assert.equal(firstVerify.userId, 'usr_test_auth_1');
+
+    // Second consumption fails (token was consumed)
+    const secondVerify = db.verifyAndConsumePasswordResetToken(plainToken);
+    assert.equal(secondVerify.valid, false);
+  });
+
+  test('Sessions store securely, validate token, and clear upon user logout', () => {
+    const plainToken = generateSessionToken();
+    const session = db.createSession('usr_test_auth_1', plainToken, '127.0.0.1', 'TestSuite');
+
+    assert.ok(session);
+    assert.equal(session.userId, 'usr_test_auth_1');
+
+    // Session retrieval by plain token
+    const retrievedSession = db.getSession(plainToken);
+    assert.ok(retrievedSession);
+    assert.equal(retrievedSession.userId, 'usr_test_auth_1');
+
+    // Deleting session
+    db.deleteSession(plainToken);
+    const postDeleteSession = db.getSession(plainToken);
+    assert.equal(postDeleteSession, undefined);
+  });
+
+  test('Multi-tenant project data isolation prevents user A from seeing user B projects', () => {
+    const userA = 'usr_tenant_A';
+    const userB = 'usr_tenant_B';
+
+    db.saveBuild({
+      id: 'bld_tenant_A_project',
+      userId: userA,
+      idea: 'User A Secret App',
+      status: 'planning',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      selectedModels: ['gemini'],
+      autoPushGithub: false,
+      totalTokens: 0,
+      totalCost: 0,
+      costLimit: 5,
+      maxDurationSeconds: 300,
+      patchesAppliedCount: 0
+    });
+
+    db.saveBuild({
+      id: 'bld_tenant_B_project',
+      userId: userB,
+      idea: 'User B Public App',
+      status: 'planning',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      selectedModels: ['gemini'],
+      autoPushGithub: false,
+      totalTokens: 0,
+      totalCost: 0,
+      costLimit: 5,
+      maxDurationSeconds: 300,
+      patchesAppliedCount: 0
+    });
+
+    const userABuilds = db.getAllBuilds(userA);
+    assert.equal(userABuilds.some(b => b.id === 'bld_tenant_A_project'), true);
+    assert.equal(userABuilds.some(b => b.id === 'bld_tenant_B_project'), false);
+
+    const userBBuilds = db.getAllBuilds(userB);
+    assert.equal(userBBuilds.some(b => b.id === 'bld_tenant_B_project'), true);
+    assert.equal(userBBuilds.some(b => b.id === 'bld_tenant_A_project'), false);
+  });
+});
+

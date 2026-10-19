@@ -52,6 +52,26 @@ export interface User {
   costLimitPerBuild: number;
   enabledModelIds: string[];
   createdAt: number;
+  updatedAt?: number;
+}
+
+export type SafeUser = User;
+
+export interface Session {
+  id: string;
+  userId: string;
+  expiresAt: number;
+  createdAt: number;
+  ip?: string;
+  userAgent?: string;
+}
+
+export interface PasswordResetToken {
+  id: string;
+  userId: string;
+  email: string;
+  expiresAt: number;
+  createdAt: number;
 }
 
 export type TaskStatus = 
