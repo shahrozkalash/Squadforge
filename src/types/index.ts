@@ -50,6 +50,9 @@ export interface Task {
   completedAt?: number;
   error?: string;
   isFixTask?: boolean;
+  retryCount?: number;
+  maxRetries?: number;
+  lastError?: string;
 }
 
 export interface FileVersion {
@@ -86,7 +89,9 @@ export type EventType =
   | 'checkpoint_saved'
   | 'checkpoint_reverted'
   | 'task_completed'
+  | 'task_failed'
   | 'verifier_started'
+  | 'verifier_rejected'
   | 'verifier_approved'
   | 'github_pushed'
   | 'build_completed'
@@ -146,6 +151,10 @@ export interface Build {
   maxDurationSeconds: number;
   patchesAppliedCount: number;
   error?: string;
+  verificationAttempts?: number;
+  maxVerificationAttempts?: number;
+  verificationFeedback?: string;
+  failureReason?: string;
 }
 
 export interface ConcurrencyTestReport {

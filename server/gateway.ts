@@ -1,6 +1,15 @@
 import { GoogleGenAI } from '@google/genai';
 import { modelRegistry } from './modelRegistry.js';
-import { ModelConfig, ModelActionResponse } from './types.js';
+import { 
+  ModelConfig, 
+  ModelActionResponse, 
+  GatewayResult, 
+  GatewayErrorCode,
+  VerifierResponse,
+  PatchAction,
+  CreateFileAction,
+  CreateTaskAction
+} from './types.js';
 
 const geminiApiKey = process.env.GEMINI_API_KEY || '';
 const openRouterApiKey = process.env.OPENROUTER_API_KEY || '';
@@ -17,7 +26,7 @@ if (geminiApiKey) {
       },
     });
   } catch (err) {
-    console.error('Failed to initialize GoogleGenAI client:', err);
+    console.error('Failed to initialize GoogleGenAI client');
   }
 }
 
@@ -68,21 +77,14 @@ export interface GatewayCallParams {
   temperature?: number;
   maxTokens?: number;
   responseMimeType?: string;
-}
-
-export interface GatewayResult {
-  rawText: string;
-  parsedResponse: ModelActionResponse | null;
-  tokensUsed: number;
-  modelId: string;
-  latencyMs: number;
+  allowFallback?: boolean; // Only use fallback if explicitly allowed
 }
 
 /**
  * Extracts and cleans JSON from raw AI text responses
  */
 export function extractAndParseJson(text: string): ModelActionResponse | null {
-  if (!text) return null;
+  if (!text || typeof text !== 'string') return null;
   let cleaned = text.trim();
 
   // Strip markdown code fences if present
@@ -96,80 +98,327 @@ export function extractAndParseJson(text: string): ModelActionResponse | null {
   }
   cleaned = cleaned.trim();
 
-  // Find start and end of JSON object
+  // Find boundaries of JSON object or array
   const firstBrace = cleaned.indexOf('{');
   const lastBrace = cleaned.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
     cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  } else {
+    return null;
   }
 
   try {
     const parsed = JSON.parse(cleaned);
-    if (parsed && Array.isArray(parsed.actions)) {
-      return parsed as ModelActionResponse;
-    }
-    // Handle single action wrapped without 'actions' array
-    if (parsed && (parsed.action === 'patch_file' || parsed.action === 'create_file' || parsed.action === 'create_task')) {
-      return { actions: [parsed] };
-    }
-    return null;
+    return validateModelActionResponse(parsed);
   } catch (err) {
     return null;
   }
 }
 
 /**
- * Unified gateway call for every model in the registry
+ * Validates that an object conforms to the strict ModelActionResponse schema
  */
-export async function callUnifiedGateway(params: GatewayCallParams): Promise<GatewayResult> {
-  const startTime = Date.now();
-  const modelConfig = modelRegistry.getById(params.modelId);
-  const sysPrompt = params.systemInstruction || SILENT_WORKER_SYSTEM_PROMPT;
+export function validateModelActionResponse(parsed: any): ModelActionResponse | null {
+  if (!parsed || typeof parsed !== 'object') return null;
 
-  // 1. If OpenRouter API key is available, use OpenRouter endpoint
-  if (openRouterApiKey && modelConfig && params.modelId !== 'gemini') {
-    try {
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${openRouterApiKey}`,
-          'HTTP-Referer': 'https://squadforge.dev',
-          'X-Title': 'SquadForge Swarm'
-        },
-        body: JSON.stringify({
-          model: modelConfig.providerModel,
-          messages: [
-            { role: 'system', content: sysPrompt },
-            { role: 'user', content: params.prompt }
-          ],
-          temperature: params.temperature ?? 0.2,
-          max_tokens: params.maxTokens ?? 3000,
-          response_format: { type: 'json_object' }
-        })
-      });
+  let candidateActions: any[] = [];
+  if (Array.isArray(parsed.actions)) {
+    candidateActions = parsed.actions;
+  } else if (parsed.action) {
+    candidateActions = [parsed];
+  } else {
+    return null;
+  }
 
-      if (response.ok) {
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content || '';
-        const parsed = extractAndParseJson(content);
-        return {
-          rawText: content,
-          parsedResponse: parsed,
-          tokensUsed: data.usage?.total_tokens || 800,
-          modelId: params.modelId,
-          latencyMs: Date.now() - startTime
-        };
+  const validActions: Array<PatchAction | CreateFileAction | CreateTaskAction> = [];
+
+  for (const act of candidateActions) {
+    if (!act || typeof act !== 'object') continue;
+
+    if (act.action === 'create_file') {
+      if (typeof act.path === 'string' && act.path.trim().length > 0 && typeof act.content === 'string') {
+        validActions.push({
+          action: 'create_file',
+          path: act.path.trim(),
+          content: act.content,
+          commitMessage: typeof act.commitMessage === 'string' ? act.commitMessage : undefined
+        });
       }
-    } catch (err) {
-      console.warn(`OpenRouter call for ${params.modelId} failed, falling back to Gemini Engine:`, err);
+    } else if (act.action === 'patch_file') {
+      if (typeof act.path === 'string' && act.path.trim().length > 0 && Array.isArray(act.edits) && act.edits.length > 0) {
+        const validEdits = act.edits.filter((e: any) => 
+          e && typeof e === 'object' && typeof e.find === 'string' && typeof e.replace === 'string'
+        );
+        if (validEdits.length > 0) {
+          validActions.push({
+            action: 'patch_file',
+            path: act.path.trim(),
+            edits: validEdits,
+            commitMessage: typeof act.commitMessage === 'string' ? act.commitMessage : undefined
+          });
+        }
+      }
+    } else if (act.action === 'create_task') {
+      if (typeof act.title === 'string' && act.title.trim().length > 0 && typeof act.description === 'string') {
+        const filePaths = Array.isArray(act.filePaths) ? act.filePaths.filter((p: any) => typeof p === 'string') : [];
+        validActions.push({
+          action: 'create_task',
+          title: act.title.trim(),
+          description: act.description.trim(),
+          filePaths,
+          priority: (act.priority >= 1 && act.priority <= 5) ? act.priority : 3
+        });
+      }
     }
   }
 
-  // 2. Use Gemini API via @google/genai SDK (Native and reliable!)
+  if (validActions.length === 0) {
+    return null;
+  }
+
+  return { actions: validActions };
+}
+
+/**
+ * Safely parses and validates a verifier model response.
+ * Returns null if the JSON is malformed or missing required boolean approved field.
+ */
+export function parseVerifierResponse(text: string): VerifierResponse | null {
+  if (!text || typeof text !== 'string') return null;
+  let cleaned = text.trim();
+
+  if (cleaned.startsWith('```json')) {
+    cleaned = cleaned.slice(7);
+  } else if (cleaned.startsWith('```')) {
+    cleaned = cleaned.slice(3);
+  }
+  if (cleaned.endsWith('```')) {
+    cleaned = cleaned.slice(0, -3);
+  }
+  cleaned = cleaned.trim();
+
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+  } else {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (typeof parsed !== 'object' || parsed === null) return null;
+
+    // Must have a genuine boolean for approved
+    if (typeof parsed.approved !== 'boolean') {
+      return null;
+    }
+
+    const summary = typeof parsed.summary === 'string' ? parsed.summary.trim() : (parsed.approved ? 'Verified successfully' : 'Verification failed');
+    const missingRequirements = Array.isArray(parsed.missingRequirements) 
+      ? parsed.missingRequirements.filter((r: any) => typeof r === 'string')
+      : [];
+
+    return {
+      approved: parsed.approved,
+      summary,
+      missingRequirements,
+      confidence: typeof parsed.confidence === 'number' ? parsed.confidence : undefined
+    };
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Unified gateway call for every model in the registry.
+ * Accurately tracks requested model vs actual model used and provider used.
+ * Never silently fabricates responses.
+ */
+export async function callUnifiedGateway(params: GatewayCallParams): Promise<GatewayResult> {
+  const startTime = Date.now();
+  const requestedModelId = params.modelId;
+  const modelConfig = modelRegistry.getById(requestedModelId);
+
+  // 1. Validate requested model existence
+  if (!modelConfig) {
+    return {
+      success: false,
+      rawText: '',
+      parsedResponse: null,
+      tokensUsed: 0,
+      modelId: requestedModelId,
+      actualModelUsed: 'none',
+      providerUsed: 'none',
+      isFallback: false,
+      latencyMs: Date.now() - startTime,
+      error: `Model "${requestedModelId}" is not registered in the model registry.`,
+      errorCode: 'UNSUPPORTED_MODEL'
+    };
+  }
+
+  const sysPrompt = params.systemInstruction || SILENT_WORKER_SYSTEM_PROMPT;
+
+  // 2. Determine execution route
+  const isDirectGemini = requestedModelId === 'gemini';
+
+  // Attempt Primary Provider: OpenRouter for 3P models
+  if (!isDirectGemini) {
+    if (openRouterApiKey) {
+      try {
+        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${openRouterApiKey}`,
+            'HTTP-Referer': 'https://squadforge.dev',
+            'X-Title': 'SquadForge Swarm'
+          },
+          body: JSON.stringify({
+            model: modelConfig.providerModel,
+            messages: [
+              { role: 'system', content: sysPrompt },
+              { role: 'user', content: params.prompt }
+            ],
+            temperature: params.temperature ?? 0.2,
+            max_tokens: params.maxTokens ?? 3000,
+            response_format: { type: 'json_object' }
+          })
+        });
+
+        if (!response.ok) {
+          let errCode: GatewayErrorCode = 'PROVIDER_ERROR';
+          let errMsg = `OpenRouter HTTP ${response.status}`;
+
+          if (response.status === 401 || response.status === 403) {
+            errCode = 'INVALID_API_KEY';
+            errMsg = 'OpenRouter API key is invalid or unauthorized.';
+          } else if (response.status === 429) {
+            errCode = 'RATE_LIMITED';
+            errMsg = 'OpenRouter rate limit exceeded. Please retry later.';
+          } else {
+            try {
+              const errBody = await response.json();
+              if (errBody?.error?.message) {
+                errMsg = `OpenRouter error: ${errBody.error.message}`;
+              }
+            } catch (_) {}
+          }
+
+          // If fallback is not allowed, fail immediately with accurate error
+          if (!params.allowFallback || !googleGenAI) {
+            return {
+              success: false,
+              rawText: '',
+              parsedResponse: null,
+              tokensUsed: 0,
+              modelId: requestedModelId,
+              actualModelUsed: modelConfig.providerModel,
+              providerUsed: 'openrouter',
+              isFallback: false,
+              latencyMs: Date.now() - startTime,
+              error: errMsg,
+              errorCode: errCode
+            };
+          }
+          // Fallback allowed, continue below
+        } else {
+          // Success from OpenRouter
+          const data = await response.json();
+          const content = data.choices?.[0]?.message?.content || '';
+          const parsed = extractAndParseJson(content);
+
+          if (!parsed && !params.responseMimeType?.includes('json')) {
+            // If caller didn't need structured actions (e.g. verifier)
+            return {
+              success: true,
+              rawText: content,
+              parsedResponse: null,
+              tokensUsed: data.usage?.total_tokens || 500,
+              modelId: requestedModelId,
+              actualModelUsed: modelConfig.providerModel,
+              providerUsed: 'openrouter',
+              isFallback: false,
+              latencyMs: Date.now() - startTime
+            };
+          }
+
+          if (!parsed) {
+            return {
+              success: false,
+              rawText: content,
+              parsedResponse: null,
+              tokensUsed: data.usage?.total_tokens || 500,
+              modelId: requestedModelId,
+              actualModelUsed: modelConfig.providerModel,
+              providerUsed: 'openrouter',
+              isFallback: false,
+              latencyMs: Date.now() - startTime,
+              error: 'Response from OpenRouter did not contain valid structured JSON actions.',
+              errorCode: 'MALFORMED_OUTPUT'
+            };
+          }
+
+          return {
+            success: true,
+            rawText: content,
+            parsedResponse: parsed,
+            tokensUsed: data.usage?.total_tokens || 500,
+            modelId: requestedModelId,
+            actualModelUsed: modelConfig.providerModel,
+            providerUsed: 'openrouter',
+            isFallback: false,
+            latencyMs: Date.now() - startTime
+          };
+        }
+      } catch (netErr: any) {
+        if (!params.allowFallback || !googleGenAI) {
+          return {
+            success: false,
+            rawText: '',
+            parsedResponse: null,
+            tokensUsed: 0,
+            modelId: requestedModelId,
+            actualModelUsed: modelConfig.providerModel,
+            providerUsed: 'openrouter',
+            isFallback: false,
+            latencyMs: Date.now() - startTime,
+            error: `Network failure connecting to OpenRouter: ${netErr.message || 'Connection error'}`,
+            errorCode: 'NETWORK_ERROR'
+          };
+        }
+      }
+    } else {
+      // OpenRouter API key not configured
+      if (!params.allowFallback || !googleGenAI) {
+        return {
+          success: false,
+          rawText: '',
+          parsedResponse: null,
+          tokensUsed: 0,
+          modelId: requestedModelId,
+          actualModelUsed: 'none',
+          providerUsed: 'none',
+          isFallback: false,
+          latencyMs: Date.now() - startTime,
+          error: `Model "${modelConfig.displayName}" requires OPENROUTER_API_KEY. Configure key or enable fallback.`,
+          errorCode: 'NO_PROVIDER'
+        };
+      }
+    }
+  }
+
+  // 3. Native Gemini call (Either direct Gemini model, or explicitly configured fallback)
   if (googleGenAI) {
+    const isFallbackRun = !isDirectGemini;
+    const fallbackReason = isFallbackRun 
+      ? `Primary provider for ${modelConfig.displayName} unavailable; executed via configured Gemini fallback` 
+      : undefined;
+
     try {
-      const specializedSysInstruction = `${sysPrompt}\n\nYou are operating as AI Model: ${modelConfig?.displayName || params.modelId} (${modelConfig?.strengths?.join(', ') || 'fullstack'}). Focus strictly on these strengths.`;
+      const specializedSysInstruction = isFallbackRun
+        ? `${sysPrompt}\n\nYou are operating as fallback for AI Model: ${modelConfig.displayName} (${modelConfig.strengths.join(', ')}). Output only JSON.`
+        : sysPrompt;
 
       const genAiCall = googleGenAI.models.generateContent({
         model: 'gemini-3.8-flash',
@@ -182,99 +431,68 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
       });
 
       const timeoutPromise = new Promise<never>((_, reject) => 
-        setTimeout(() => reject(new Error('Gateway timeout (7000ms)')), 7000)
+        setTimeout(() => reject(new Error('Gateway timeout (8000ms)')), 8000)
       );
 
       const response: any = await Promise.race([genAiCall, timeoutPromise]);
-
       const text = response?.text || '';
+
+      // If caller does not expect structured actions (e.g. verifier)
       const parsed = extractAndParseJson(text);
-      if (parsed) {
-        return {
-          rawText: text,
-          parsedResponse: parsed,
-          tokensUsed: 650,
-          modelId: params.modelId,
-          latencyMs: Date.now() - startTime
-        };
-      }
+
+      return {
+        success: true,
+        rawText: text,
+        parsedResponse: parsed,
+        tokensUsed: 650,
+        modelId: requestedModelId,
+        actualModelUsed: 'gemini-3.8-flash',
+        providerUsed: 'gemini',
+        isFallback: isFallbackRun,
+        fallbackReason,
+        latencyMs: Date.now() - startTime
+      };
     } catch (err: any) {
-      console.warn(`Gemini generation error or timeout for ${params.modelId}:`, err?.message || err);
+      let errCode: GatewayErrorCode = 'PROVIDER_ERROR';
+      const msg = err?.message || String(err);
+
+      if (msg.includes('API_KEY') || msg.includes('401') || msg.includes('403')) {
+        errCode = 'INVALID_API_KEY';
+      } else if (msg.includes('RESOURCE_EXHAUSTED') || msg.includes('429')) {
+        errCode = 'RATE_LIMITED';
+      } else if (msg.includes('timeout') || msg.includes('ENOTFOUND') || msg.includes('ECONNREFUSED')) {
+        errCode = 'NETWORK_ERROR';
+      }
+
+      return {
+        success: false,
+        rawText: '',
+        parsedResponse: null,
+        tokensUsed: 0,
+        modelId: requestedModelId,
+        actualModelUsed: 'gemini-3.8-flash',
+        providerUsed: 'gemini',
+        isFallback: isFallbackRun,
+        fallbackReason,
+        latencyMs: Date.now() - startTime,
+        error: `Gemini API execution failed: ${msg}`,
+        errorCode: errCode
+      };
     }
   }
 
-  // 3. Resilient Fallback Synthesizer for offline / hermetic environments
-  // Generates valid JSON actions for the requested task/prompt
-  const synthesized = generateDeterministicAction(params.prompt, modelConfig);
+  // 4. No provider available
   return {
-    rawText: JSON.stringify(synthesized, null, 2),
-    parsedResponse: synthesized,
-    tokensUsed: 350,
-    modelId: params.modelId,
-    latencyMs: Date.now() - startTime
-  };
-}
-
-/**
- * Fallback generator ensuring zero deadlocks during offline testing or when external API limits occur
- */
-function generateDeterministicAction(prompt: string, modelConfig?: ModelConfig): ModelActionResponse {
-  // If prompt asks to plan the project
-  if (prompt.includes('PLAN INITIAL PROJECT') || prompt.includes('Initial File Tree')) {
-    return {
-      actions: [
-        {
-          action: 'create_file',
-          path: 'src/types.ts',
-          content: `// SquadForge Generated Domain Types\nexport interface AppItem {\n  id: string;\n  title: string;\n  status: 'active' | 'completed';\n  createdAt: number;\n}\n\nexport interface AppConfig {\n  theme: 'dark' | 'light';\n  maxItems: number;\n}\n`,
-          commitMessage: 'Initialize domain types'
-        },
-        {
-          action: 'create_file',
-          path: 'src/services/api.ts',
-          content: `// API Client Service\nimport { AppItem } from '../types.js';\n\nexport async function fetchItems(): Promise<AppItem[]> {\n  return [\n    { id: '1', title: 'First Task', status: 'active', createdAt: Date.now() }\n  ];\n}\n`,
-          commitMessage: 'Create API service'
-        },
-        {
-          action: 'create_file',
-          path: 'src/components/Header.tsx',
-          content: `// Header Component\nimport React from 'react';\n\nexport function Header({ title }: { title: string }) {\n  return (\n    <header className="p-4 border-b border-neutral-800 bg-neutral-900">\n      <h1 className="text-xl font-bold tracking-tight text-white">{title}</h1>\n    </header>\n  );\n}\n`,
-          commitMessage: 'Create Header component'
-        },
-        {
-          action: 'create_task',
-          title: 'Implement Interactive Item List',
-          description: 'Create ItemList component with toggle and delete actions',
-          filePaths: ['src/components/ItemList.tsx'],
-          priority: 2
-        },
-        {
-          action: 'create_task',
-          title: 'Add Input Form and Validation',
-          description: 'Create form for creating new items with error states',
-          filePaths: ['src/components/ItemForm.tsx'],
-          priority: 2
-        },
-        {
-          action: 'create_task',
-          title: 'Setup State Management & Persistence',
-          description: 'Implement custom hook or store with localStorage sync',
-          filePaths: ['src/hooks/useItems.ts'],
-          priority: 3
-        }
-      ]
-    };
-  }
-
-  // Default synthetic patch/action
-  return {
-    actions: [
-      {
-        action: 'create_file',
-        path: `src/utils/helper-${modelConfig?.id || 'worker'}.ts`,
-        content: `// Worker utility generated by ${modelConfig?.displayName || 'Swarm Worker'}\nexport function formatTimestamp(ts: number): string {\n  return new Date(ts).toISOString();\n}\n`,
-        commitMessage: `Create helper module by ${modelConfig?.id || 'worker'}`
-      }
-    ]
+    success: false,
+    rawText: '',
+    parsedResponse: null,
+    tokensUsed: 0,
+    modelId: requestedModelId,
+    actualModelUsed: 'none',
+    providerUsed: 'none',
+    isFallback: false,
+    latencyMs: Date.now() - startTime,
+    error: 'No valid AI provider configured on server (GEMINI_API_KEY or OPENROUTER_API_KEY required).',
+    errorCode: 'NO_PROVIDER'
   };
 }

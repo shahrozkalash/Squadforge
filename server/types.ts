@@ -50,6 +50,9 @@ export interface Task {
   completedAt?: number;
   error?: string;
   isFixTask?: boolean;
+  retryCount?: number;
+  maxRetries?: number;
+  lastError?: string;
 }
 
 export interface FileVersion {
@@ -86,7 +89,9 @@ export type EventType =
   | 'checkpoint_saved'
   | 'checkpoint_reverted'
   | 'task_completed'
+  | 'task_failed'
   | 'verifier_started'
+  | 'verifier_rejected'
   | 'verifier_approved'
   | 'github_pushed'
   | 'build_completed'
@@ -146,6 +151,10 @@ export interface Build {
   maxDurationSeconds: number;
   patchesAppliedCount: number;
   error?: string;
+  verificationAttempts?: number;
+  maxVerificationAttempts?: number;
+  verificationFeedback?: string;
+  failureReason?: string;
 }
 
 export interface PatchEdit {
@@ -181,3 +190,35 @@ export interface ModelActionResponse {
   actions: Array<PatchAction | CreateFileAction | CreateTaskAction>;
   error?: string;
 }
+
+export type GatewayErrorCode = 
+  | 'INVALID_API_KEY' 
+  | 'RATE_LIMITED' 
+  | 'NETWORK_ERROR' 
+  | 'UNSUPPORTED_MODEL' 
+  | 'MALFORMED_OUTPUT' 
+  | 'PROVIDER_ERROR' 
+  | 'NO_PROVIDER';
+
+export interface GatewayResult {
+  success: boolean;
+  rawText: string;
+  parsedResponse: ModelActionResponse | null;
+  tokensUsed: number;
+  modelId: string;
+  actualModelUsed: string;
+  providerUsed: 'openrouter' | 'gemini' | 'direct' | 'none';
+  isFallback: boolean;
+  fallbackReason?: string;
+  latencyMs: number;
+  error?: string;
+  errorCode?: GatewayErrorCode;
+}
+
+export interface VerifierResponse {
+  approved: boolean;
+  summary: string;
+  missingRequirements?: string[];
+  confidence?: number;
+}
+

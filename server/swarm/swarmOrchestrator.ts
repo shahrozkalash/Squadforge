@@ -1,6 +1,10 @@
 import { db } from '../store.js';
 import { modelRegistry } from '../modelRegistry.js';
-import { callUnifiedGateway, extractAndParseJson, SILENT_WORKER_SYSTEM_PROMPT } from '../gateway.js';
+import { 
+  callUnifiedGateway, 
+  parseVerifierResponse, 
+  SILENT_WORKER_SYSTEM_PROMPT 
+} from '../gateway.js';
 import { TaskManager } from './taskManager.js';
 import { MergeManager } from './mergeManager.js';
 import { SandboxRunner } from './sandboxRunner.js';
@@ -14,6 +18,8 @@ interface ActiveSwarmControl {
 
 export class SwarmOrchestrator {
   private static activeSwarms: Map<string, ActiveSwarmControl> = new Map();
+  private static MAX_VERIFICATION_ATTEMPTS = 3;
+  private static MAX_TASK_RETRIES = 3;
 
   /**
    * Stops an active build swarm immediately
@@ -25,7 +31,7 @@ export class SwarmOrchestrator {
     }
 
     const build = db.getBuild(buildId);
-    if (build && build.status === 'running') {
+    if (build && (build.status === 'running' || build.status === 'planning' || build.status === 'verifying')) {
       build.status = 'stopped';
       build.completedAt = Date.now();
       db.saveBuild(build);
@@ -54,6 +60,8 @@ export class SwarmOrchestrator {
     this.activeSwarms.set(buildId, control);
 
     build.status = 'planning';
+    build.maxVerificationAttempts = this.MAX_VERIFICATION_ATTEMPTS;
+    build.verificationAttempts = 0;
     db.saveBuild(build);
 
     db.addEvent({
@@ -65,16 +73,23 @@ export class SwarmOrchestrator {
     });
 
     try {
-      // 1. FAST INITIAL PLANNER CALL
-      await this.runInitialPlanner(build);
+      // 1. INITIAL PLANNER CALL
+      const planSuccess = await this.runInitialPlanner(build);
+      if (!planSuccess) {
+        throw new Error('Initial project planning failed. Could not generate valid task breakdown.');
+      }
 
-      // 2. LAUNCH ALL ENABLED MODELS AT THE SAME MOMENT
+      // 2. LAUNCH ALL ENABLED MODELS CONCURRENTLY
       build.status = 'running';
       db.saveBuild(build);
 
       const enabledModels = build.selectedModels
         .map(id => modelRegistry.getById(id))
         .filter((m): m is ModelConfig => !!m && m.enabled);
+
+      if (enabledModels.length === 0) {
+        throw new Error('No enabled models available to run swarm.');
+      }
 
       control.workerCount = enabledModels.length;
 
@@ -101,6 +116,8 @@ export class SwarmOrchestrator {
       console.error(`Swarm execution failed for build ${buildId}:`, err);
       build.status = 'failed';
       build.error = err.message || 'Swarm execution failure';
+      build.failureReason = err.message || 'Swarm execution failure';
+      build.completedAt = Date.now();
       db.saveBuild(build);
 
       db.addEvent({
@@ -114,9 +131,9 @@ export class SwarmOrchestrator {
   }
 
   /**
-   * Phase 1: Fast initial planner call creates initial task board and small files
+   * Phase 1: Initial planner call creates initial task board and starter files
    */
-  private static async runInitialPlanner(build: Build): Promise<void> {
+  private static async runInitialPlanner(build: Build): Promise<boolean> {
     const plannerPrompt = `PLAN INITIAL PROJECT FOR THIS IDEA: "${build.idea}"
 Break this project down into small, modular files (max ~150 lines each).
 Output JSON with:
@@ -128,12 +145,22 @@ Remember: Output ONLY valid JSON according to schema.`;
     const plannerResult = await callUnifiedGateway({
       modelId: 'gemini',
       prompt: plannerPrompt,
-      systemInstruction: SILENT_WORKER_SYSTEM_PROMPT
+      systemInstruction: SILENT_WORKER_SYSTEM_PROMPT,
+      allowFallback: true
     });
 
-    const parsed = plannerResult.parsedResponse;
-    if (parsed && Array.isArray(parsed.actions)) {
-      for (const action of parsed.actions) {
+    if (!plannerResult.success || !plannerResult.parsedResponse) {
+      // If AI planner call failed, log failure and seed structured domain plan directly from idea
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId: build.id,
+        timestamp: Date.now(),
+        type: 'plan_created',
+        details: `Planner AI unavailable (${plannerResult.error || 'no response'}). Initializing architectural task matrix.`
+      });
+      this.seedFallbackPlan(build);
+    } else {
+      for (const action of plannerResult.parsedResponse.actions) {
         if (action.action === 'create_file') {
           await MergeManager.createFile(build.id, 'gemini-planner', action);
         } else if (action.action === 'create_task') {
@@ -141,28 +168,26 @@ Remember: Output ONLY valid JSON according to schema.`;
             title: action.title,
             description: action.description,
             filePaths: action.filePaths,
-            priority: action.priority || 3
+            priority: action.priority || 3,
+            maxRetries: this.MAX_TASK_RETRIES
           });
         }
       }
-    } else {
-      // Create sensible default starter tasks if empty
-      this.seedFallbackPlan(build);
     }
 
-    // Ensure we have at least 6 core tasks
+    // Ensure we have sufficient tasks on board
     const currentTasks = db.getTasks(build.id);
-    if (currentTasks.length < 4) {
+    if (currentTasks.length < 3) {
       this.seedFallbackPlan(build);
     }
 
-    // Ensure standard project files exist
+    // Ensure README.md exists
     const readme = db.getFile(build.id, 'README.md');
     if (!readme) {
       await MergeManager.createFile(build.id, 'planner', {
         action: 'create_file',
         path: 'README.md',
-        content: `# ${build.idea}\n\nBuilt by **SquadForge** multi-AI parallel swarm engineering.\n\n## Overview\nThis software was engineered autonomously by 10+ AI models working silently in parallel.\n`,
+        content: `# ${build.idea}\n\nBuilt by **SquadForge** multi-AI parallel swarm engineering.\n\n## Overview\nThis software is engineered autonomously by models working in parallel with conflict-free merges.\n`,
         commitMessage: 'Initial project documentation'
       });
     }
@@ -174,54 +199,52 @@ Remember: Output ONLY valid JSON according to schema.`;
       type: 'plan_created',
       details: `Living task board initialized with ${db.getTasks(build.id).length} tasks and ${db.getAllFiles(build.id).length} initial files`
     });
+
+    return true;
   }
 
   /**
-   * Seeds fallback initial plan if planner returned minimal actions
+   * Seeds clean initial plan when AI planner call is unavailable
    */
   private static seedFallbackPlan(build: Build): void {
-    const slug = build.idea.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 20);
-
     TaskManager.createNewTask(build.id, {
-      title: 'Architect Domain Data Types & Interfaces',
-      description: 'Define strong TypeScript interfaces and contracts for entities, requests and responses',
+      title: 'Architect Domain Data Types & Contracts',
+      description: `Define TypeScript types and domain interfaces for: ${build.idea}`,
       filePaths: ['src/types/domain.ts'],
-      priority: 2
+      priority: 2,
+      maxRetries: this.MAX_TASK_RETRIES
     });
 
     TaskManager.createNewTask(build.id, {
-      title: 'Develop Core Business Logic Engine',
-      description: 'Implement core domain algorithms, validation rules, and error handling',
+      title: 'Develop Core Domain Engine',
+      description: `Implement core computational business logic and processors for: ${build.idea}`,
       filePaths: ['src/core/engine.ts'],
-      priority: 2
+      priority: 2,
+      maxRetries: this.MAX_TASK_RETRIES
     });
 
     TaskManager.createNewTask(build.id, {
-      title: 'Build Interactive UI View Component',
-      description: 'Create responsive, accessible user interface controls and views',
+      title: 'Build UI View Component',
+      description: `Implement interactive view rendering for: ${build.idea}`,
       filePaths: ['src/components/MainView.tsx'],
-      priority: 3
+      priority: 3,
+      maxRetries: this.MAX_TASK_RETRIES
     });
 
     TaskManager.createNewTask(build.id, {
-      title: 'Implement Data Store & Local Cache Service',
-      description: 'Create persistence layer with optimistic updates and event handlers',
+      title: 'Implement Data Store & Persistence Service',
+      description: 'Implement storage, queries, and state management service',
       filePaths: ['src/services/store.ts'],
-      priority: 3
+      priority: 3,
+      maxRetries: this.MAX_TASK_RETRIES
     });
 
     TaskManager.createNewTask(build.id, {
-      title: 'Create Automated Test Fixture Suite',
-      description: 'Write unit tests covering edge cases and error bounds',
+      title: 'Create Automated Test Suite',
+      description: 'Write unit tests validating core functionality and error boundaries',
       filePaths: ['tests/engine.test.ts'],
-      priority: 3
-    });
-
-    TaskManager.createNewTask(build.id, {
-      title: 'Harden Security & Input Sanitization',
-      description: 'Validate input schemas and add defensive checks against injection',
-      filePaths: ['src/security/sanitizer.ts'],
-      priority: 2
+      priority: 3,
+      maxRetries: this.MAX_TASK_RETRIES
     });
   }
 
@@ -274,20 +297,19 @@ Remember: Output ONLY valid JSON according to schema.`;
         consecutiveIdleCount++;
         db.updateModelRun(buildId, model.id, { 
           status: 'idle',
-          lastActionSummary: 'No matching tasks. Waiting for work...'
+          lastActionSummary: 'No matching open tasks. Waiting...'
         });
 
-        // Check if all tasks on board are completed
+        // Check completion criteria
         const allTasks = db.getTasks(buildId);
         const openOrClaimed = allTasks.filter(t => t.status === 'open' || t.status === 'claimed');
 
         if (openOrClaimed.length === 0 && allTasks.length > 0) {
-          // Check completion
           await this.checkProjectCompletion(buildId, control);
           if (control.stopRequested) break;
         }
 
-        // Brief delay before polling board again
+        // Delay before polling board again
         await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
         continue;
       }
@@ -299,7 +321,7 @@ Remember: Output ONLY valid JSON according to schema.`;
         lastActionSummary: `Working on: ${task.title}`
       });
 
-      // 2. DO THE WORK AND SUBMIT PATCHES
+      // 2. EXECUTE TASK WORK
       try {
         await this.executeTaskWork(buildId, model, task);
       } catch (workErr: any) {
@@ -313,7 +335,6 @@ Remember: Output ONLY valid JSON according to schema.`;
         SandboxRunner.runIntegrityCheck(buildId);
       }
 
-      // Small jitter between iterations to keep execution natural
       await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
     }
 
@@ -321,7 +342,7 @@ Remember: Output ONLY valid JSON according to schema.`;
   }
 
   /**
-   * Executes work on a claimed task, submits patches, handles retries
+   * Executes work on a claimed task, submits patches, handles retries safely
    */
   private static async executeTaskWork(buildId: string, model: ModelConfig, task: Task): Promise<void> {
     const build = db.getBuild(buildId);
@@ -351,6 +372,7 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
 
     let attempts = 0;
     let taskDone = false;
+    let lastError = '';
 
     while (!taskDone && attempts < 3) {
       attempts++;
@@ -358,7 +380,8 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
       const res = await callUnifiedGateway({
         modelId: model.id,
         prompt,
-        systemInstruction: SILENT_WORKER_SYSTEM_PROMPT
+        systemInstruction: SILENT_WORKER_SYSTEM_PROMPT,
+        allowFallback: true
       });
 
       // Track usage
@@ -374,30 +397,60 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
       build.totalCost = (build.totalCost || 0) + (res.tokensUsed * 0.000003);
       db.saveBuild(build);
 
+      // If gateway call failed, record failure accurately
+      if (!res.success || !res.parsedResponse) {
+        lastError = res.error || 'Generation failed: Model produced no valid JSON response';
+        db.updateModelRun(buildId, model.id, { 
+          status: 'retrying',
+          error: lastError,
+          lastActionSummary: `Retry ${attempts}/3: ${lastError}`
+        });
+
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: Date.now(),
+          type: 'patch_rejected',
+          modelId: model.id,
+          taskId: task.id,
+          details: `Generation failed for ${model.id} on task "${task.title}": ${lastError}`
+        });
+
+        await new Promise(r => setTimeout(r, 400));
+        continue;
+      }
+
       const parsed = res.parsedResponse;
-      if (!parsed || !Array.isArray(parsed.actions) || parsed.actions.length === 0) {
-        db.updateModelRun(buildId, model.id, { status: 'retrying' });
+      if (!Array.isArray(parsed.actions) || parsed.actions.length === 0) {
+        lastError = 'Model returned empty actions array';
+        db.updateModelRun(buildId, model.id, { status: 'retrying', error: lastError });
         continue;
       }
 
       // Apply each action via Merge Manager
       let allActionsSucceeded = true;
+      let appliedCount = 0;
+
       for (const action of parsed.actions) {
         if (action.action === 'create_file') {
           const createRes = await MergeManager.createFile(buildId, model.id, action);
           if (!createRes.success) {
             allActionsSucceeded = false;
+            lastError = createRes.error || 'create_file failed';
+          } else {
+            appliedCount++;
           }
         } else if (action.action === 'patch_file') {
           const patchRes = await MergeManager.applyPatch(buildId, model.id, action);
           if (!patchRes.success) {
             allActionsSucceeded = false;
-            // Update model statistics
+            lastError = patchRes.error || 'patch_file failed';
             db.updateModelRun(buildId, model.id, {
               patchesRejected: (modelRun?.patchesRejected || 0) + 1,
               status: 'retrying'
             });
           } else {
+            appliedCount++;
             db.updateModelRun(buildId, model.id, {
               patchesApplied: (modelRun?.patchesApplied || 0) + 1
             });
@@ -407,45 +460,90 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
             title: action.title,
             description: action.description,
             filePaths: action.filePaths,
-            priority: action.priority || 3
+            priority: action.priority || 3,
+            maxRetries: this.MAX_TASK_RETRIES
           });
         }
       }
 
-      if (allActionsSucceeded) {
+      if (allActionsSucceeded && appliedCount > 0) {
         TaskManager.completeTask(buildId, task.id, model.id);
         taskDone = true;
       } else {
-        // Redo retry
         await new Promise(r => setTimeout(r, 200));
       }
     }
 
     if (!taskDone) {
-      TaskManager.releaseTask(buildId, task.id, model.id, 'Max patch retries exceeded');
+      TaskManager.releaseTask(buildId, task.id, model.id, lastError || 'Max patch attempts exceeded');
     }
   }
 
   /**
-   * Verifier phase: checks that all tasks are done, sandbox passes, and verifier model confirms
+   * Verifier phase: checks that all tasks are done, sandbox passes, and verifier model approves.
+   * Genuinely validates approval status and avoids false completions.
    */
   private static async checkProjectCompletion(buildId: string, control: ActiveSwarmControl): Promise<void> {
     const build = db.getBuild(buildId);
     if (!build || build.status !== 'running') return;
 
     const tasks = db.getTasks(buildId);
+
+    // 1. Ensure no open or claimed tasks remain
     const incompleteTasks = tasks.filter(t => t.status === 'open' || t.status === 'claimed');
     if (incompleteTasks.length > 0) return;
 
-    // Run final sandbox verification
-    const sandbox = SandboxRunner.runIntegrityCheck(buildId);
-    if (!sandbox.passed) {
-      // Errors became fix tasks, workers will resume
+    // 2. Check if any tasks have failed
+    const failedTasks = tasks.filter(t => t.status === 'failed');
+    if (failedTasks.length > 0) {
+      // Cannot mark completed if tasks failed
+      build.status = 'failed';
+      build.completedAt = Date.now();
+      build.failureReason = `${failedTasks.length} task(s) failed during execution: ${failedTasks.map(t => t.title).join(', ')}`;
+      build.error = build.failureReason;
+      db.saveBuild(build);
+      control.stopRequested = true;
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'build_failed',
+        details: `Build cannot complete: ${build.failureReason}`
+      });
       return;
     }
 
-    // Call Verifier Model
+    // 3. Ensure at least one file exists
+    const allFiles = db.getAllFiles(buildId);
+    if (allFiles.length === 0) {
+      build.status = 'failed';
+      build.completedAt = Date.now();
+      build.failureReason = 'No files were generated for this project.';
+      db.saveBuild(build);
+      control.stopRequested = true;
+      return;
+    }
+
+    // 4. Run automated sandbox verification
+    const sandbox = SandboxRunner.runIntegrityCheck(buildId);
+    if (!sandbox.passed) {
+      // Sandbox failed; errors became fix tasks on the board
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'sandbox_check',
+        details: `Integrity check failed with ${sandbox.errors.length} error(s). Workers resuming fix tasks.`
+      });
+      return;
+    }
+
+    // 5. Call Verifier Model
     build.status = 'verifying';
+    build.verificationAttempts = (build.verificationAttempts || 0) + 1;
+    const currentAttempt = build.verificationAttempts;
+    const maxAttempts = build.maxVerificationAttempts || this.MAX_VERIFICATION_ATTEMPTS;
     db.saveBuild(build);
 
     db.addEvent({
@@ -453,10 +551,9 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
       buildId,
       timestamp: Date.now(),
       type: 'verifier_started',
-      details: 'All tasks completed and sandbox build passed. Launching Verifier Model to confirm original idea is fully satisfied.'
+      details: `Launching Verifier Model (Attempt ${currentAttempt}/${maxAttempts}) to validate requirements satisfaction.`
     });
 
-    const allFiles = db.getAllFiles(buildId);
     const filesSummary = allFiles.map(f => `- ${f.path} (${f.content.split('\n').length} lines, v${f.version})`).join('\n');
 
     const verifierPrompt = `VERIFY SOFTWARE COMPLETION
@@ -465,23 +562,98 @@ Original User Idea: "${build.idea}"
 Generated File Tree:
 ${filesSummary}
 
-Confirm if this software implements the essential requirements of the original user idea.
-Output ONLY JSON:
+Review whether this software genuinely implements the requirements of the original user idea.
+Output ONLY JSON in this exact schema:
 {
-  "approved": true,
-  "summary": "Project successfully meets requirements with modular architecture",
-  "missingRequirements": []
+  "approved": true or false,
+  "summary": "Specific evaluation explanation",
+  "missingRequirements": ["item 1", "item 2"]
 }`;
 
     const verifyResult = await callUnifiedGateway({
-      modelId: 'claude', // Strong verifier
+      modelId: 'claude',
       prompt: verifierPrompt,
-      systemInstruction: SILENT_WORKER_SYSTEM_PROMPT
+      systemInstruction: 'You are an objective software verifier. Validate requirement coverage without bias. Output only JSON.',
+      allowFallback: true
     });
 
-    // Mark completion
+    // Safely parse verifier response
+    const verifierData = parseVerifierResponse(verifyResult.rawText);
+
+    // If verifier returned malformed JSON or failed
+    if (!verifyResult.success || !verifierData) {
+      const parseError = verifyResult.error || 'Verifier response was malformed or missing boolean approved field.';
+      
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'verifier_rejected',
+        details: `Verification attempt ${currentAttempt}/${maxAttempts} failed: ${parseError}`
+      });
+
+      if (currentAttempt >= maxAttempts) {
+        build.status = 'failed';
+        build.completedAt = Date.now();
+        build.failureReason = `Verification failed: Unable to obtain valid verification verdict after ${maxAttempts} attempts.`;
+        build.error = build.failureReason;
+        db.saveBuild(build);
+        control.stopRequested = true;
+      } else {
+        // Return to running state to retry verification
+        build.status = 'running';
+        db.saveBuild(build);
+      }
+      return;
+    }
+
+    // Inspect genuine approval verdict
+    if (!verifierData.approved) {
+      const missing = verifierData.missingRequirements || [];
+      const summary = verifierData.summary || 'Requirements incomplete';
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'verifier_rejected',
+        details: `Verification rejected: ${summary}. Missing: ${missing.join(', ') || 'unspecified'}`
+      });
+
+      if (currentAttempt >= maxAttempts) {
+        build.status = 'failed';
+        build.completedAt = Date.now();
+        build.failureReason = `Verification rejected after ${maxAttempts} attempts: ${summary}`;
+        build.error = build.failureReason;
+        build.verificationFeedback = summary;
+        db.saveBuild(build);
+        control.stopRequested = true;
+        return;
+      }
+
+      // Create new targeted tasks for missing requirements
+      for (const req of missing) {
+        TaskManager.createNewTask(buildId, {
+          title: `Implement Missing Requirement: ${req.slice(0, 50)}`,
+          description: `Verifier indicated requirement is missing or incomplete: ${req}`,
+          filePaths: ['src/core/engine.ts'],
+          priority: 1,
+          isFixTask: true,
+          maxRetries: this.MAX_TASK_RETRIES
+        });
+      }
+
+      // Resume swarm to address missing requirements
+      build.status = 'running';
+      build.verificationFeedback = summary;
+      db.saveBuild(build);
+      return;
+    }
+
+    // GENUINE SUCCESSFUL APPROVAL
     build.status = 'completed';
     build.completedAt = Date.now();
+    build.verificationFeedback = verifierData.summary;
     db.saveBuild(build);
     control.stopRequested = true;
 
@@ -490,7 +662,7 @@ Output ONLY JSON:
       buildId,
       timestamp: Date.now(),
       type: 'verifier_approved',
-      details: 'Verifier Model confirmed: Idea fully implemented with high architectural integrity!'
+      details: `Verifier Model approved: "${verifierData.summary}"`
     });
 
     db.addEvent({

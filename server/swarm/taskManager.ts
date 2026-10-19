@@ -147,7 +147,8 @@ export class TaskManager {
     db.updateTask(buildId, taskId, {
       status: 'done',
       completedAt: now,
-      leaseExpiresAt: null
+      leaseExpiresAt: null,
+      error: undefined
     });
 
     db.addEvent({
@@ -168,17 +169,62 @@ export class TaskManager {
   }
 
   /**
-   * Releases a claimed task back to the board
+   * Marks a task as failed when retries are exhausted or unrecoverable error occurs
+   */
+  static failTask(buildId: string, taskId: string, modelId: string, error: string): void {
+    const now = Date.now();
+    const task = db.getTask(buildId, taskId);
+    if (!task) return;
+
+    db.updateTask(buildId, taskId, {
+      status: 'failed',
+      claimedBy: null,
+      leaseExpiresAt: null,
+      error,
+      lastError: error
+    });
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: now,
+      type: 'task_failed',
+      taskId,
+      modelId,
+      details: `Task failed: "${task.title}". Reason: ${error}`
+    });
+
+    db.updateModelRun(buildId, modelId, {
+      status: 'failed',
+      currentTaskId: null,
+      error,
+      lastActionSummary: `Failed on task: ${task.title}`
+    });
+  }
+
+  /**
+   * Releases a claimed task back to the board with retry limit tracking.
+   * If retries are exhausted, transitions to failed state.
    */
   static releaseTask(buildId: string, taskId: string, modelId: string, error?: string): void {
     const task = db.getTask(buildId, taskId);
     if (!task) return;
 
+    const currentRetries = (task.retryCount || 0) + 1;
+    const maxRetries = task.maxRetries || 3;
+
+    if (currentRetries >= maxRetries) {
+      this.failTask(buildId, taskId, modelId, `Exhausted retries (${currentRetries}/${maxRetries}): ${error || 'Unknown error'}`);
+      return;
+    }
+
     db.updateTask(buildId, taskId, {
       status: 'open',
       claimedBy: null,
       leaseExpiresAt: null,
-      error
+      retryCount: currentRetries,
+      error,
+      lastError: error
     });
 
     db.addEvent({
@@ -188,13 +234,13 @@ export class TaskManager {
       type: 'task_released',
       taskId,
       modelId,
-      details: `${modelId} released task "${task.title}": ${error || 'Yielded back to board'}`
+      details: `${modelId} released task "${task.title}" (attempt ${currentRetries}/${maxRetries}): ${error || 'Yielded back to board'}`
     });
 
     db.updateModelRun(buildId, modelId, {
       status: 'idle',
       currentTaskId: null,
-      lastActionSummary: `Released: ${task.title}`
+      lastActionSummary: `Released: ${task.title} (${error || 'retry'})`
     });
   }
 
