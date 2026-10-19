@@ -8,10 +8,31 @@ export type ModelStrength =
   | 'debugging' 
   | 'architecture';
 
+export type AgentRole = 
+  | 'project_manager'
+  | 'software_architect'
+  | 'frontend_developer'
+  | 'backend_developer'
+  | 'database_specialist'
+  | 'integration_specialist'
+  | 'qa_testing_specialist'
+  | 'debugging_specialist'
+  | 'security_specialist'
+  | 'devops_release_specialist';
+
+export interface AgentSpec {
+  role: AgentRole;
+  title: string;
+  description: string;
+  assignedModelId: string;
+  responsibilities: string[];
+}
+
 export interface ModelConfig {
   id: string;
   displayName: string;
   providerModel: string;
+  agentRole?: AgentRole;
   strengths: ModelStrength[];
   maxTokens: number;
   enabled: boolean;
@@ -33,7 +54,19 @@ export interface User {
   createdAt: number;
 }
 
-export type TaskStatus = 'open' | 'claimed' | 'done' | 'failed';
+export type TaskStatus = 
+  | 'pending'
+  | 'planning'
+  | 'in_progress'
+  | 'testing'
+  | 'retrying'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'open'
+  | 'claimed'
+  | 'done';
+
 export type TaskPriority = 1 | 2 | 3 | 4 | 5;
 
 export interface Task {
@@ -53,6 +86,15 @@ export interface Task {
   retryCount?: number;
   maxRetries?: number;
   lastError?: string;
+  dependencies?: string[];
+  assignedRole?: AgentRole;
+  milestone?: string;
+  executionLogs?: string[];
+  verificationOutput?: {
+    syntaxPassed?: boolean;
+    testsPassed?: boolean;
+    errors?: string[];
+  };
 }
 
 export interface FileVersion {
@@ -78,6 +120,7 @@ export interface ProjectFile {
 export type EventType = 
   | 'build_started'
   | 'plan_created'
+  | 'milestone_reached'
   | 'task_claimed'
   | 'task_released'
   | 'patch_submitted'
@@ -86,6 +129,8 @@ export type EventType =
   | 'file_created'
   | 'file_leased'
   | 'sandbox_check'
+  | 'tests_executed'
+  | 'security_audit'
   | 'checkpoint_saved'
   | 'checkpoint_reverted'
   | 'task_completed'
@@ -112,7 +157,8 @@ export interface SwarmEvent {
 
 export interface ModelRunStatus {
   modelId: string;
-  status: 'idle' | 'claiming' | 'working' | 'patching' | 'retrying' | 'done' | 'failed';
+  role?: AgentRole;
+  status: 'idle' | 'claiming' | 'working' | 'patching' | 'testing' | 'retrying' | 'done' | 'failed';
   currentTaskId: string | null;
   patchesApplied: number;
   patchesRejected: number;
@@ -132,7 +178,32 @@ export interface Checkpoint {
   patchCount: number;
 }
 
-export type BuildStatus = 'planning' | 'running' | 'verifying' | 'completed' | 'stopped' | 'failed';
+export type BuildStatus = 
+  | 'pending'
+  | 'planning'
+  | 'in_progress'
+  | 'running'
+  | 'verifying'
+  | 'completed'
+  | 'stopped'
+  | 'cancelled'
+  | 'failed';
+
+export interface TechStackConfig {
+  frontend: string;
+  backend: string;
+  database: string;
+  testing: string;
+  security: string;
+}
+
+export interface Milestone {
+  id: string;
+  title: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed';
+  taskIds: string[];
+}
 
 export interface Build {
   id: string;
@@ -145,6 +216,8 @@ export interface Build {
   selectedModels: string[];
   autoPushGithub: boolean;
   githubRepoUrl?: string;
+  gitBranch?: string;
+  pullRequestUrl?: string;
   totalTokens: number;
   totalCost: number;
   costLimit: number;
@@ -155,6 +228,19 @@ export interface Build {
   maxVerificationAttempts?: number;
   verificationFeedback?: string;
   failureReason?: string;
+  techStack?: TechStackConfig;
+  milestones?: Milestone[];
+  testReport?: {
+    total: number;
+    passed: number;
+    failed: number;
+    details: Array<{ name: string; passed: boolean; message?: string }>;
+  };
+  securityAudit?: {
+    passed: boolean;
+    score: number;
+    findings: Array<{ severity: 'low' | 'medium' | 'high'; message: string }>;
+  };
 }
 
 export interface ConcurrencyTestReport {
@@ -176,4 +262,23 @@ export interface ConcurrencyTestReport {
   finalContent: string;
   elapsedMs: number;
   verdict: string;
+}
+
+export interface ConfigStatusResponse {
+  gemini: {
+    configured: boolean;
+    model: string;
+    statusText: string;
+  };
+  openrouter: {
+    configured: boolean;
+    modelCount: number;
+    statusText: string;
+  };
+  github: {
+    oauthConfigured: boolean;
+    userConnected: boolean;
+    username?: string;
+    statusText: string;
+  };
 }

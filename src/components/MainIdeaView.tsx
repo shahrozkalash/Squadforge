@@ -8,12 +8,18 @@ import {
   Github, 
   Sliders, 
   Check, 
-  CheckSquare, 
-  Square,
-  ShieldCheck,
-  Zap,
-  DollarSign
+  ShieldCheck, 
+  Zap, 
+  DollarSign,
+  Layers,
+  Server,
+  Database,
+  TestTube,
+  Shield,
+  KeyRound,
+  ArrowRight
 } from 'lucide-react';
+import { TechStackConfig } from '../types/index.js';
 
 interface MainIdeaViewProps {
   onSwarmStarted: () => void;
@@ -39,7 +45,7 @@ const PRESET_IDEAS = [
 ];
 
 export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) => {
-  const { allModels, startBuild, activeBuild } = useSwarm();
+  const { allModels, startBuild, configStatus } = useSwarm();
   const { user } = useAuth();
 
   const [idea, setIdea] = useState('');
@@ -50,7 +56,16 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
   const [costLimit, setCostLimit] = useState(user?.costLimitPerBuild || 5.0);
   const [isLaunching, setIsLaunching] = useState(false);
 
-  // Sync selected models if allModels loads later
+  // Architecture & Technology Stack selection
+  const [showTechStack, setShowTechStack] = useState(false);
+  const [techStack, setTechStack] = useState<TechStackConfig>({
+    frontend: 'React 19 + TypeScript + Tailwind CSS',
+    backend: 'Node.js Express + TypeScript Server API',
+    database: 'In-Memory Key-Value & Document Store',
+    testing: 'Node.js Native Test Runner (node:test + assert)',
+    security: 'OWASP Defensive Validation, Rate Limiter & AES-256'
+  });
+
   React.useEffect(() => {
     if (selectedModelIds.length === 0 && allModels.length > 0) {
       setSelectedModelIds(allModels.filter(m => m.enabled).map(m => m.id));
@@ -59,7 +74,7 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
 
   const toggleModel = (id: string) => {
     if (selectedModelIds.includes(id)) {
-      if (selectedModelIds.length > 1) {
+      if (selectedModelIds.length > 2) {
         setSelectedModelIds(selectedModelIds.filter(m => m !== id));
       }
     } else {
@@ -71,17 +86,12 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
     setSelectedModelIds(allModels.map(m => m.id));
   };
 
-  const handleDeselectAll = () => {
-    // Keep at least 2 models
-    setSelectedModelIds(allModels.slice(0, 2).map(m => m.id));
-  };
-
   const handleLaunch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!idea.trim() || isLaunching) return;
 
     setIsLaunching(true);
-    const buildId = await startBuild(idea.trim(), selectedModelIds, autoPush, costLimit);
+    const buildId = await startBuild(idea.trim(), selectedModelIds, autoPush, costLimit, techStack);
     setIsLaunching(false);
     if (buildId) {
       onSwarmStarted();
@@ -97,11 +107,44 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
           <span>AUTONOMOUS SOFTWARE ENGINEERING SWARM</span>
         </div>
         <h1 className="text-3xl sm:text-4xl font-extrabold tracking-tight text-white font-sans">
-          10+ AI Models. One Unified Swarm. Zero Chat.
+          10 Specialized AI Agents. One Autonomous Team. Zero Chat.
         </h1>
-        <p className="text-sm text-neutral-400 max-w-2xl leading-relaxed">
-          Provide your software idea. GPT, Codex, Claude, Gemini, Grok, DeepSeek, Nemotron, Llama, Mistral, and Qwen immediately launch together in parallel loops, claiming tasks, submitting verified patches, and running continuous sandbox tests until the project is complete.
+        <p className="text-sm text-neutral-400 max-w-3xl leading-relaxed">
+          Describe the application you want built. SquadForge deploys a full engineering team in parallel: Project Manager, Software Architect, Frontend Dev, Backend Dev, Database Specialist, QA Testing, Debugging, Security, and DevOps agents coordinate autonomously through sequential, conflict-free merges.
         </p>
+      </div>
+
+      {/* Provider Status Pill Bar (Safe, never exposes keys) */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg flex items-center justify-between text-xs font-mono">
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${configStatus?.gemini.configured ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+            <span className="text-neutral-300">Gemini Engine</span>
+          </div>
+          <span className={configStatus?.gemini.configured ? 'text-emerald-400' : 'text-neutral-500'}>
+            {configStatus?.gemini.configured ? 'Ready (3.8 Flash)' : 'Auto-Config'}
+          </span>
+        </div>
+
+        <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg flex items-center justify-between text-xs font-mono">
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${configStatus?.openrouter.configured ? 'bg-emerald-400' : 'bg-cyan-400'}`} />
+            <span className="text-neutral-300">OpenRouter (3P)</span>
+          </div>
+          <span className={configStatus?.openrouter.configured ? 'text-emerald-400' : 'text-cyan-400'}>
+            {configStatus?.openrouter.configured ? 'Direct Multi-Model' : 'Smart Gemini Fallback'}
+          </span>
+        </div>
+
+        <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg flex items-center justify-between text-xs font-mono">
+          <div className="flex items-center gap-2">
+            <Github className="w-3.5 h-3.5 text-neutral-400" />
+            <span className="text-neutral-300">GitHub Branch</span>
+          </div>
+          <span className="text-neutral-400 truncate max-w-[140px]">
+            feature/autonomous-dev
+          </span>
+        </div>
       </div>
 
       <form onSubmit={handleLaunch} className="space-y-6">
@@ -110,17 +153,17 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
           <div className="flex items-center justify-between">
             <label className="text-sm font-semibold text-neutral-200 flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-amber-400" />
-              <span>Project Specification & Scope</span>
+              <span>Project Requirements & Specification</span>
             </label>
             <span className="text-xs text-neutral-400 font-mono">
-              The living planner will partition into ~150-line modular files
+              Natural language prompt &rarr; 4-milestone task breakdown
             </span>
           </div>
 
           <textarea
             value={idea}
             onChange={(e) => setIdea(e.target.value)}
-            placeholder="Describe the software you want built in detail (e.g., 'A decentralized distributed key-value cache engine with TTL eviction, atomic CAS transactions, benchmark harness, and WebSocket prober')..."
+            placeholder="Describe the software you want built in detail (e.g. 'A high-performance in-memory key-value cache engine supporting TTL expiration, LRU eviction, atomic transactions, snapshot persistence, and benchmark harness')..."
             rows={4}
             className="w-full p-4 text-sm bg-neutral-950 border border-neutral-800 rounded-lg text-white placeholder-neutral-500 focus:outline-none focus:border-amber-400 font-sans leading-relaxed resize-none"
             required
@@ -149,38 +192,102 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
           </div>
         </div>
 
-        {/* Model Registry Multi-Select (Config-driven 10+ AI models) */}
+        {/* Technology Stack Customizer (Collapsible) */}
+        <div className="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4 shadow-xl">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-neutral-200 flex items-center gap-2">
+                <Layers className="w-4 h-4 text-purple-400" />
+                <span>Architecture & Technology Stack</span>
+              </h2>
+              <p className="text-xs text-neutral-400 mt-0.5">
+                Software Architect automatically selects stack; customize components below if desired
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowTechStack(!showTechStack)}
+              className="px-2.5 py-1 text-xs font-mono text-neutral-300 hover:text-white bg-neutral-800 rounded border border-neutral-700"
+            >
+              {showTechStack ? 'Hide Options' : 'Customize Stack'}
+            </button>
+          </div>
+
+          {showTechStack && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-neutral-800 text-xs">
+              <div>
+                <label className="block text-neutral-400 mb-1 flex items-center gap-1.5 font-mono">
+                  <Server className="w-3.5 h-3.5 text-orange-400" /> Frontend Framework
+                </label>
+                <input
+                  type="text"
+                  value={techStack.frontend}
+                  onChange={(e) => setTechStack({ ...techStack, frontend: e.target.value })}
+                  className="w-full p-2 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 font-mono text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-neutral-400 mb-1 flex items-center gap-1.5 font-mono">
+                  <Server className="w-3.5 h-3.5 text-blue-400" /> Backend API Engine
+                </label>
+                <input
+                  type="text"
+                  value={techStack.backend}
+                  onChange={(e) => setTechStack({ ...techStack, backend: e.target.value })}
+                  className="w-full p-2 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 font-mono text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-neutral-400 mb-1 flex items-center gap-1.5 font-mono">
+                  <Database className="w-3.5 h-3.5 text-lime-400" /> Database & Storage
+                </label>
+                <input
+                  type="text"
+                  value={techStack.database}
+                  onChange={(e) => setTechStack({ ...techStack, database: e.target.value })}
+                  className="w-full p-2 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 font-mono text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-neutral-400 mb-1 flex items-center gap-1.5 font-mono">
+                  <TestTube className="w-3.5 h-3.5 text-cyan-400" /> Testing Framework
+                </label>
+                <input
+                  type="text"
+                  value={techStack.testing}
+                  onChange={(e) => setTechStack({ ...techStack, testing: e.target.value })}
+                  className="w-full p-2 bg-neutral-950 border border-neutral-800 rounded text-neutral-200 font-mono text-xs"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Multi-Agent Development Team Selection */}
         <div className="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4 shadow-xl">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-neutral-800 pb-3">
             <div>
               <h2 className="text-sm font-semibold text-neutral-200 flex items-center gap-2">
                 <Cpu className="w-4 h-4 text-cyan-400" />
-                <span>Swarm Composition ({selectedModelIds.length} Models Selected)</span>
+                <span>Multi-Agent Swarm ({selectedModelIds.length} Specialized Agents)</span>
               </h2>
               <p className="text-xs text-neutral-400 mt-0.5">
-                All selected models start concurrently at the exact same second using Promise.all
+                Each agent fulfills a specific engineering role in the development lifecycle
               </p>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleSelectAll}
-                className="px-2.5 py-1 text-xs font-mono text-neutral-300 hover:text-white bg-neutral-800 rounded border border-neutral-700"
-              >
-                Select All
-              </button>
-              <button
-                type="button"
-                onClick={handleDeselectAll}
-                className="px-2.5 py-1 text-xs font-mono text-neutral-300 hover:text-white bg-neutral-800 rounded border border-neutral-700"
-              >
-                Reset Min (2)
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={handleSelectAll}
+              className="px-2.5 py-1 text-xs font-mono text-neutral-300 hover:text-white bg-neutral-800 rounded border border-neutral-700"
+            >
+              Select All 10 Agents
+            </button>
           </div>
 
-          {/* Model Selection Grid */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {allModels.map((model) => {
               const isSelected = selectedModelIds.includes(model.id);
@@ -211,11 +318,10 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
                     </div>
                   </div>
 
-                  <p className="text-xs text-neutral-400 line-clamp-1 mt-2">
+                  <p className="text-xs text-neutral-400 line-clamp-2 mt-2">
                     {model.description}
                   </p>
 
-                  {/* Strengths tags (rendered cleanly without pills per design constitution) */}
                   <div className="flex flex-wrap items-center gap-1.5 mt-2.5 text-[11px] font-mono text-neutral-400">
                     {model.strengths.map((str, idx) => (
                       <React.Fragment key={str}>
@@ -230,23 +336,23 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
           </div>
         </div>
 
-        {/* Swarm Run Parameters & Safety Controls */}
+        {/* Safety Thresholds & GitHub Settings */}
         <div className="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4">
           <div className="text-xs font-mono uppercase tracking-wider text-neutral-400 flex items-center gap-1.5">
             <Sliders className="w-3.5 h-3.5 text-amber-400" />
-            <span>Swarm Parameters & Safety Thresholds</span>
+            <span>Deployment Parameters & Guardrails</span>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Auto-Push to GitHub */}
+            {/* Git Feature Branch & PR */}
             <div className="p-3 bg-neutral-950 border border-neutral-800 rounded-lg flex items-center justify-between">
               <div>
                 <div className="text-xs font-medium text-white flex items-center gap-1.5">
                   <Github className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Auto-Push to GitHub</span>
+                  <span>GitHub Branch & PR</span>
                 </div>
                 <div className="text-[11px] text-neutral-400 mt-0.5">
-                  Push new repository on verified completion
+                  Push to feature/autonomous-development-team
                 </div>
               </div>
               <button
@@ -280,20 +386,20 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
                 className="w-full accent-amber-400 h-1 bg-neutral-800 rounded-lg cursor-pointer"
               />
               <div className="text-[11px] text-neutral-400">
-                Swarm halts automatically if spend exceeds budget
+                Halts swarm if total token spend crosses cap
               </div>
             </div>
 
-            {/* Task Timeout & Checks */}
+            {/* Automated Guardrails */}
             <div className="p-3 bg-neutral-950 border border-neutral-800 rounded-lg space-y-1">
               <div className="text-xs font-medium text-white flex items-center gap-1.5">
                 <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
-                <span>Automated Guardrails</span>
+                <span>Verification Guardrails</span>
               </div>
-              <div className="text-[11px] text-neutral-400 space-y-0.5">
-                <div>• 90s atomic claim timeout lease</div>
-                <div>• Sandbox build check every 5 patches</div>
-                <div>• Sequential conflict-free merge manager</div>
+              <div className="text-[11px] text-neutral-400 space-y-0.5 font-mono">
+                <div>• Dependency-aware task scheduling</div>
+                <div>• Automated sandbox & unit test runs</div>
+                <div>• Objective Verifier Model approval</div>
               </div>
             </div>
           </div>
@@ -302,7 +408,7 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
         {/* Action Button */}
         <div className="flex items-center justify-between pt-2">
           <div className="text-xs text-neutral-400">
-            {selectedModelIds.length} models will be launched concurrently as independent workers
+            {selectedModelIds.length} agents will coordinate across 4 milestones with sequential merges
           </div>
 
           <button
@@ -311,7 +417,7 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
             className="flex items-center gap-2 px-6 py-3 text-sm font-semibold text-neutral-950 bg-amber-400 hover:bg-amber-300 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg shadow-lg hover:shadow-amber-400/20 transition-all font-sans"
           >
             <Play className="w-4 h-4 fill-neutral-950" />
-            <span>{isLaunching ? 'Initializing Swarm...' : 'Launch 10-AI Parallel Swarm'}</span>
+            <span>{isLaunching ? 'Initializing Multi-Agent Swarm...' : 'Launch Autonomous Development Team'}</span>
           </button>
         </div>
       </form>

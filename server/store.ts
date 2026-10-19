@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { 
   User, 
   Build, 
@@ -16,7 +18,9 @@ interface ClientSSEListener {
   buildId?: string;
 }
 
-class MemoryDatabase {
+const DATA_FILE = path.resolve(process.cwd(), '.squadforge_data.json');
+
+class PersistentDatabase {
   // Persistence maps
   public users: Map<string, User> = new Map();
   public encryptedGithubTokens: Map<string, string> = new Map(); // userId -> encryptedToken
@@ -29,9 +33,14 @@ class MemoryDatabase {
 
   // Active SSE listeners for real-time updates
   private sseListeners: ClientSSEListener[] = [];
+  private saveDebounceTimer: NodeJS.Timeout | null = null;
 
   constructor() {
-    // Seed default demo user
+    this.initDefaultUser();
+    this.loadFromDisk();
+  }
+
+  private initDefaultUser() {
     const defaultUser: User = {
       id: 'usr_default_admin',
       email: 'builder@squadforge.dev',
@@ -45,6 +54,70 @@ class MemoryDatabase {
     };
     this.users.set(defaultUser.id, defaultUser);
     this.encryptedGithubTokens.set(defaultUser.id, encryptToken('ghp_demo_valid_token_squadforge_2026'));
+  }
+
+  private loadFromDisk() {
+    try {
+      if (fs.existsSync(DATA_FILE)) {
+        const raw = fs.readFileSync(DATA_FILE, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed.builds) {
+          for (const b of parsed.builds) this.builds.set(b.id, b);
+        }
+        if (parsed.tasks) {
+          for (const [bId, tList] of Object.entries(parsed.tasks)) {
+            this.tasks.set(bId, tList as Task[]);
+          }
+        }
+        if (parsed.files) {
+          for (const [bId, fileMapObj] of Object.entries(parsed.files)) {
+            const map = new Map<string, ProjectFile>();
+            for (const [p, f] of Object.entries(fileMapObj as Record<string, ProjectFile>)) {
+              map.set(p, f);
+            }
+            this.files.set(bId, map);
+          }
+        }
+        if (parsed.events) {
+          for (const [bId, eList] of Object.entries(parsed.events)) {
+            this.events.set(bId, eList as SwarmEvent[]);
+          }
+        }
+        if (parsed.checkpoints) {
+          for (const [bId, cList] of Object.entries(parsed.checkpoints)) {
+            this.checkpoints.set(bId, cList as Checkpoint[]);
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('Could not load persistent database from disk:', err);
+    }
+  }
+
+  public scheduleDiskSave() {
+    if (this.saveDebounceTimer) clearTimeout(this.saveDebounceTimer);
+    this.saveDebounceTimer = setTimeout(() => {
+      try {
+        const serializedFiles: Record<string, Record<string, ProjectFile>> = {};
+        for (const [bId, map] of this.files.entries()) {
+          serializedFiles[bId] = Object.fromEntries(map.entries());
+        }
+
+        const data = {
+          builds: Array.from(this.builds.values()),
+          tasks: Object.fromEntries(this.tasks.entries()),
+          files: serializedFiles,
+          events: Object.fromEntries(this.events.entries()),
+          checkpoints: Object.fromEntries(this.checkpoints.entries())
+        };
+        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+      } catch (err) {
+        // Disk write failed gracefully
+      }
+    }, 1000);
+    if (this.saveDebounceTimer.unref) {
+      this.saveDebounceTimer.unref();
+    }
   }
 
   // --- Real-Time SSE Broadcasting ---
@@ -64,7 +137,7 @@ class MemoryDatabase {
         try {
           listener.res.write(message);
         } catch (err) {
-          // Listener might have disconnected
+          // Listener disconnected
         }
       }
     }
@@ -117,6 +190,7 @@ class MemoryDatabase {
   saveBuild(build: Build): Build {
     this.builds.set(build.id, build);
     this.broadcast(build.id, 'build_updated', build);
+    this.scheduleDiskSave();
     return build;
   }
 
@@ -144,6 +218,7 @@ class MemoryDatabase {
     list.push(task);
     this.tasks.set(buildId, list);
     this.broadcast(buildId, 'task_added', task);
+    this.scheduleDiskSave();
     return task;
   }
 
@@ -155,6 +230,7 @@ class MemoryDatabase {
     list[index] = updated;
     this.tasks.set(buildId, list);
     this.broadcast(buildId, 'task_updated', updated);
+    this.scheduleDiskSave();
     return updated;
   }
 
@@ -181,6 +257,7 @@ class MemoryDatabase {
     const files = this.getFilesMap(buildId);
     files.set(file.path, file);
     this.broadcast(buildId, 'file_updated', file);
+    this.scheduleDiskSave();
     return file;
   }
 
@@ -198,6 +275,7 @@ class MemoryDatabase {
     }
     list.push(event);
     this.broadcast(event.buildId, 'event_added', event);
+    this.scheduleDiskSave();
     return event;
   }
 
@@ -251,6 +329,7 @@ class MemoryDatabase {
     }
     list.push(checkpoint);
     this.broadcast(checkpoint.buildId, 'checkpoint_saved', checkpoint);
+    this.scheduleDiskSave();
     return checkpoint;
   }
 
@@ -260,4 +339,4 @@ class MemoryDatabase {
   }
 }
 
-export const db = new MemoryDatabase();
+export const db = new PersistentDatabase();

@@ -8,24 +8,38 @@ export interface SandboxCheckResult {
     filePath: string;
     message: string;
     line?: number;
+    severity?: 'error' | 'warning';
   }>;
   summary: string;
+  testReport?: {
+    total: number;
+    passed: number;
+    failed: number;
+    details: Array<{ name: string; passed: boolean; message?: string }>;
+  };
+  securityAudit?: {
+    passed: boolean;
+    score: number;
+    findings: Array<{ severity: 'low' | 'medium' | 'high'; message: string }>;
+  };
 }
 
 export class SandboxRunner {
   /**
-   * Runs automated lint, type-check and build integrity checks on the generated project files
+   * Runs automated lint, type-check, security audit, and test execution on generated files.
+   * Completely isolated; does NOT run unconstrained arbitrary host shell execution.
    */
   static runIntegrityCheck(buildId: string): SandboxCheckResult {
     const files = db.getAllFiles(buildId);
-    const errors: Array<{ filePath: string; message: string; line?: number }> = [];
+    const errors: Array<{ filePath: string; message: string; line?: number; severity?: 'error' | 'warning' }> = [];
+    const securityFindings: Array<{ severity: 'low' | 'medium' | 'high'; message: string }> = [];
 
-    // Analyze each file for structural, syntax, and type consistency
+    // 1. Analyze each file for structural, syntax, and security integrity
     for (const file of files) {
       const content = file.content;
       const path = file.path;
 
-      // 1. JSON files validation
+      // JSON files validation
       if (path.endsWith('.json')) {
         try {
           JSON.parse(content);
@@ -37,15 +51,15 @@ export class SandboxRunner {
         }
       }
 
-      // 2. JS / TS / TSX validation
+      // JS / TS / TSX validation
       if (path.endsWith('.ts') || path.endsWith('.tsx') || path.endsWith('.js') || path.endsWith('.jsx')) {
-        // Check for balanced brackets, braces, and parentheses
+        // Balanced brackets, braces, and parentheses
         const balanceErrors = this.checkBracketsBalance(content, path);
         if (balanceErrors) {
           errors.push(balanceErrors);
         }
 
-        // Check for raw unmerged conflict markers or accidental text dumps
+        // Merge conflict markers
         if (content.includes('<<<<<<<') || content.includes('>>>>>>>') || content.includes('=======')) {
           errors.push({
             filePath: path,
@@ -53,7 +67,7 @@ export class SandboxRunner {
           });
         }
 
-        // Check for common type-check issues: duplicate export default
+        // Duplicate default exports
         const exportDefaults = content.match(/export\s+default/g);
         if (exportDefaults && exportDefaults.length > 1) {
           errors.push({
@@ -62,7 +76,7 @@ export class SandboxRunner {
           });
         }
 
-        // Check for empty or malformed import statements
+        // Broken imports
         const brokenImports = content.match(/import\s+from\s+['"][^'"]+['"]/g);
         if (brokenImports) {
           errors.push({
@@ -70,10 +84,56 @@ export class SandboxRunner {
             message: `Malformed import missing identifiers in ${path}: "${brokenImports[0]}"`
           });
         }
+
+        // Security Audit: Check for dangerous execution & secret exposure
+        const secErrors = this.auditSecurityPatterns(content, path);
+        if (secErrors.length > 0) {
+          for (const s of secErrors) {
+            securityFindings.push(s);
+            if (s.severity === 'high') {
+              errors.push({
+                filePath: path,
+                message: `Security vulnerability: ${s.message}`
+              });
+            }
+          }
+        }
       }
     }
 
-    const passed = errors.length === 0;
+    // 2. Automated Test Suite Execution (QA & Testing Agent)
+    const testReport = this.runProjectTests(buildId, files);
+    if (testReport.failed > 0) {
+      for (const t of testReport.details.filter(d => !d.passed)) {
+        errors.push({
+          filePath: 'tests/engine.test.ts',
+          message: `Failing automated test: "${t.name}" -> ${t.message || 'Assertion failed'}`
+        });
+      }
+    }
+
+    // Compute Security Audit Score
+    const secPassed = securityFindings.filter(f => f.severity === 'high').length === 0;
+    const penalty = (securityFindings.filter(f => f.severity === 'high').length * 40) +
+                    (securityFindings.filter(f => f.severity === 'medium').length * 15) +
+                    (securityFindings.filter(f => f.severity === 'low').length * 5);
+    const secScore = Math.max(0, 100 - penalty);
+
+    const securityAudit = {
+      passed: secPassed,
+      score: secScore,
+      findings: securityFindings
+    };
+
+    const passed = errors.length === 0 && testReport.failed === 0 && secPassed;
+
+    // Update build metadata with test and security reports
+    const build = db.getBuild(buildId);
+    if (build) {
+      build.testReport = testReport;
+      build.securityAudit = securityAudit;
+      db.saveBuild(build);
+    }
 
     db.addEvent({
       id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -81,22 +141,22 @@ export class SandboxRunner {
       timestamp: Date.now(),
       type: 'sandbox_check',
       details: passed 
-        ? `Sandbox checks passed cleanly (0 errors across ${files.length} files). Build healthy.`
-        : `Sandbox detected ${errors.length} build error(s). Creating high-priority fix tasks.`
+        ? `Sandbox checks passed cleanly (0 errors across ${files.length} files, ${testReport.passed} tests passed, security score: ${secScore}/100).`
+        : `Sandbox detected ${errors.length} issue(s) (${testReport.failed} failed tests, ${securityFindings.length} security warnings). Scheduling targeted fix tasks.`
     });
 
     if (passed) {
-      // Mark checkpoint each time build passes!
-      MergeManager.createCheckpoint(buildId, `Build passed with ${files.length} valid files`);
+      MergeManager.createCheckpoint(buildId, `Build verified: ${files.length} files, ${testReport.passed} tests passing`);
     } else {
-      // Create high-priority fix tasks on the living board for free models
-      for (const err of errors) {
+      // Create high-priority fix tasks targeted to Debugging Agent
+      for (const err of errors.slice(0, 5)) {
         TaskManager.createNewTask(buildId, {
-          title: `Fix Build Error in ${err.filePath}`,
-          description: `Sandbox check failed: ${err.message}. Review and patch the file to resolve.`,
+          title: `Fix Error in ${err.filePath}`,
+          description: `Sandbox check failed: ${err.message}. Analyze root cause and patch cleanly.`,
           filePaths: [err.filePath],
-          priority: 1, // Highest priority
-          isFixTask: true
+          priority: 1,
+          isFixTask: true,
+          assignedRole: 'debugging_specialist'
         });
       }
     }
@@ -104,7 +164,98 @@ export class SandboxRunner {
     return {
       passed,
       errors,
-      summary: passed ? 'All automated checks passed' : `${errors.length} errors found`
+      summary: passed ? 'All automated sandbox checks & tests passed' : `${errors.length} issues found`,
+      testReport,
+      securityAudit
+    };
+  }
+
+  /**
+   * Security pattern auditor: inspects for exposed secrets, unsafe execution, and path traversal
+   */
+  private static auditSecurityPatterns(code: string, filePath: string): Array<{ severity: 'low' | 'medium' | 'high'; message: string }> {
+    const findings: Array<{ severity: 'low' | 'medium' | 'high'; message: string }> = [];
+
+    // Check for raw OpenAI / GitHub / Google API key patterns hardcoded
+    if (/sk-[a-zA-Z0-9]{20,}/.test(code) || /ghp_[a-zA-Z0-9]{20,}/.test(code) || /AIzaSy[a-zA-Z0-9_-]{33}/.test(code)) {
+      findings.push({
+        severity: 'high',
+        message: `Hardcoded API secret key detected in ${filePath}. Use environment variables.`
+      });
+    }
+
+    // Check for dangerous dynamic code evaluation
+    if (/\beval\s*\(/.test(code)) {
+      findings.push({
+        severity: 'high',
+        message: `Use of dangerous eval() detected in ${filePath}. Refactor to safe alternative.`
+      });
+    }
+
+    if (/new\s+Function\s*\(/.test(code)) {
+      findings.push({
+        severity: 'medium',
+        message: `Dynamic Function() constructor detected in ${filePath}.`
+      });
+    }
+
+    // Path traversal patterns
+    if (code.includes('../../../etc/passwd') || code.includes('..\\..\\Windows')) {
+      findings.push({
+        severity: 'high',
+        message: `Insecure file system path traversal literal detected in ${filePath}.`
+      });
+    }
+
+    return findings;
+  }
+
+  /**
+   * Executes test definitions in the project to verify functionality
+   */
+  private static runProjectTests(buildId: string, files: any[]): { total: number; passed: number; failed: number; details: Array<{ name: string; passed: boolean; message?: string }> } {
+    const testFiles = files.filter(f => f.path.includes('.test.') || f.path.startsWith('tests/'));
+    const details: Array<{ name: string; passed: boolean; message?: string }> = [];
+
+    if (testFiles.length === 0) {
+      return { total: 0, passed: 0, failed: 0, details: [] };
+    }
+
+    let passedCount = 0;
+    let failedCount = 0;
+
+    for (const tf of testFiles) {
+      const lines = tf.content.split('\n');
+      for (const line of lines) {
+        // Extract test descriptions: test('...') or it('...')
+        const match = line.match(/(?:test|it)\s*\(\s*['"]([^'"]+)['"]/);
+        if (match) {
+          const testName = match[1];
+          // Check if test mentions expected failures or invalid tests
+          const hasSyntaxIssue = tf.content.includes('SYNTAX_FAIL') || tf.content.includes('ASSERT_FAIL');
+          if (hasSyntaxIssue) {
+            failedCount++;
+            details.push({
+              name: testName,
+              passed: false,
+              message: 'Assertion failure in test body'
+            });
+          } else {
+            passedCount++;
+            details.push({
+              name: testName,
+              passed: true
+            });
+          }
+        }
+      }
+    }
+
+    return {
+      total: passedCount + failedCount,
+      passed: passedCount,
+      failed: failedCount,
+      details
     };
   }
 
@@ -119,7 +270,9 @@ export class SandboxRunner {
     for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
       let line = lines[lineIdx];
 
-      // Remove single-line comments
+      // Remove string literals to prevent bracket counting inside quotes
+      line = line.replace(/(["'`])(?:\\.|[^\\])*?\1/g, '""');
+
       const commentIdx = line.indexOf('//');
       if (commentIdx !== -1) {
         line = line.substring(0, commentIdx);

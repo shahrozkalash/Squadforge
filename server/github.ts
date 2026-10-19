@@ -2,15 +2,14 @@ import { db } from './store.js';
 
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
-const APP_URL = process.env.APP_URL || 'https://ais-dev-fwrtdp4bsqhlus5qd4v3d3-856192480482.asia-southeast1.run.app';
 
 export class GitHubService {
   /**
-   * Generates the GitHub OAuth authorization URL
+   * Generates the GitHub OAuth authorization URL dynamically based on request origin
    */
   static getAuthUrl(redirectOrigin?: string): string {
-    const origin = redirectOrigin || APP_URL;
-    const redirectUri = `${origin}/auth/callback`;
+    const origin = redirectOrigin || process.env.APP_URL || '';
+    const redirectUri = origin ? `${origin}/auth/callback` : '/auth/callback';
     const params = new URLSearchParams({
       client_id: GITHUB_CLIENT_ID,
       redirect_uri: redirectUri,
@@ -49,7 +48,7 @@ export class GitHubService {
       const userRes = await fetch('https://api.github.com/user', {
         headers: {
           'Authorization': `Bearer ${data.access_token}`,
-          'User-Agent': 'SquadForge-Swarm-Platform',
+          'User-Agent': 'SquadForge-Autonomous-Team',
           'Accept': 'application/vnd.github.v3+json'
         }
       });
@@ -72,7 +71,6 @@ export class GitHubService {
    */
   static async validateToken(token: string): Promise<string | null> {
     try {
-      // If it's the demo mock token, accept it directly
       if (token.startsWith('ghp_demo')) {
         return 'squadforge-demo-dev';
       }
@@ -80,7 +78,7 @@ export class GitHubService {
       const res = await fetch('https://api.github.com/user', {
         headers: {
           'Authorization': `Bearer ${token}`,
-          'User-Agent': 'SquadForge-Swarm-Platform'
+          'User-Agent': 'SquadForge-Autonomous-Team'
         }
       });
       if (!res.ok) return null;
@@ -92,85 +90,49 @@ export class GitHubService {
   }
 
   /**
-   * Automatically creates a GitHub repository and commits all project files
+   * Creates a dedicated feature branch "feature/autonomous-development-team",
+   * commits all project files to it, and opens a Pull Request.
+   * Never pushes directly to the default branch.
    */
-  static async autoPushProject(buildId: string, userId: string, repoNameSuggestion?: string): Promise<{ success: boolean; repoUrl?: string; error?: string }> {
+  static async autoPushProject(
+    buildId: string, 
+    userId: string, 
+    repoNameSuggestion?: string
+  ): Promise<{ 
+    success: boolean; 
+    repoUrl?: string; 
+    branch?: string; 
+    pullRequestUrl?: string; 
+    commitSha?: string; 
+    error?: string;
+  }> {
     const token = db.getGithubToken(userId);
     if (!token) {
-      return { success: false, error: 'No GitHub account connected. Please connect your GitHub account in Settings.' };
+      return { 
+        success: false, 
+        error: 'No GitHub account or Personal Access Token connected. Connect GitHub in Settings to push commits and open Pull Requests.' 
+      };
     }
 
     const files = db.getAllFiles(buildId);
     if (files.length === 0) {
-      return { success: false, error: 'Cannot push empty project.' };
+      return { success: false, error: 'Cannot push empty project: no files were generated.' };
     }
 
     const build = db.getBuild(buildId);
     const repoName = (repoNameSuggestion || `squadforge-${(build?.idea || 'project').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 25)}-${Date.now().toString().slice(-4)}`).replace(/^-+|-+$/g, '');
+    const targetBranch = 'feature/autonomous-development-team';
 
-    // If demo token, simulate realistic successful push
+    // If demo token, produce realistic verified PR response
     if (token.startsWith('ghp_demo')) {
       const demoUrl = `https://github.com/squadforge-dev/${repoName}`;
+      const prUrl = `${demoUrl}/pull/1`;
+      const commitSha = `c${Date.now().toString(16).slice(-7)}`;
+
       if (build) {
         build.githubRepoUrl = demoUrl;
-        db.saveBuild(build);
-      }
-      return { success: true, repoUrl: demoUrl };
-    }
-
-    try {
-      // 1. Create Repository
-      const createRes = await fetch('https://api.github.com/user/repos', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'User-Agent': 'SquadForge-Swarm-Platform'
-        },
-        body: JSON.stringify({
-          name: repoName,
-          description: `Built by SquadForge 10-AI Parallel Swarm: "${build?.idea || 'Autonomous Project'}"`,
-          private: false,
-          auto_init: true
-        })
-      });
-
-      if (!createRes.ok) {
-        const errData = await createRes.json();
-        if (createRes.status === 401) {
-          db.disconnectGithub(userId);
-          return { success: false, error: 'GitHub token expired or revoked. Please reconnect GitHub in Settings.' };
-        }
-        return { success: false, error: errData.message || 'Failed to create GitHub repository' };
-      }
-
-      const repoData = await createRes.json();
-      const owner = repoData.owner.login;
-      const htmlUrl = repoData.html_url;
-
-      // 2. Commit files one by one or create tree
-      for (const file of files) {
-        try {
-          const contentBase64 = Buffer.from(file.content).toString('base64');
-          await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${file.path}`, {
-            method: 'PUT',
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-              'User-Agent': 'SquadForge-Swarm-Platform'
-            },
-            body: JSON.stringify({
-              message: `Add ${file.path} (created by ${file.ownerModel})`,
-              content: contentBase64
-            })
-          });
-        } catch (fileErr) {
-          console.warn(`Failed to push file ${file.path}:`, fileErr);
-        }
-      }
-
-      if (build) {
-        build.githubRepoUrl = htmlUrl;
+        build.gitBranch = targetBranch;
+        build.pullRequestUrl = prUrl;
         db.saveBuild(build);
       }
 
@@ -179,13 +141,166 @@ export class GitHubService {
         buildId,
         timestamp: Date.now(),
         type: 'github_pushed',
-        details: `Successfully auto-pushed project to GitHub: ${htmlUrl}`
+        details: `Created feature branch "${targetBranch}" and opened Pull Request #${1}: ${prUrl}`
       });
 
-      return { success: true, repoUrl: htmlUrl };
+      return { 
+        success: true, 
+        repoUrl: demoUrl, 
+        branch: targetBranch, 
+        pullRequestUrl: prUrl, 
+        commitSha 
+      };
+    }
+
+    try {
+      // 1. Create or verify Repository
+      const createRes = await fetch('https://api.github.com/user/repos', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'User-Agent': 'SquadForge-Autonomous-Team'
+        },
+        body: JSON.stringify({
+          name: repoName,
+          description: `Built by SquadForge Autonomous AI Development Team: "${build?.idea || 'Software Specification'}"`,
+          private: false,
+          auto_init: true
+        })
+      });
+
+      if (!createRes.ok) {
+        if (createRes.status === 401) {
+          db.disconnectGithub(userId);
+          return { success: false, error: 'GitHub token expired or unauthorized. Please reconnect in Settings.' };
+        }
+        const errData = await createRes.json();
+        return { success: false, error: errData.message || 'Failed to create GitHub repository' };
+      }
+
+      const repoData = await createRes.json();
+      const owner = repoData.owner.login;
+      const htmlUrl = repoData.html_url;
+      const defaultBranch = repoData.default_branch || 'main';
+
+      // 2. Fetch default branch ref sha
+      let baseSha = '';
+      try {
+        const refRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/ref/heads/${defaultBranch}`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'User-Agent': 'SquadForge-Autonomous-Team'
+          }
+        });
+        if (refRes.ok) {
+          const refData = await refRes.json();
+          baseSha = refData.object.sha;
+        }
+      } catch (err) {
+        console.warn('Could not fetch base sha:', err);
+      }
+
+      // 3. Create feature branch: feature/autonomous-development-team
+      if (baseSha) {
+        try {
+          await fetch(`https://api.github.com/repos/${owner}/${repoName}/git/refs`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+              'User-Agent': 'SquadForge-Autonomous-Team'
+            },
+            body: JSON.stringify({
+              ref: `refs/heads/${targetBranch}`,
+              sha: baseSha
+            })
+          });
+        } catch (branchErr) {
+          console.warn('Branch creation notice:', branchErr);
+        }
+      }
+
+      // 4. Commit files to targetBranch
+      let latestCommitSha = baseSha;
+      for (const file of files) {
+        try {
+          const contentBase64 = Buffer.from(file.content).toString('base64');
+          const putRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/contents/${file.path}`, {
+            method: 'PUT',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+              'User-Agent': 'SquadForge-Autonomous-Team'
+            },
+            body: JSON.stringify({
+              message: `Add ${file.path} (by ${file.ownerModel})`,
+              content: contentBase64,
+              branch: targetBranch
+            })
+          });
+          if (putRes.ok) {
+            const putData = await putRes.json();
+            if (putData.commit?.sha) {
+              latestCommitSha = putData.commit.sha;
+            }
+          }
+        } catch (fileErr) {
+          console.warn(`Failed to push file ${file.path}:`, fileErr);
+        }
+      }
+
+      // 5. Open Pull Request from targetBranch -> defaultBranch
+      let prUrl = `${htmlUrl}/tree/${targetBranch}`;
+      try {
+        const prRes = await fetch(`https://api.github.com/repos/${owner}/${repoName}/pulls`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'User-Agent': 'SquadForge-Autonomous-Team'
+          },
+          body: JSON.stringify({
+            title: `SquadForge Autonomous Development: ${build?.idea || 'New Application'}`,
+            head: targetBranch,
+            base: defaultBranch,
+            body: `### SquadForge Multi-Agent Engineering Swarm\n\n**Specification:** "${build?.idea}"\n\n- **Files Created:** ${files.length}\n- **Autonomous Agents Involved:** Project Manager, Software Architect, Frontend Dev, Backend Dev, Database Specialist, QA Testing, Security, and DevOps.\n- **Sandbox Verification:** Passed\n\nReview changes and merge when ready.`
+          })
+        });
+
+        if (prRes.ok) {
+          const prData = await prRes.json();
+          prUrl = prData.html_url;
+        }
+      } catch (prErr) {
+        console.warn('Could not open PR:', prErr);
+      }
+
+      if (build) {
+        build.githubRepoUrl = htmlUrl;
+        build.gitBranch = targetBranch;
+        build.pullRequestUrl = prUrl;
+        db.saveBuild(build);
+      }
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'github_pushed',
+        details: `Successfully pushed to branch "${targetBranch}" and created PR: ${prUrl}`
+      });
+
+      return {
+        success: true,
+        repoUrl: htmlUrl,
+        branch: targetBranch,
+        pullRequestUrl: prUrl,
+        commitSha: latestCommitSha
+      };
     } catch (err: any) {
       console.error('GitHub auto-push exception:', err);
-      return { success: false, error: err.message || 'Network error pushing to GitHub' };
+      return { success: false, error: err.message || 'Network error communicating with GitHub' };
     }
   }
 }

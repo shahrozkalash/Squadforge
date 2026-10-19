@@ -9,17 +9,18 @@ import {
   Check, 
   History, 
   GitCommit, 
-  User, 
   Clock,
   Sparkles,
-  Layers
+  Layers,
+  GitCompare,
+  ArrowRight
 } from 'lucide-react';
 import { ProjectFile } from '../types/index.js';
 
 export const ProjectCodeView: React.FC = () => {
-  const { files, selectedFile, setSelectedFile, exportProjectZip, activeBuild, rollbackFile } = useSwarm();
+  const { files, selectedFile, setSelectedFile, exportProjectZip, rollbackFile } = useSwarm();
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<'code' | 'history' | 'diff'>('code');
+  const [activeTab, setActiveTab] = useState<'code' | 'diff' | 'history'>('code');
 
   const currentFile = selectedFile || (files.length > 0 ? files[0] : null);
 
@@ -49,13 +50,12 @@ export const ProjectCodeView: React.FC = () => {
         <FileCode className="w-10 h-10 text-neutral-600 mx-auto" />
         <h3 className="text-lg font-semibold text-white">No Generated Code Files Yet</h3>
         <p className="text-xs text-neutral-400">
-          When the 10-model swarm executes an idea, the living file tree will populate here in real time.
+          When the autonomous swarm executes a project idea, the generated file workspace will appear here with full diff lineage.
         </p>
       </div>
     );
   }
 
-  // Model color badge mapping
   const getModelBadge = (modelId: string) => {
     if (modelId.includes('gpt')) return 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20';
     if (modelId.includes('claude')) return 'bg-amber-500/10 text-amber-300 border-amber-500/20';
@@ -63,12 +63,72 @@ export const ProjectCodeView: React.FC = () => {
     if (modelId.includes('deepseek')) return 'bg-cyan-500/10 text-cyan-300 border-cyan-500/20';
     if (modelId.includes('codex')) return 'bg-teal-500/10 text-teal-300 border-teal-500/20';
     if (modelId.includes('grok')) return 'bg-indigo-500/10 text-indigo-300 border-indigo-500/20';
+    if (modelId.includes('llama')) return 'bg-violet-500/10 text-violet-300 border-violet-500/20';
+    if (modelId.includes('mistral')) return 'bg-orange-500/10 text-orange-300 border-orange-500/20';
     return 'bg-purple-500/10 text-purple-300 border-purple-500/20';
+  };
+
+  // Compute simple unified line diff between previous version and current version
+  const renderDiff = () => {
+    if (!currentFile || !currentFile.history || currentFile.history.length < 2) {
+      return (
+        <div className="p-8 text-center text-xs font-mono text-neutral-500">
+          This file is at version 1 (initial creation). No prior versions to diff against.
+        </div>
+      );
+    }
+
+    const prevVersion = currentFile.history[currentFile.history.length - 2];
+    const prevLines = prevVersion.content.split('\n');
+    const currLines = currentFile.content.split('\n');
+
+    // Simple diff display
+    return (
+      <div className="p-4 font-mono text-xs overflow-x-auto min-h-[500px] leading-relaxed bg-neutral-950/90">
+        <div className="text-[11px] text-neutral-400 pb-3 mb-2 border-b border-neutral-800 flex items-center justify-between">
+          <span>Comparing <span className="text-rose-400 font-bold">v{prevVersion.version}</span> against <span className="text-emerald-400 font-bold">v{currentFile.version}</span>:</span>
+          <span>Target: {currentFile.path}</span>
+        </div>
+
+        <table className="w-full border-collapse">
+          <tbody>
+            {currLines.map((line, idx) => {
+              const prevLine = prevLines[idx];
+              const isAdded = prevLine === undefined;
+              const isModified = prevLine !== undefined && prevLine !== line;
+
+              return (
+                <tr 
+                  key={idx} 
+                  className={
+                    isAdded 
+                      ? 'bg-emerald-950/30 text-emerald-200' 
+                      : isModified 
+                      ? 'bg-amber-950/30 text-amber-200' 
+                      : 'hover:bg-neutral-900/50 text-neutral-300'
+                  }
+                >
+                  <td className="w-8 pr-2 text-right text-neutral-600 select-none text-[11px]">
+                    {idx + 1}
+                  </td>
+                  <td className="w-6 text-center select-none font-bold text-[11px]">
+                    {isAdded ? '+' : isModified ? '~' : ' '}
+                  </td>
+                  <td className="whitespace-pre">
+                    {line || ' '}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    );
   };
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-4">
-      {/* Action Header: Export ZIP, File counts */}
+      {/* Action Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-neutral-900 border border-neutral-800 rounded-xl">
         <div className="flex items-center gap-3">
           <Folder className="w-5 h-5 text-amber-400" />
@@ -80,7 +140,7 @@ export const ProjectCodeView: React.FC = () => {
               </span>
             </h2>
             <p className="text-xs text-neutral-400">
-              Each file created & patched through conflict-free Merge Manager with complete version history
+              Files created and patched through sequential conflict-free merge manager with immutable version lineage
             </p>
           </div>
         </div>
@@ -96,7 +156,7 @@ export const ProjectCodeView: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Workspace (Left: File Explorer, Right: Code Viewer & Diff) */}
+      {/* Main Workspace (Left: Explorer, Right: Viewer & Diff) */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 items-start min-h-[600px]">
         {/* Left: File Tree */}
         <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-xl space-y-2 lg:col-span-1">
@@ -131,7 +191,7 @@ export const ProjectCodeView: React.FC = () => {
           </div>
         </div>
 
-        {/* Right: Code Viewer & Attribution */}
+        {/* Right: Code Viewer, Diff & Attribution */}
         <div className="bg-neutral-900 border border-neutral-800 rounded-xl overflow-hidden lg:col-span-3 flex flex-col">
           {/* File Tab Header */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-4 py-3 border-b border-neutral-800 bg-neutral-950">
@@ -144,7 +204,7 @@ export const ProjectCodeView: React.FC = () => {
               </span>
               {currentFile && (
                 <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${getModelBadge(currentFile.ownerModel)}`}>
-                  latest: {currentFile.ownerModel}
+                  author: {currentFile.ownerModel}
                 </span>
               )}
             </div>
@@ -161,12 +221,21 @@ export const ProjectCodeView: React.FC = () => {
                   Code
                 </button>
                 <button
+                  onClick={() => setActiveTab('diff')}
+                  className={`px-3 py-1 rounded font-medium transition-colors flex items-center gap-1 ${
+                    activeTab === 'diff' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'
+                  }`}
+                >
+                  <GitCompare className="w-3 h-3" />
+                  <span>Diff</span>
+                </button>
+                <button
                   onClick={() => setActiveTab('history')}
                   className={`px-3 py-1 rounded font-medium transition-colors ${
                     activeTab === 'history' ? 'bg-neutral-800 text-white' : 'text-neutral-400 hover:text-white'
                   }`}
                 >
-                  Who Wrote What ({currentFile?.history?.length || 1})
+                  Lineage ({currentFile?.history?.length || 1})
                 </button>
               </div>
 
@@ -207,6 +276,8 @@ export const ProjectCodeView: React.FC = () => {
               </table>
             </div>
           )}
+
+          {activeTab === 'diff' && renderDiff()}
 
           {activeTab === 'history' && (
             <div className="p-4 space-y-3 bg-neutral-950/80 min-h-[500px]">

@@ -7,7 +7,9 @@ import {
   SwarmEvent, 
   ModelRunStatus, 
   Checkpoint, 
-  ModelConfig 
+  ModelConfig,
+  ConfigStatusResponse,
+  TechStackConfig
 } from '../types/index.js';
 
 interface SwarmContextType {
@@ -18,17 +20,20 @@ interface SwarmContextType {
   modelRuns: ModelRunStatus[];
   checkpoints: Checkpoint[];
   allModels: ModelConfig[];
+  configStatus: ConfigStatusResponse | null;
   selectedFile: ProjectFile | null;
   setSelectedFile: (file: ProjectFile | null) => void;
-  startBuild: (idea: string, selectedModels: string[], autoPush: boolean, costLimit: number) => Promise<string | null>;
+  startBuild: (idea: string, selectedModels: string[], autoPush: boolean, costLimit: number, techStack?: TechStackConfig) => Promise<string | null>;
   stopBuild: () => Promise<void>;
+  resumeBuild: (buildId?: string) => Promise<boolean>;
   retryFailedTasks: () => Promise<void>;
-  pushToGitHub: () => Promise<{ success: boolean; repoUrl?: string; error?: string }>;
+  pushToGitHub: () => Promise<{ success: boolean; repoUrl?: string; branch?: string; pullRequestUrl?: string; commitSha?: string; error?: string }>;
   rollbackToCheckpoint: (checkpointId: string) => Promise<boolean>;
   rollbackFile: (filePath: string, version: number) => Promise<boolean>;
   exportProjectZip: () => Promise<void>;
   fetchBuildDetails: (buildId: string) => Promise<void>;
   refreshModels: () => Promise<void>;
+  refreshConfigStatus: () => Promise<void>;
 }
 
 const SwarmContext = createContext<SwarmContextType | undefined>(undefined);
@@ -41,6 +46,7 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [modelRuns, setModelRuns] = useState<ModelRunStatus[]>([]);
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [allModels, setAllModels] = useState<ModelConfig[]>([]);
+  const [configStatus, setConfigStatus] = useState<ConfigStatusResponse | null>(null);
   const [selectedFile, setSelectedFile] = useState<ProjectFile | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -58,8 +64,38 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   };
 
+  // Fetch configuration status
+  const refreshConfigStatus = async () => {
+    try {
+      const res = await fetch('/api/config-status');
+      if (res.ok) {
+        const data: ConfigStatusResponse = await res.json();
+        setConfigStatus(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch config status:', err);
+    }
+  };
+
+  // Initial load: models, config status, and most recent build for resumability
   useEffect(() => {
     refreshModels();
+    refreshConfigStatus();
+
+    // Fetch existing builds to restore active or latest build
+    fetch('/api/builds')
+      .then(res => res.json())
+      .then(data => {
+        if (data.builds && data.builds.length > 0) {
+          const activeOrRecent = data.builds.find((b: Build) => 
+            b.status === 'running' || b.status === 'planning' || b.status === 'verifying'
+          ) || data.builds[0];
+          if (activeOrRecent) {
+            fetchBuildDetails(activeOrRecent.id);
+          }
+        }
+      })
+      .catch(err => console.error('Failed to load recent builds:', err));
   }, []);
 
   // Fetch details of a specific build
@@ -76,7 +112,6 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setCheckpoints(data.checkpoints || []);
 
         if (data.files && data.files.length > 0) {
-          // Keep current selected file updated or select README.md
           setSelectedFile(prev => {
             if (prev) {
               const updated = data.files.find((f: ProjectFile) => f.path === prev.path);
@@ -173,7 +208,7 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       } catch (err) {}
     });
 
-    // Also periodic poll every 3s as backup sync
+    // Periodic sync
     const pollInterval = setInterval(() => {
       if (activeBuild?.status === 'running' || activeBuild?.status === 'planning' || activeBuild?.status === 'verifying') {
         fetchBuildDetails(buildId);
@@ -186,7 +221,13 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     };
   }, [activeBuild?.id]);
 
-  const startBuild = async (idea: string, selectedModels: string[], autoPush: boolean, costLimit: number): Promise<string | null> => {
+  const startBuild = async (
+    idea: string, 
+    selectedModels: string[], 
+    autoPush: boolean, 
+    costLimit: number,
+    techStack?: TechStackConfig
+  ): Promise<string | null> => {
     try {
       const res = await fetch('/api/builds', {
         method: 'POST',
@@ -195,7 +236,8 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           idea,
           selectedModels,
           autoPushGithub: autoPush,
-          costLimit
+          costLimit,
+          techStack
         })
       });
 
@@ -214,6 +256,17 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (!activeBuild) return;
     await fetch(`/api/builds/${activeBuild.id}/stop`, { method: 'POST' });
     await fetchBuildDetails(activeBuild.id);
+  };
+
+  const resumeBuild = async (buildId?: string): Promise<boolean> => {
+    const targetId = buildId || activeBuild?.id;
+    if (!targetId) return false;
+    const res = await fetch(`/api/builds/${targetId}/resume`, { method: 'POST' });
+    if (res.ok) {
+      await fetchBuildDetails(targetId);
+      return true;
+    }
+    return false;
   };
 
   const retryFailedTasks = async () => {
@@ -266,7 +319,6 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       zip.file(file.path, file.content);
     }
 
-    // Include .env.example
     zip.file('.env.example', `# SquadForge Environment\nPORT=3000\nNODE_ENV=production\n`);
 
     const blob = await zip.generateAsync({ type: 'blob' });
@@ -289,17 +341,20 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       modelRuns,
       checkpoints,
       allModels,
+      configStatus,
       selectedFile,
       setSelectedFile,
       startBuild,
       stopBuild,
+      resumeBuild,
       retryFailedTasks,
       pushToGitHub,
       rollbackToCheckpoint,
       rollbackFile,
       exportProjectZip,
       fetchBuildDetails,
-      refreshModels
+      refreshModels,
+      refreshConfigStatus
     }}>
       {children}
     </SwarmContext.Provider>

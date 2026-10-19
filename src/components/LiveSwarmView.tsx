@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useSwarm } from '../context/SwarmContext.js';
 import { 
   Square, 
@@ -14,9 +14,17 @@ import {
   Terminal,
   Activity,
   Zap,
-  ArrowRight
+  ArrowRight,
+  Play,
+  ShieldAlert,
+  ShieldCheck,
+  TestTube,
+  Check,
+  FileCode,
+  GitBranch,
+  GitPullRequest
 } from 'lucide-react';
-import { Task, SwarmEvent, ModelRunStatus, ModelConfig } from '../types/index.js';
+import { Task, SwarmEvent, ModelRunStatus, ModelConfig, AgentRole } from '../types/index.js';
 
 interface LiveSwarmViewProps {
   onViewCode: () => void;
@@ -30,9 +38,13 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
     modelRuns, 
     allModels, 
     stopBuild, 
+    resumeBuild,
     retryFailedTasks, 
     pushToGitHub 
   } = useSwarm();
+
+  const [isPushing, setIsPushing] = useState(false);
+  const [pushStatus, setPushStatus] = useState<string | null>(null);
 
   if (!activeBuild) {
     return (
@@ -40,21 +52,35 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
         <Radio className="w-10 h-10 text-neutral-600 mx-auto" />
         <h3 className="text-lg font-semibold text-white">No Active Swarm Execution</h3>
         <p className="text-xs text-neutral-400">
-          Navigate to the Idea Forge tab to define a software specification and launch all 10 AI models.
+          Navigate to the Idea Forge tab to define a software specification and launch your autonomous engineering team.
         </p>
       </div>
     );
   }
 
-  // Calculate task progress
+  // Calculate task counts
   const totalTasks = tasks.length;
-  const completedTasks = tasks.filter(t => t.status === 'done').length;
-  const claimedTasks = tasks.filter(t => t.status === 'claimed').length;
-  const openTasks = tasks.filter(t => t.status === 'open').length;
+  const completedTasks = tasks.filter(t => t.status === 'completed' || t.status === 'done').length;
+  const inProgressTasks = tasks.filter(t => t.status === 'in_progress' || t.status === 'claimed' || t.status === 'testing').length;
+  const pendingTasks = tasks.filter(t => t.status === 'pending' || t.status === 'open' || t.status === 'retrying').length;
   const failedTasks = tasks.filter(t => t.status === 'failed').length;
   const progressPercent = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
   const isRunning = activeBuild.status === 'running' || activeBuild.status === 'planning' || activeBuild.status === 'verifying';
+  const isStoppedOrFailed = activeBuild.status === 'stopped' || activeBuild.status === 'failed';
+  const isComplete = activeBuild.status === 'completed';
+
+  const handleManualPush = async () => {
+    setIsPushing(true);
+    setPushStatus(null);
+    const res = await pushToGitHub();
+    setIsPushing(false);
+    if (res.success) {
+      setPushStatus(`Pushed to ${res.branch || 'feature/autonomous-development-team'}`);
+    } else {
+      setPushStatus(res.error || 'Push failed');
+    }
+  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
@@ -64,9 +90,9 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
           <div className="space-y-1">
             <div className="flex items-center gap-2">
               <span className={`text-xs font-mono font-bold px-2 py-0.5 rounded border uppercase ${
-                activeBuild.status === 'completed'
+                isComplete
                   ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-                  : activeBuild.status === 'failed' || activeBuild.status === 'stopped'
+                  : isStoppedOrFailed
                   ? 'bg-rose-500/20 text-rose-400 border-rose-500/30'
                   : 'bg-amber-500/20 text-amber-400 border-amber-500/30 animate-pulse'
               }`}>
@@ -79,6 +105,14 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
               <span className="text-xs font-mono text-neutral-400">
                 Cost: ${(activeBuild.totalCost || 0).toFixed(4)} / ${activeBuild.costLimit.toFixed(2)}
               </span>
+              {activeBuild.techStack && (
+                <>
+                  <span className="text-xs text-neutral-500">·</span>
+                  <span className="text-xs font-mono text-purple-400">
+                    {activeBuild.techStack.frontend.split(' ')[0]} + {activeBuild.techStack.backend.split(' ')[0]}
+                  </span>
+                </>
+              )}
             </div>
             <h2 className="text-lg font-bold text-white font-sans line-clamp-2">
               "{activeBuild.idea}"
@@ -92,7 +126,17 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
                 className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg hover:bg-rose-500/20 transition-colors"
               >
                 <Square className="w-3.5 h-3.5 fill-rose-400" />
-                <span>Emergency STOP</span>
+                <span>Pause Swarm</span>
+              </button>
+            )}
+
+            {isStoppedOrFailed && (
+              <button
+                onClick={() => resumeBuild()}
+                className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-emerald-300 bg-emerald-500/10 border border-emerald-500/30 rounded-lg hover:bg-emerald-500/20 transition-colors"
+              >
+                <Play className="w-3.5 h-3.5 fill-emerald-400" />
+                <span>Resume Swarm</span>
               </button>
             )}
 
@@ -116,23 +160,45 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
           </div>
         </div>
 
-        {/* GitHub Auto-Push Link if complete */}
-        {activeBuild.githubRepoUrl && (
-          <div className="p-3 bg-neutral-950 border border-emerald-500/30 rounded-lg flex items-center justify-between">
-            <div className="flex items-center gap-2 text-xs text-emerald-400">
-              <Github className="w-4 h-4" />
-              <span>Project pushed to GitHub:</span>
+        {/* GitHub Feature Branch & Pull Request Status */}
+        {activeBuild.githubRepoUrl ? (
+          <div className="p-3 bg-neutral-950 border border-emerald-500/30 rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 text-emerald-400">
+              <GitPullRequest className="w-4 h-4 shrink-0" />
+              <span>Branch & Pull Request:</span>
               <a 
-                href={activeBuild.githubRepoUrl} 
+                href={activeBuild.pullRequestUrl || activeBuild.githubRepoUrl} 
                 target="_blank" 
                 rel="noreferrer"
-                className="font-mono text-emerald-300 underline hover:text-white flex items-center gap-1"
+                className="font-mono text-emerald-300 underline hover:text-white flex items-center gap-1 truncate"
               >
-                {activeBuild.githubRepoUrl}
-                <ExternalLink className="w-3 h-3" />
+                <span>{activeBuild.gitBranch || 'feature/autonomous-development-team'}</span>
+                <ExternalLink className="w-3 h-3 shrink-0" />
               </a>
             </div>
-            <span className="text-[11px] font-mono text-neutral-400">Auto-push verified</span>
+            <div className="text-[11px] font-mono text-neutral-400 flex items-center gap-2">
+              <span className="text-emerald-400 flex items-center gap-1">
+                <Check className="w-3 h-3 stroke-[3]" /> Never pushes to main directly
+              </span>
+            </div>
+          </div>
+        ) : isComplete && (
+          <div className="p-3 bg-neutral-950 border border-neutral-800 rounded-lg flex items-center justify-between text-xs">
+            <span className="text-neutral-400">Project ready to push to GitHub feature branch:</span>
+            <button
+              onClick={handleManualPush}
+              disabled={isPushing}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-300 bg-emerald-500/10 border border-emerald-500/20 rounded hover:bg-emerald-500/20 transition-colors"
+            >
+              <Github className="w-3.5 h-3.5" />
+              <span>{isPushing ? 'Pushing...' : 'Create Pull Request'}</span>
+            </button>
+          </div>
+        )}
+
+        {pushStatus && (
+          <div className="text-xs font-mono text-amber-300 px-1">
+            {pushStatus}
           </div>
         )}
 
@@ -140,7 +206,7 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
         <div className="space-y-1.5">
           <div className="flex items-center justify-between text-xs font-mono text-neutral-400">
             <span className="flex items-center gap-2">
-              <span>Task Board Completion</span>
+              <span>Milestone & Task Board Completion</span>
               <span className="text-white font-semibold">({completedTasks}/{totalTasks} Done)</span>
             </span>
             <span className="text-amber-400 font-bold">{progressPercent}%</span>
@@ -154,15 +220,56 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
         </div>
       </div>
 
-      {/* 10+ AI Models Worker Cards Grid */}
+      {/* Test & Security Audit Summary Bar */}
+      {(activeBuild.testReport || activeBuild.securityAudit) && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Automated Tests Result */}
+          <div className="p-4 bg-neutral-900 border border-neutral-800 rounded-xl space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                <TestTube className="w-4 h-4 text-cyan-400" />
+                <span>QA & Automated Test Verification</span>
+              </span>
+              <span className="text-xs font-mono text-cyan-300">
+                {activeBuild.testReport?.passed || 0}/{activeBuild.testReport?.total || 0} Passed
+              </span>
+            </div>
+            <div className="text-[11px] text-neutral-400 font-mono">
+              {activeBuild.testReport?.failed === 0 
+                ? 'All unit tests and assertion checks passing cleanly.' 
+                : `${activeBuild.testReport?.failed} test failure(s) being analyzed by Debugging Agent.`}
+            </div>
+          </div>
+
+          {/* Security Audit Result */}
+          <div className="p-4 bg-neutral-900 border border-neutral-800 rounded-xl space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-white flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                <span>Security Agent Audit</span>
+              </span>
+              <span className="text-xs font-mono text-emerald-300">
+                Score: {activeBuild.securityAudit?.score || 100}/100
+              </span>
+            </div>
+            <div className="text-[11px] text-neutral-400 font-mono">
+              {activeBuild.securityAudit?.findings.length === 0
+                ? 'No secret exposure or high-severity OWASP vulnerabilities detected.'
+                : `${activeBuild.securityAudit?.findings.length} security finding(s) reviewed.`}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 10 Specialized AI Agents Dashboard */}
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-mono text-neutral-400 uppercase tracking-wider">
             <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Active Worker Swarm ({activeBuild.selectedModels.length} Concurrent Models)</span>
+            <span>Autonomous Development Team ({activeBuild.selectedModels.length} Concurrent Agents)</span>
           </div>
           <span className="text-xs text-neutral-500 font-mono">
-            Autonomous Promise.all workers
+            Specialized Roles: PM, Architect, Frontend, Backend, DB, QA, Debug, Sec, Ops, Int
           </span>
         </div>
 
@@ -175,6 +282,7 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
             const status = run?.status || 'idle';
             const statusColor = 
               status === 'working' || status === 'patching' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' :
+              status === 'testing' ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30' :
               status === 'claiming' ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' :
               status === 'retrying' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30' :
               status === 'done' ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
@@ -188,16 +296,21 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
               >
                 <div>
                   <div className="flex items-center justify-between gap-1">
-                    <span className="text-xs font-bold text-white font-sans truncate">
-                      {config?.displayName || modelId}
-                    </span>
+                    <div className="flex items-center gap-1.5 truncate">
+                      <span className={`text-[10px] font-mono font-bold px-1.5 py-0.2 rounded border ${config?.avatarColor || 'border-neutral-700 text-neutral-300'}`}>
+                        {config?.badge || modelId.slice(0, 3)}
+                      </span>
+                      <span className="text-xs font-bold text-white font-sans truncate">
+                        {config?.displayName || modelId}
+                      </span>
+                    </div>
                     <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border capitalize ${statusColor}`}>
                       {status}
                     </span>
                   </div>
 
-                  <div className="text-[11px] font-mono text-neutral-400 mt-1 line-clamp-2 h-7">
-                    {currentTask ? currentTask.title : (run?.lastActionSummary || 'Ready for next task')}
+                  <div className="text-[11px] font-mono text-neutral-400 mt-2 line-clamp-2 h-7">
+                    {currentTask ? currentTask.title : (run?.lastActionSummary || 'Ready for next dependency-unlocked task')}
                   </div>
                 </div>
 
@@ -211,29 +324,30 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
         </div>
       </div>
 
-      {/* Living Task Board & Activity Feed (2 Column Split) */}
+      {/* Living Task Board & Activity Stream */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-        {/* Living Task Board */}
+        {/* Living Task Board & Milestones */}
         <div className="p-5 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4 shadow-lg">
           <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
             <div className="flex items-center gap-2">
               <Layers className="w-4 h-4 text-amber-400" />
-              <h3 className="text-sm font-semibold text-white">Living Task Board</h3>
+              <h3 className="text-sm font-semibold text-white">Milestone & Task Tracker</h3>
             </div>
             <div className="flex items-center gap-2 text-xs font-mono text-neutral-400">
               <span className="text-emerald-400">{completedTasks} Done</span>
               <span>·</span>
-              <span className="text-amber-400">{claimedTasks} Claimed</span>
+              <span className="text-amber-400">{inProgressTasks} In Progress</span>
               <span>·</span>
-              <span className="text-neutral-300">{openTasks} Open</span>
+              <span className="text-neutral-300">{pendingTasks} Pending</span>
             </div>
           </div>
 
-          <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
+          <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
             {tasks.map((task) => {
-              const isClaimed = task.status === 'claimed';
-              const isDone = task.status === 'done';
+              const isDone = task.status === 'completed' || task.status === 'done';
+              const isInProgress = task.status === 'in_progress' || task.status === 'claimed' || task.status === 'testing';
               const isFix = task.isFixTask;
+              const hasDeps = task.dependencies && task.dependencies.length > 0;
 
               return (
                 <div 
@@ -241,7 +355,7 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
                   className={`p-3 rounded-lg border text-xs transition-colors ${
                     isDone 
                       ? 'bg-neutral-950/40 border-neutral-800/60 opacity-60' 
-                      : isClaimed 
+                      : isInProgress 
                       ? 'bg-neutral-950 border-amber-500/30' 
                       : isFix 
                       ? 'bg-rose-950/20 border-rose-500/40' 
@@ -250,10 +364,15 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="space-y-1">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         {isFix && (
                           <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 bg-rose-500/20 text-rose-300 border border-rose-500/30 rounded">
                             FIX TASK (P1)
+                          </span>
+                        )}
+                        {task.assignedRole && (
+                          <span className="text-[10px] font-mono px-1.5 py-0.2 bg-purple-500/20 text-purple-300 border border-purple-500/30 rounded">
+                            {task.assignedRole.replace('_', ' ')}
                           </span>
                         )}
                         <span className={`font-medium ${isDone ? 'line-through text-neutral-400' : 'text-neutral-200'}`}>
@@ -268,21 +387,27 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
                     <div className="shrink-0 text-right space-y-0.5">
                       <span className={`inline-block text-[10px] font-mono px-1.5 py-0.5 rounded border capitalize ${
                         isDone ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' :
-                        isClaimed ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+                        isInProgress ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
                         'bg-neutral-800 text-neutral-400 border-neutral-700'
                       }`}>
                         {task.status}
                       </span>
                       {task.claimedBy && (
                         <div className="text-[10px] font-mono text-neutral-400">
-                          by @{task.claimedBy}
+                          @{task.claimedBy}
                         </div>
                       )}
                     </div>
                   </div>
 
+                  {hasDeps && (
+                    <div className="mt-2 pt-1 border-t border-neutral-800/60 flex items-center gap-1 text-[10px] font-mono text-neutral-500">
+                      <span>Depends on: {task.dependencies?.join(', ')}</span>
+                    </div>
+                  )}
+
                   {task.filePaths && task.filePaths.length > 0 && (
-                    <div className="mt-2 pt-1.5 border-t border-neutral-800/60 flex items-center gap-1 text-[11px] font-mono text-neutral-400">
+                    <div className="mt-1 flex items-center gap-1 text-[11px] font-mono text-neutral-400">
                       <span>Files:</span>
                       <span className="text-neutral-300 truncate">{task.filePaths.join(', ')}</span>
                     </div>
@@ -293,19 +418,19 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
           </div>
         </div>
 
-        {/* Real-Time Activity Feed */}
+        {/* Real-Time Activity Stream */}
         <div className="p-5 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4 shadow-lg">
           <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
             <div className="flex items-center gap-2">
               <Terminal className="w-4 h-4 text-cyan-400" />
-              <h3 className="text-sm font-semibold text-white">Live Swarm Activity Stream</h3>
+              <h3 className="text-sm font-semibold text-white">Autonomous Event Log</h3>
             </div>
             <span className="text-xs font-mono text-neutral-400">
               {events.length} actions logged
             </span>
           </div>
 
-          <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1 font-mono text-xs">
+          <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1 font-mono text-xs">
             {events.slice().reverse().map((evt) => {
               const timeStr = new Date(evt.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
               
@@ -315,6 +440,7 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
                 evt.type === 'file_created' ? 'text-cyan-400' :
                 evt.type === 'sandbox_check' ? 'text-blue-400' :
                 evt.type === 'checkpoint_saved' ? 'text-purple-400' :
+                evt.type === 'milestone_reached' ? 'text-amber-300 font-bold' :
                 evt.type === 'github_pushed' ? 'text-emerald-300' :
                 'text-neutral-400';
 

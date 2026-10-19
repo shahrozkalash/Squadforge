@@ -11,29 +11,42 @@ import {
   CreateTaskAction
 } from './types.js';
 
-const geminiApiKey = process.env.GEMINI_API_KEY || '';
-const openRouterApiKey = process.env.OPENROUTER_API_KEY || '';
+let googleGenAIClient: GoogleGenAI | null = null;
+let cachedGeminiKey: string | null = null;
 
-let googleGenAI: GoogleGenAI | null = null;
-if (geminiApiKey) {
-  try {
-    googleGenAI = new GoogleGenAI({
-      apiKey: geminiApiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        },
-      },
-    });
-  } catch (err) {
-    console.error('Failed to initialize GoogleGenAI client');
+/**
+ * Returns initialized GoogleGenAI client using process.env.GEMINI_API_KEY.
+ * Lazy initialized to pick up environment variables at runtime.
+ */
+export function getGoogleGenAI(): GoogleGenAI | null {
+  const currentKey = process.env.GEMINI_API_KEY || '';
+  if (!currentKey) {
+    return null;
   }
+  if (!googleGenAIClient || cachedGeminiKey !== currentKey) {
+    try {
+      googleGenAIClient = new GoogleGenAI({
+        apiKey: currentKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'SquadForge-Parallel-Swarm',
+          },
+        },
+      });
+      cachedGeminiKey = currentKey;
+    } catch (err) {
+      console.error('Failed to initialize GoogleGenAI client');
+      return null;
+    }
+  }
+  return googleGenAIClient;
 }
 
-export const SILENT_WORKER_SYSTEM_PROMPT = `You are a silent worker in an autonomous software development team.
+export const SILENT_WORKER_SYSTEM_PROMPT = `You are a specialized autonomous engineer in a software development team.
 Do the work. No opinions, greetings, explanations, warnings, or questions.
 Output only valid JSON actions. If something is ambiguous, choose the simplest option and continue.
 You NEVER write commentary or markdown outside the JSON block.
+Never return empty placeholders, stubs, or comments like "// write code here". Implement complete, production-grade logic.
 
 Allowed JSON actions format:
 {
@@ -77,7 +90,7 @@ export interface GatewayCallParams {
   temperature?: number;
   maxTokens?: number;
   responseMimeType?: string;
-  allowFallback?: boolean; // Only use fallback if explicitly allowed
+  allowFallback?: boolean;
 }
 
 /**
@@ -137,12 +150,16 @@ export function validateModelActionResponse(parsed: any): ModelActionResponse | 
 
     if (act.action === 'create_file') {
       if (typeof act.path === 'string' && act.path.trim().length > 0 && typeof act.content === 'string') {
-        validActions.push({
-          action: 'create_file',
-          path: act.path.trim(),
-          content: act.content,
-          commitMessage: typeof act.commitMessage === 'string' ? act.commitMessage : undefined
-        });
+        const trimmedContent = act.content.trim();
+        // Prevent generic placeholders masquerading as successful implementations
+        if (trimmedContent.length > 0) {
+          validActions.push({
+            action: 'create_file',
+            path: act.path.trim(),
+            content: act.content,
+            commitMessage: typeof act.commitMessage === 'string' ? act.commitMessage : undefined
+          });
+        }
       }
     } else if (act.action === 'patch_file') {
       if (typeof act.path === 'string' && act.path.trim().length > 0 && Array.isArray(act.edits) && act.edits.length > 0) {
@@ -161,11 +178,14 @@ export function validateModelActionResponse(parsed: any): ModelActionResponse | 
     } else if (act.action === 'create_task') {
       if (typeof act.title === 'string' && act.title.trim().length > 0 && typeof act.description === 'string') {
         const filePaths = Array.isArray(act.filePaths) ? act.filePaths.filter((p: any) => typeof p === 'string') : [];
+        const dependencies = Array.isArray(act.dependencies) ? act.dependencies.filter((d: any) => typeof d === 'string') : undefined;
         validActions.push({
           action: 'create_task',
           title: act.title.trim(),
           description: act.description.trim(),
           filePaths,
+          dependencies,
+          assignedRole: typeof act.assignedRole === 'string' ? act.assignedRole : undefined,
           priority: (act.priority >= 1 && act.priority <= 5) ? act.priority : 3
         });
       }
@@ -258,19 +278,21 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
   }
 
   const sysPrompt = params.systemInstruction || SILENT_WORKER_SYSTEM_PROMPT;
+  const openRouterKey = process.env.OPENROUTER_API_KEY || '';
+  const genAI = getGoogleGenAI();
 
   // 2. Determine execution route
   const isDirectGemini = requestedModelId === 'gemini';
 
   // Attempt Primary Provider: OpenRouter for 3P models
   if (!isDirectGemini) {
-    if (openRouterApiKey) {
+    if (openRouterKey) {
       try {
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${openRouterApiKey}`,
+            'Authorization': `Bearer ${openRouterKey}`,
             'HTTP-Referer': 'https://squadforge.dev',
             'X-Title': 'SquadForge Swarm'
           },
@@ -295,7 +317,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
             errMsg = 'OpenRouter API key is invalid or unauthorized.';
           } else if (response.status === 429) {
             errCode = 'RATE_LIMITED';
-            errMsg = 'OpenRouter rate limit exceeded. Please retry later.';
+            errMsg = 'OpenRouter rate limit or credit ceiling exceeded.';
           } else {
             try {
               const errBody = await response.json();
@@ -306,7 +328,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
           }
 
           // If fallback is not allowed, fail immediately with accurate error
-          if (!params.allowFallback || !googleGenAI) {
+          if (!params.allowFallback || !genAI) {
             return {
               success: false,
               rawText: '',
@@ -321,7 +343,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
               errorCode: errCode
             };
           }
-          // Fallback allowed, continue below
+          // Fallback allowed, continue below to Gemini fallback
         } else {
           // Success from OpenRouter
           const data = await response.json();
@@ -329,7 +351,6 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
           const parsed = extractAndParseJson(content);
 
           if (!parsed && !params.responseMimeType?.includes('json')) {
-            // If caller didn't need structured actions (e.g. verifier)
             return {
               success: true,
               rawText: content,
@@ -372,7 +393,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
           };
         }
       } catch (netErr: any) {
-        if (!params.allowFallback || !googleGenAI) {
+        if (!params.allowFallback || !genAI) {
           return {
             success: false,
             rawText: '',
@@ -390,7 +411,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
       }
     } else {
       // OpenRouter API key not configured
-      if (!params.allowFallback || !googleGenAI) {
+      if (!params.allowFallback || !genAI) {
         return {
           success: false,
           rawText: '',
@@ -409,7 +430,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
   }
 
   // 3. Native Gemini call (Either direct Gemini model, or explicitly configured fallback)
-  if (googleGenAI) {
+  if (genAI) {
     const isFallbackRun = !isDirectGemini;
     const fallbackReason = isFallbackRun 
       ? `Primary provider for ${modelConfig.displayName} unavailable; executed via configured Gemini fallback` 
@@ -420,7 +441,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
         ? `${sysPrompt}\n\nYou are operating as fallback for AI Model: ${modelConfig.displayName} (${modelConfig.strengths.join(', ')}). Output only JSON.`
         : sysPrompt;
 
-      const genAiCall = googleGenAI.models.generateContent({
+      const genAiCall = genAI.models.generateContent({
         model: 'gemini-3.8-flash',
         contents: params.prompt,
         config: {
@@ -437,7 +458,6 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
       const response: any = await Promise.race([genAiCall, timeoutPromise]);
       const text = response?.text || '';
 
-      // If caller does not expect structured actions (e.g. verifier)
       const parsed = extractAndParseJson(text);
 
       return {

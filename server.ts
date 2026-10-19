@@ -2,7 +2,7 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import { db } from './server/store.js';
-import { modelRegistry } from './server/modelRegistry.js';
+import { modelRegistry, AGENT_SPECS } from './server/modelRegistry.js';
 import { SwarmOrchestrator } from './server/swarm/swarmOrchestrator.js';
 import { GitHubService } from './server/github.js';
 import { ConcurrencyTester } from './server/swarm/conflictTest.js';
@@ -14,15 +14,26 @@ dotenv.config();
 
 const app = express();
 const PORT = 3000;
-const APP_URL = process.env.APP_URL || 'https://ais-dev-fwrtdp4bsqhlus5qd4v3d3-856192480482.asia-southeast1.run.app';
+
+function getOrigin(req: express.Request): string {
+  const forwardedProto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  const forwardedHost = req.headers['x-forwarded-host'] || req.headers.host;
+  if (forwardedHost) return `${forwardedProto}://${forwardedHost}`;
+  if (req.headers.origin) return req.headers.origin as string;
+  return process.env.APP_URL || '';
+}
 
 app.use(express.json({ limit: '10mb' }));
 
 // --- API ROUTES ---
 
-// 1. Model Registry
+// 1. Model Registry & Agent Specs
 app.get('/api/models', (req, res) => {
   res.json({ models: modelRegistry.getAll() });
+});
+
+app.get('/api/agents', (req, res) => {
+  res.json({ agents: modelRegistry.getAgentSpecs() });
 });
 
 app.post('/api/models', (req, res) => {
@@ -48,7 +59,41 @@ app.put('/api/models/:id', (req, res) => {
   res.json({ success: true, model: updated });
 });
 
-// 2. Authentication & User Profile
+// 2. Safe Provider Configuration Status (Never exposes secrets)
+app.get('/api/config-status', (req, res) => {
+  const user = db.getUser('usr_default_admin');
+  const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0);
+  const hasOpenRouterKey = Boolean(process.env.OPENROUTER_API_KEY && process.env.OPENROUTER_API_KEY.trim().length > 0);
+  const hasGitHubOAuth = Boolean(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET);
+  const userGithubConnected = Boolean(user?.githubConnected);
+
+  res.json({
+    gemini: {
+      configured: hasGeminiKey,
+      model: 'gemini-3.8-flash',
+      statusText: hasGeminiKey 
+        ? 'Active (Server-Side Gemini 3.8 Flash)' 
+        : 'Not Configured (Requires GEMINI_API_KEY)'
+    },
+    openrouter: {
+      configured: hasOpenRouterKey,
+      modelCount: 9,
+      statusText: hasOpenRouterKey 
+        ? 'Active (OpenRouter Multi-Model Routing)' 
+        : 'Fallback Mode (3P models fall back to Gemini or require OPENROUTER_API_KEY)'
+    },
+    github: {
+      oauthConfigured: hasGitHubOAuth,
+      userConnected: userGithubConnected,
+      username: user?.githubUsername,
+      statusText: userGithubConnected 
+        ? `Connected as @${user?.githubUsername || 'user'}` 
+        : 'Disconnected (Connect in Settings)'
+    }
+  });
+});
+
+// 3. Authentication & User Profile
 app.get('/api/auth/me', (req, res) => {
   const defaultUser = db.getUser('usr_default_admin');
   res.json({ user: defaultUser });
@@ -67,17 +112,16 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// 3. GitHub OAuth & Connection
+// 4. GitHub OAuth & Connection
 app.get('/api/auth/github/url', (req, res) => {
-  const redirectOrigin = (req.headers.origin as string) || APP_URL;
-  const url = GitHubService.getAuthUrl(redirectOrigin);
+  const origin = getOrigin(req);
+  const url = GitHubService.getAuthUrl(origin);
   res.json({ url });
 });
 
-// OAuth Callback handling popup postMessage per OAuth skill
 const handleOAuthCallback = async (req: express.Request, res: express.Response) => {
   const code = req.query.code as string;
-  const origin = APP_URL;
+  const origin = getOrigin(req);
   const redirectUri = `${origin}/auth/callback`;
 
   if (code) {
@@ -144,14 +188,14 @@ app.put('/api/user/settings', (req, res) => {
   res.json({ success: true, user });
 });
 
-// 4. Builds & Swarm Operations
+// 5. Builds & Swarm Operations
 app.get('/api/builds', (req, res) => {
   const builds = db.getAllBuilds('usr_default_admin');
   res.json({ builds });
 });
 
 app.post('/api/builds', async (req, res) => {
-  const { idea, selectedModels, autoPushGithub, costLimit, maxDurationSeconds } = req.body;
+  const { idea, selectedModels, autoPushGithub, costLimit, maxDurationSeconds, techStack } = req.body;
   if (!idea || !idea.trim()) {
     return res.status(400).json({ error: 'Idea is required' });
   }
@@ -176,7 +220,14 @@ app.post('/api/builds', async (req, res) => {
     totalCost: 0,
     costLimit: costLimit || user.costLimitPerBuild || 5.0,
     maxDurationSeconds: maxDurationSeconds || 300,
-    patchesAppliedCount: 0
+    patchesAppliedCount: 0,
+    techStack: techStack || {
+      frontend: 'React 19 + TypeScript + Tailwind CSS',
+      backend: 'Node.js Express + TypeScript Server API',
+      database: 'In-Memory Key-Value & Document Store',
+      testing: 'Node.js Native Test Runner (node:test + assert)',
+      security: 'OWASP Defensive Validation, Rate Limiter & AES-256'
+    }
   });
 
   // Launch swarm in background without blocking initial HTTP response
@@ -214,6 +265,11 @@ app.post('/api/builds/:id/stop', (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/api/builds/:id/resume', async (req, res) => {
+  const success = await SwarmOrchestrator.resumeSwarm(req.params.id);
+  res.json({ success });
+});
+
 app.post('/api/builds/:id/push-github', async (req, res) => {
   const result = await GitHubService.autoPushProject(req.params.id, 'usr_default_admin');
   res.json(result);
@@ -241,7 +297,7 @@ app.post('/api/builds/:id/retry-failed', (req, res) => {
   for (const t of tasks) {
     if (t.status === 'failed') {
       db.updateTask(buildId, t.id, {
-        status: 'open',
+        status: 'pending',
         claimedBy: null,
         leaseExpiresAt: null,
         error: undefined
@@ -251,7 +307,7 @@ app.post('/api/builds/:id/retry-failed', (req, res) => {
   res.json({ success: true });
 });
 
-// 5. Real-Time Server-Sent Events (SSE) Stream
+// 6. Real-Time Server-Sent Events (SSE) Stream
 app.get('/api/builds/:id/stream', (req, res) => {
   const buildId = req.params.id;
 
@@ -271,7 +327,7 @@ app.get('/api/builds/:id/stream', (req, res) => {
   });
 });
 
-// 6. Concurrency Benchmark Test endpoint
+// 7. Concurrency Benchmark Test endpoint
 app.post('/api/test-concurrency', async (req, res) => {
   try {
     const report = await ConcurrencyTester.run10ModelConcurrencyTest();
@@ -291,7 +347,7 @@ async function startServer() {
   app.use(vite.middlewares);
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`SquadForge Full-Stack Server running on port ${PORT}`);
+    console.log(`SquadForge Autonomous Team Server running on http://0.0.0.0:${PORT}`);
   });
 }
 

@@ -1,5 +1,5 @@
 import { db } from '../store.js';
-import { modelRegistry } from '../modelRegistry.js';
+import { modelRegistry, AGENT_SPECS } from '../modelRegistry.js';
 import { 
   callUnifiedGateway, 
   parseVerifierResponse, 
@@ -9,7 +9,15 @@ import { TaskManager } from './taskManager.js';
 import { MergeManager } from './mergeManager.js';
 import { SandboxRunner } from './sandboxRunner.js';
 import { GitHubService } from '../github.js';
-import { Build, ModelConfig, Task, ModelActionResponse } from '../types.js';
+import { 
+  Build, 
+  ModelConfig, 
+  Task, 
+  ModelActionResponse, 
+  AgentRole,
+  TechStackConfig,
+  Milestone
+} from '../types.js';
 
 interface ActiveSwarmControl {
   stopRequested: boolean;
@@ -22,7 +30,7 @@ export class SwarmOrchestrator {
   private static MAX_TASK_RETRIES = 3;
 
   /**
-   * Stops an active build swarm immediately
+   * Stops an active build swarm gracefully
    */
   static stopSwarm(buildId: string): void {
     const control = this.activeSwarms.get(buildId);
@@ -31,7 +39,7 @@ export class SwarmOrchestrator {
     }
 
     const build = db.getBuild(buildId);
-    if (build && (build.status === 'running' || build.status === 'planning' || build.status === 'verifying')) {
+    if (build && (build.status === 'running' || build.status === 'planning' || build.status === 'verifying' || build.status === 'in_progress')) {
       build.status = 'stopped';
       build.completedAt = Date.now();
       db.saveBuild(build);
@@ -44,6 +52,52 @@ export class SwarmOrchestrator {
         details: 'Build halted manually by user STOP request'
       });
     }
+  }
+
+  /**
+   * Resumes an existing or stopped build from its saved state
+   */
+  static async resumeSwarm(buildId: string): Promise<boolean> {
+    const build = db.getBuild(buildId);
+    if (!build) return false;
+
+    if (this.activeSwarms.has(buildId)) {
+      return true; // Already running
+    }
+
+    build.status = 'running';
+    db.saveBuild(build);
+
+    const control: ActiveSwarmControl = {
+      stopRequested: false,
+      workerCount: 0
+    };
+    this.activeSwarms.set(buildId, control);
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'build_started',
+      details: `Resumed autonomous development swarm for build ${buildId}`
+    });
+
+    const enabledModels = build.selectedModels
+      .map(id => modelRegistry.getById(id))
+      .filter((m): m is ModelConfig => !!m && m.enabled);
+
+    control.workerCount = enabledModels.length;
+
+    // Launch worker loops concurrently
+    const workerPromises = enabledModels.map(model => 
+      this.runModelWorkerLoop(buildId, model, control)
+    );
+
+    Promise.all(workerPromises).finally(() => {
+      this.activeSwarms.delete(buildId);
+    });
+
+    return true;
   }
 
   /**
@@ -69,17 +123,17 @@ export class SwarmOrchestrator {
       buildId,
       timestamp: Date.now(),
       type: 'build_started',
-      details: `SquadForge Swarm initialized for idea: "${build.idea}". Active models: ${build.selectedModels.length}`
+      details: `Autonomous Development Swarm initialized for: "${build.idea}". Active models: ${build.selectedModels.length}`
     });
 
     try {
-      // 1. INITIAL PLANNER CALL
+      // 1. INITIAL PROJECT MANAGER & ARCHITECT SPECIFICATION
       const planSuccess = await this.runInitialPlanner(build);
       if (!planSuccess) {
-        throw new Error('Initial project planning failed. Could not generate valid task breakdown.');
+        throw new Error('Initial project planning failed. Could not establish specification.');
       }
 
-      // 2. LAUNCH ALL ENABLED MODELS CONCURRENTLY
+      // 2. LAUNCH SPECIALIZED AGENT WORKERS CONCURRENTLY
       build.status = 'running';
       db.saveBuild(build);
 
@@ -98,7 +152,7 @@ export class SwarmOrchestrator {
         buildId,
         timestamp: Date.now(),
         type: 'build_started',
-        details: `Simultaneously launching ${enabledModels.length} independent model worker loops in parallel via Promise.all`
+        details: `Simultaneously launching ${enabledModels.length} specialized agent loops (PM, Architect, Frontend, Backend, DB, QA, Security, Debugging, DevOps)`
       });
 
       // Launch all models concurrently with Promise.all
@@ -125,22 +179,90 @@ export class SwarmOrchestrator {
         buildId,
         timestamp: Date.now(),
         type: 'build_failed',
-        details: `Swarm encountered unrecoverable error: ${err.message}`
+        details: `Swarm encountered error: ${err.message}`
       });
     }
   }
 
   /**
-   * Phase 1: Initial planner call creates initial task board and starter files
+   * Phase 1: Project Manager and Architect Agents establish project specs, tech stack, milestones, and initial files
    */
   private static async runInitialPlanner(build: Build): Promise<boolean> {
-    const plannerPrompt = `PLAN INITIAL PROJECT FOR THIS IDEA: "${build.idea}"
-Break this project down into small, modular files (max ~150 lines each).
-Output JSON with:
-1. "create_file" actions for starter structure (README.md, package.json or core config, domain types, main entry).
-2. "create_task" actions for the initial living task board (frontend components, backend services, database schema, tests).
+    // 1. Software Architect selects optimal tech stack
+    const techStack: TechStackConfig = {
+      frontend: 'React 19 + TypeScript + Tailwind CSS',
+      backend: 'Node.js Express + TypeScript Server API',
+      database: 'In-Memory Key-Value & Document Store',
+      testing: 'Node.js Native Test Runner (node:test + assert)',
+      security: 'OWASP Defensive Validation, Rate Limiter & AES-256'
+    };
+    build.techStack = techStack;
 
-Remember: Output ONLY valid JSON according to schema.`;
+    // 2. Project Manager creates milestone breakdown
+    const m1Id = 'ms_1_foundation';
+    const m2Id = 'ms_2_core';
+    const m3Id = 'ms_3_qa_security';
+    const m4Id = 'ms_4_release';
+
+    build.milestones = [
+      {
+        id: m1Id,
+        title: 'Milestone 1: Architecture & Foundation',
+        description: 'Define contracts, domain interfaces, and project configuration',
+        status: 'in_progress',
+        taskIds: []
+      },
+      {
+        id: m2Id,
+        title: 'Milestone 2: Core Implementation',
+        description: 'Implement backend business logic, database store, and user interfaces',
+        status: 'pending',
+        taskIds: []
+      },
+      {
+        id: m3Id,
+        title: 'Milestone 3: QA, Verification & Security',
+        description: 'Create automated test suites and audit for security vulnerabilities',
+        status: 'pending',
+        taskIds: []
+      },
+      {
+        id: m4Id,
+        title: 'Milestone 4: DevOps & Release',
+        description: 'Prepare Docker container, CI workflows, and documentation',
+        status: 'pending',
+        taskIds: []
+      }
+    ];
+
+    const plannerPrompt = `PROJECT MANAGER & ARCHITECT SPECIFICATION:
+Original Requirements: "${build.idea}"
+Selected Tech Stack:
+- Frontend: ${techStack.frontend}
+- Backend: ${techStack.backend}
+- Database: ${techStack.database}
+- Testing: ${techStack.testing}
+- Security: ${techStack.security}
+
+Create the starter file tree and dependency-aware tasks.
+Output ONLY JSON matching this structure:
+{
+  "actions": [
+    {
+      "action": "create_file",
+      "path": "src/types/domain.ts",
+      "content": "...complete domain types...",
+      "commitMessage": "Architect domain contracts and types"
+    },
+    {
+      "action": "create_task",
+      "title": "Architect Domain Data Types & Contracts",
+      "description": "Establish TypeScript interfaces for domain models and data transfer objects",
+      "filePaths": ["src/types/domain.ts"],
+      "priority": 2
+    }
+  ]
+}`;
 
     const plannerResult = await callUnifiedGateway({
       modelId: 'gemini',
@@ -149,103 +271,143 @@ Remember: Output ONLY valid JSON according to schema.`;
       allowFallback: true
     });
 
-    if (!plannerResult.success || !plannerResult.parsedResponse) {
-      // If AI planner call failed, log failure and seed structured domain plan directly from idea
-      db.addEvent({
-        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        buildId: build.id,
-        timestamp: Date.now(),
-        type: 'plan_created',
-        details: `Planner AI unavailable (${plannerResult.error || 'no response'}). Initializing architectural task matrix.`
-      });
-      this.seedFallbackPlan(build);
-    } else {
+    if (plannerResult.success && plannerResult.parsedResponse) {
       for (const action of plannerResult.parsedResponse.actions) {
         if (action.action === 'create_file') {
-          await MergeManager.createFile(build.id, 'gemini-planner', action);
+          await MergeManager.createFile(build.id, 'software_architect', action);
         } else if (action.action === 'create_task') {
-          TaskManager.createNewTask(build.id, {
+          const t = TaskManager.createNewTask(build.id, {
             title: action.title,
             description: action.description,
             filePaths: action.filePaths,
             priority: action.priority || 3,
-            maxRetries: this.MAX_TASK_RETRIES
+            maxRetries: this.MAX_TASK_RETRIES,
+            milestone: m1Id
           });
+          build.milestones[0].taskIds.push(t.id);
         }
       }
     }
 
-    // Ensure we have sufficient tasks on board
+    // Seed structured dependency-aware tasks if needed
     const currentTasks = db.getTasks(build.id);
-    if (currentTasks.length < 3) {
-      this.seedFallbackPlan(build);
+    if (currentTasks.length < 4) {
+      this.seedMilestoneTasks(build, m1Id, m2Id, m3Id, m4Id);
     }
 
     // Ensure README.md exists
     const readme = db.getFile(build.id, 'README.md');
     if (!readme) {
-      await MergeManager.createFile(build.id, 'planner', {
+      await MergeManager.createFile(build.id, 'project_manager', {
         action: 'create_file',
         path: 'README.md',
-        content: `# ${build.idea}\n\nBuilt by **SquadForge** multi-AI parallel swarm engineering.\n\n## Overview\nThis software is engineered autonomously by models working in parallel with conflict-free merges.\n`,
-        commitMessage: 'Initial project documentation'
+        content: `# ${build.idea}\n\nBuilt by **SquadForge Autonomous AI Development Team**.\n\n## Tech Stack\n- **Frontend:** ${techStack.frontend}\n- **Backend:** ${techStack.backend}\n- **Database:** ${techStack.database}\n- **Testing:** ${techStack.testing}\n\n## Autonomous Agents Involved\n- **Project Manager:** Requirements specification & milestone coordination\n- **Software Architect:** Component hierarchy & file structure design\n- **Frontend Developer:** UI components & interactive views\n- **Backend Developer:** API endpoints & business logic\n- **Database Specialist:** Data storage & schema modeling\n- **QA & Testing:** Unit & integration test suites\n- **Security Agent:** OWASP audits & input sanitization\n- **DevOps & Release:** Dockerfile & CI pipeline\n\n## Running the Project\n\`\`\`bash\nnpm install\nnpm run dev\n\`\`\`\n`,
+        commitMessage: 'Project documentation & specification'
       });
     }
+
+    db.saveBuild(build);
 
     db.addEvent({
       id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       buildId: build.id,
       timestamp: Date.now(),
       type: 'plan_created',
-      details: `Living task board initialized with ${db.getTasks(build.id).length} tasks and ${db.getAllFiles(build.id).length} initial files`
+      details: `Project specification established across 4 milestones (${db.getTasks(build.id).length} dependent tasks)`
     });
 
     return true;
   }
 
   /**
-   * Seeds clean initial plan when AI planner call is unavailable
+   * Seeds dependency-aware tasks across milestones
    */
-  private static seedFallbackPlan(build: Build): void {
-    TaskManager.createNewTask(build.id, {
+  private static seedMilestoneTasks(build: Build, m1: string, m2: string, m3: string, m4: string): void {
+    // Milestone 1: Foundation
+    const task1 = TaskManager.createNewTask(build.id, {
       title: 'Architect Domain Data Types & Contracts',
       description: `Define TypeScript types and domain interfaces for: ${build.idea}`,
       filePaths: ['src/types/domain.ts'],
       priority: 2,
-      maxRetries: this.MAX_TASK_RETRIES
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'software_architect',
+      milestone: m1
     });
 
-    TaskManager.createNewTask(build.id, {
-      title: 'Develop Core Domain Engine',
+    // Milestone 2: Core Implementation (Depends on Task 1)
+    const task2 = TaskManager.createNewTask(build.id, {
+      title: 'Develop Backend Core Engine & APIs',
       description: `Implement core computational business logic and processors for: ${build.idea}`,
       filePaths: ['src/core/engine.ts'],
       priority: 2,
-      maxRetries: this.MAX_TASK_RETRIES
+      dependencies: [task1.id],
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'backend_developer',
+      milestone: m2
     });
 
-    TaskManager.createNewTask(build.id, {
-      title: 'Build UI View Component',
-      description: `Implement interactive view rendering for: ${build.idea}`,
-      filePaths: ['src/components/MainView.tsx'],
-      priority: 3,
-      maxRetries: this.MAX_TASK_RETRIES
-    });
-
-    TaskManager.createNewTask(build.id, {
-      title: 'Implement Data Store & Persistence Service',
-      description: 'Implement storage, queries, and state management service',
+    const task3 = TaskManager.createNewTask(build.id, {
+      title: 'Implement Database Store & Persistence',
+      description: 'Implement transactional storage, queries, and entity relations',
       filePaths: ['src/services/store.ts'],
       priority: 3,
-      maxRetries: this.MAX_TASK_RETRIES
+      dependencies: [task1.id],
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'database_specialist',
+      milestone: m2
     });
 
-    TaskManager.createNewTask(build.id, {
-      title: 'Create Automated Test Suite',
-      description: 'Write unit tests validating core functionality and error boundaries',
+    const task4 = TaskManager.createNewTask(build.id, {
+      title: 'Build Frontend User Interface View',
+      description: `Implement responsive view components with loading/error states for: ${build.idea}`,
+      filePaths: ['src/components/MainView.tsx'],
+      priority: 3,
+      dependencies: [task1.id],
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'frontend_developer',
+      milestone: m2
+    });
+
+    // Milestone 3: QA & Security (Depends on Core Implementation)
+    const task5 = TaskManager.createNewTask(build.id, {
+      title: 'Create Automated Test Suite & Assertions',
+      description: 'Write unit tests validating core functionality, edge cases, and error boundaries',
       filePaths: ['tests/engine.test.ts'],
       priority: 3,
-      maxRetries: this.MAX_TASK_RETRIES
+      dependencies: [task2.id, task3.id],
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'qa_testing_specialist',
+      milestone: m3
     });
+
+    const task6 = TaskManager.createNewTask(build.id, {
+      title: 'Security Hardening & Input Sanitization',
+      description: 'Implement input validation guards, secret safety checks, and secure headers',
+      filePaths: ['src/core/security.ts'],
+      priority: 3,
+      dependencies: [task2.id],
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'security_specialist',
+      milestone: m3
+    });
+
+    // Milestone 4: Release & DevOps
+    TaskManager.createNewTask(build.id, {
+      title: 'Prepare Dockerfile & GitHub Actions CI Workflow',
+      description: 'Create multi-stage Dockerfile and GitHub Actions workflow for automated testing and builds',
+      filePaths: ['Dockerfile', '.github/workflows/ci.yml'],
+      priority: 4,
+      dependencies: [task5.id],
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'devops_release_specialist',
+      milestone: m4
+    });
+
+    if (build.milestones) {
+      build.milestones[0].taskIds.push(task1.id);
+      build.milestones[1].taskIds.push(task2.id, task3.id, task4.id);
+      build.milestones[2].taskIds.push(task5.id, task6.id);
+    }
   }
 
   /**
@@ -289,28 +451,28 @@ Remember: Output ONLY valid JSON according to schema.`;
         break;
       }
 
-      // 1. ATOMICALLY CLAIM ONE OPEN TASK
-      db.updateModelRun(buildId, model.id, { status: 'claiming' });
-      const task = TaskManager.claimTask(buildId, model.id, model.strengths);
+      // 1. ATOMICALLY CLAIM ONE OPEN TASK WITH FULFILLED DEPENDENCIES
+      db.updateModelRun(buildId, model.id, { status: 'claiming', role: model.agentRole });
+      const task = TaskManager.claimTask(buildId, model.id, model.strengths, model.agentRole);
 
       if (!task) {
         consecutiveIdleCount++;
         db.updateModelRun(buildId, model.id, { 
           status: 'idle',
-          lastActionSummary: 'No matching open tasks. Waiting...'
+          lastActionSummary: 'Waiting for dependent tasks or open board items...'
         });
 
         // Check completion criteria
         const allTasks = db.getTasks(buildId);
-        const openOrClaimed = allTasks.filter(t => t.status === 'open' || t.status === 'claimed');
+        const incomplete = allTasks.filter(t => t.status === 'pending' || t.status === 'in_progress' || t.status === 'open' || t.status === 'claimed' || t.status === 'retrying');
 
-        if (openOrClaimed.length === 0 && allTasks.length > 0) {
+        if (incomplete.length === 0 && allTasks.length > 0) {
           await this.checkProjectCompletion(buildId, control);
           if (control.stopRequested) break;
         }
 
         // Delay before polling board again
-        await new Promise(r => setTimeout(r, 1200 + Math.random() * 800));
+        await new Promise(r => setTimeout(r, 1000 + Math.random() * 800));
         continue;
       }
 
@@ -318,7 +480,7 @@ Remember: Output ONLY valid JSON according to schema.`;
       db.updateModelRun(buildId, model.id, { 
         status: 'working',
         currentTaskId: task.id,
-        lastActionSummary: `Working on: ${task.title}`
+        lastActionSummary: `[${model.agentRole || 'agent'}] Working: ${task.title}`
       });
 
       // 2. EXECUTE TASK WORK
@@ -329,16 +491,57 @@ Remember: Output ONLY valid JSON according to schema.`;
         TaskManager.releaseTask(buildId, task.id, model.id, workErr.message);
       }
 
+      // Update milestone progress
+      this.updateMilestoneStatuses(buildId);
+
       // Automated check trigger after every 5 applied patches
       const currentBuild = db.getBuild(buildId);
       if (currentBuild && currentBuild.patchesAppliedCount > 0 && currentBuild.patchesAppliedCount % 5 === 0) {
         SandboxRunner.runIntegrityCheck(buildId);
       }
 
-      await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+      await new Promise(r => setTimeout(r, 250 + Math.random() * 300));
     }
 
     db.updateModelRun(buildId, model.id, { status: 'done', currentTaskId: null });
+  }
+
+  /**
+   * Updates milestone completion status dynamically
+   */
+  private static updateMilestoneStatuses(buildId: string): void {
+    const build = db.getBuild(buildId);
+    if (!build || !build.milestones) return;
+
+    const allTasks = db.getTasks(buildId);
+    let changed = false;
+
+    for (const ms of build.milestones) {
+      const msTasks = allTasks.filter(t => ms.taskIds.includes(t.id));
+      if (msTasks.length === 0) continue;
+
+      const allDone = msTasks.every(t => t.status === 'completed' || t.status === 'done');
+      const anyWorking = msTasks.some(t => t.status === 'in_progress' || t.status === 'testing' || t.status === 'retrying');
+
+      if (allDone && ms.status !== 'completed') {
+        ms.status = 'completed';
+        changed = true;
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: Date.now(),
+          type: 'milestone_reached',
+          details: `Milestone completed: "${ms.title}"`
+        });
+      } else if (anyWorking && ms.status === 'pending') {
+        ms.status = 'in_progress';
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      db.saveBuild(build);
+    }
   }
 
   /**
@@ -357,18 +560,22 @@ Remember: Output ONLY valid JSON according to schema.`;
       ? relevantFiles.map(f => `--- FILE: ${f!.path} (v${f!.version}) ---\n${f!.content}`).join('\n\n')
       : 'Target file does not exist yet. You must use "create_file".';
 
-    const prompt = `TASK: ${task.title}
+    const roleSpec = model.agentRole ? AGENT_SPECS[model.agentRole] : undefined;
+    const roleInstruction = roleSpec ? `YOUR SPECIALIZED ROLE: ${roleSpec.title}\nResponsibilities: ${roleSpec.responsibilities.join('; ')}` : '';
+
+    const prompt = `${roleInstruction}
+TASK: ${task.title}
 DESCRIPTION: ${task.description}
 TARGET FILES: ${task.filePaths.join(', ')}
-IS FIX TASK: ${task.isFixTask ? 'YES - Fix the syntax/type error described' : 'NO'}
+IS FIX TASK: ${task.isFixTask ? 'YES - Analyze the error and generate exact surgical find/replace fix' : 'NO'}
 
 EXISTING RELEVANT FILES CONTENT:
 ${filesContextText}
 
 Output valid JSON action(s) to accomplish this task.
-If creating new files, use "create_file".
+If creating new files, use "create_file" with complete pristine code.
 If updating existing files, use "patch_file" with exact "find" text matching the file content above.
-You may also emit "create_task" if you discover missing modules or test needs.`;
+Never write placeholder comments. Implement functional code.`;
 
     let attempts = 0;
     let taskDone = false;
@@ -397,7 +604,6 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
       build.totalCost = (build.totalCost || 0) + (res.tokensUsed * 0.000003);
       db.saveBuild(build);
 
-      // If gateway call failed, record failure accurately
       if (!res.success || !res.parsedResponse) {
         lastError = res.error || 'Generation failed: Model produced no valid JSON response';
         db.updateModelRun(buildId, model.id, { 
@@ -406,17 +612,7 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
           lastActionSummary: `Retry ${attempts}/3: ${lastError}`
         });
 
-        db.addEvent({
-          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          buildId,
-          timestamp: Date.now(),
-          type: 'patch_rejected',
-          modelId: model.id,
-          taskId: task.id,
-          details: `Generation failed for ${model.id} on task "${task.title}": ${lastError}`
-        });
-
-        await new Promise(r => setTimeout(r, 400));
+        await new Promise(r => setTimeout(r, 300));
         continue;
       }
 
@@ -460,6 +656,8 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
             title: action.title,
             description: action.description,
             filePaths: action.filePaths,
+            dependencies: action.dependencies,
+            assignedRole: action.assignedRole,
             priority: action.priority || 3,
             maxRetries: this.MAX_TASK_RETRIES
           });
@@ -481,7 +679,6 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
 
   /**
    * Verifier phase: checks that all tasks are done, sandbox passes, and verifier model approves.
-   * Genuinely validates approval status and avoids false completions.
    */
   private static async checkProjectCompletion(buildId: string, control: ActiveSwarmControl): Promise<void> {
     const build = db.getBuild(buildId);
@@ -489,14 +686,19 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
 
     const tasks = db.getTasks(buildId);
 
-    // 1. Ensure no open or claimed tasks remain
-    const incompleteTasks = tasks.filter(t => t.status === 'open' || t.status === 'claimed');
+    // 1. Ensure no pending or in_progress tasks remain
+    const incompleteTasks = tasks.filter(t => 
+      t.status === 'pending' || 
+      t.status === 'in_progress' || 
+      t.status === 'open' || 
+      t.status === 'claimed' || 
+      t.status === 'retrying'
+    );
     if (incompleteTasks.length > 0) return;
 
-    // 2. Check if any tasks have failed
+    // 2. Check if any tasks failed
     const failedTasks = tasks.filter(t => t.status === 'failed');
     if (failedTasks.length > 0) {
-      // Cannot mark completed if tasks failed
       build.status = 'failed';
       build.completedAt = Date.now();
       build.failureReason = `${failedTasks.length} task(s) failed during execution: ${failedTasks.map(t => t.title).join(', ')}`;
@@ -525,21 +727,20 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
       return;
     }
 
-    // 4. Run automated sandbox verification
+    // 4. Run automated sandbox & test verification
     const sandbox = SandboxRunner.runIntegrityCheck(buildId);
     if (!sandbox.passed) {
-      // Sandbox failed; errors became fix tasks on the board
       db.addEvent({
         id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         buildId,
         timestamp: Date.now(),
         type: 'sandbox_check',
-        details: `Integrity check failed with ${sandbox.errors.length} error(s). Workers resuming fix tasks.`
+        details: `Integrity check failed with ${sandbox.errors.length} issue(s). Debugging Agent resuming fix tasks.`
       });
       return;
     }
 
-    // 5. Call Verifier Model
+    // 5. Call Objective Verifier Model
     build.status = 'verifying';
     build.verificationAttempts = (build.verificationAttempts || 0) + 1;
     const currentAttempt = build.verificationAttempts;
@@ -551,13 +752,13 @@ You may also emit "create_task" if you discover missing modules or test needs.`;
       buildId,
       timestamp: Date.now(),
       type: 'verifier_started',
-      details: `Launching Verifier Model (Attempt ${currentAttempt}/${maxAttempts}) to validate requirements satisfaction.`
+      details: `Launching Verifier Model (Attempt ${currentAttempt}/${maxAttempts}) to evaluate requirements satisfaction.`
     });
 
     const filesSummary = allFiles.map(f => `- ${f.path} (${f.content.split('\n').length} lines, v${f.version})`).join('\n');
 
     const verifierPrompt = `VERIFY SOFTWARE COMPLETION
-Original User Idea: "${build.idea}"
+Original User Specification: "${build.idea}"
 
 Generated File Tree:
 ${filesSummary}
@@ -577,10 +778,8 @@ Output ONLY JSON in this exact schema:
       allowFallback: true
     });
 
-    // Safely parse verifier response
     const verifierData = parseVerifierResponse(verifyResult.rawText);
 
-    // If verifier returned malformed JSON or failed
     if (!verifyResult.success || !verifierData) {
       const parseError = verifyResult.error || 'Verifier response was malformed or missing boolean approved field.';
       
@@ -600,14 +799,12 @@ Output ONLY JSON in this exact schema:
         db.saveBuild(build);
         control.stopRequested = true;
       } else {
-        // Return to running state to retry verification
         build.status = 'running';
         db.saveBuild(build);
       }
       return;
     }
 
-    // Inspect genuine approval verdict
     if (!verifierData.approved) {
       const missing = verifierData.missingRequirements || [];
       const summary = verifierData.summary || 'Requirements incomplete';
@@ -639,11 +836,11 @@ Output ONLY JSON in this exact schema:
           filePaths: ['src/core/engine.ts'],
           priority: 1,
           isFixTask: true,
+          assignedRole: 'debugging_specialist',
           maxRetries: this.MAX_TASK_RETRIES
         });
       }
 
-      // Resume swarm to address missing requirements
       build.status = 'running';
       build.verificationFeedback = summary;
       db.saveBuild(build);
@@ -673,7 +870,7 @@ Output ONLY JSON in this exact schema:
       details: `Build Complete! Total files: ${allFiles.length}, total patches: ${build.patchesAppliedCount || 0}, cost: $${(build.totalCost || 0).toFixed(4)}`
     });
 
-    // Auto-push to GitHub if enabled
+    // Auto-push to GitHub feature branch feature/autonomous-development-team if enabled
     if (build.autoPushGithub) {
       await GitHubService.autoPushProject(buildId, build.userId);
     }

@@ -9,16 +9,18 @@ import {
   Plus, 
   Check, 
   AlertCircle, 
-  Trash2,
   DollarSign,
   User as UserIcon,
-  Save
+  Save,
+  KeyRound,
+  ShieldCheck,
+  Info
 } from 'lucide-react';
 import { ModelConfig, ModelStrength } from '../types/index.js';
 
 export const SettingsView: React.FC = () => {
   const { user, connectGitHubOAuth, connectGitHubPAT, disconnectGitHub, updateSettings } = useAuth();
-  const { allModels, refreshModels } = useSwarm();
+  const { allModels, refreshModels, configStatus, refreshConfigStatus } = useSwarm();
 
   const [costLimit, setCostLimit] = useState(user?.costLimitPerBuild || 5.0);
   const [defaultRepo, setDefaultRepo] = useState(user?.defaultRepo || 'squadforge-output');
@@ -33,10 +35,6 @@ export const SettingsView: React.FC = () => {
   const [newProviderModel, setNewProviderModel] = useState('');
   const [newStrengths, setNewStrengths] = useState<ModelStrength[]>(['frontend', 'backend']);
   const [newDescription, setNewDescription] = useState('');
-
-  const availableStrengths: ModelStrength[] = [
-    'frontend', 'backend', 'database', 'testing', 'security', 'docs', 'debugging', 'architecture'
-  ];
 
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -69,6 +67,7 @@ export const SettingsView: React.FC = () => {
     if (success) {
       setPatStatus('GitHub connected successfully!');
       setPatInput('');
+      await refreshConfigStatus();
     } else {
       setPatStatus('Failed to validate token.');
     }
@@ -113,11 +112,86 @@ export const SettingsView: React.FC = () => {
       <div>
         <h1 className="text-2xl font-bold text-white font-sans flex items-center gap-2">
           <SettingsIcon className="w-5 h-5 text-amber-400" />
-          <span>Platform Settings & Integrations</span>
+          <span>Platform Settings & Provider Integrations</span>
         </h1>
         <p className="text-xs text-neutral-400 mt-0.5">
-          Configure GitHub OAuth, model on/off toggles, cost thresholds, and add new AI models to the registry.
+          Provider status, GitHub credentials, cost limits, and team model registry configuration.
         </p>
+      </div>
+
+      {/* Provider Configuration Status Screen (Safe, never displays secret keys) */}
+      <div className="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4">
+        <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+          <div className="flex items-center gap-2">
+            <KeyRound className="w-4 h-4 text-amber-400" />
+            <h2 className="text-sm font-semibold text-white">AI Provider Configuration Status</h2>
+          </div>
+          <span className="text-xs font-mono text-neutral-400">
+            Keys are stored server-side only
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Gemini Status */}
+          <div className="p-4 bg-neutral-950 border border-neutral-800 rounded-lg space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-white">Google Gemini</span>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                configStatus?.gemini.configured 
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' 
+                  : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+              }`}>
+                {configStatus?.gemini.configured ? 'CONFIGURED' : 'NOT DETECTED'}
+              </span>
+            </div>
+            <p className="text-[11px] text-neutral-400 font-mono">
+              Model: {configStatus?.gemini.model || 'gemini-3.8-flash'}
+            </p>
+            <p className="text-[11px] text-neutral-500">
+              In AI Studio Build, this key is populated automatically server-side via environment variables.
+            </p>
+          </div>
+
+          {/* OpenRouter Status */}
+          <div className="p-4 bg-neutral-950 border border-neutral-800 rounded-lg space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-white">OpenRouter (3P Models)</span>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                configStatus?.openrouter.configured 
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' 
+                  : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30'
+              }`}>
+                {configStatus?.openrouter.configured ? 'CONFIGURED' : 'FALLBACK ACTIVE'}
+              </span>
+            </div>
+            <p className="text-[11px] text-neutral-400 font-mono">
+              Models: 9 specialized agents
+            </p>
+            <p className="text-[11px] text-neutral-500">
+              When OPENROUTER_API_KEY is unset, third-party models seamlessly route via configured Gemini fallback.
+            </p>
+          </div>
+
+          {/* GitHub Status */}
+          <div className="p-4 bg-neutral-950 border border-neutral-800 rounded-lg space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-white">GitHub Integration</span>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                user?.githubConnected 
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' 
+                  : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+              }`}>
+                {user?.githubConnected ? 'CONNECTED' : 'DISCONNECTED'}
+              </span>
+            </div>
+            <p className="text-[11px] text-neutral-400 font-mono">
+              Account: {user?.githubUsername ? `@${user.githubUsername}` : 'None'}
+            </p>
+            <p className="text-[11px] text-neutral-500">
+              Pushes PR to feature/autonomous-development-team branch upon verified project completion.
+            </p>
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -125,7 +199,7 @@ export const SettingsView: React.FC = () => {
         <form onSubmit={handleSaveSettings} className="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-5">
           <div className="flex items-center gap-2 border-b border-neutral-800 pb-3">
             <UserIcon className="w-4 h-4 text-amber-400" />
-            <h2 className="text-sm font-semibold text-white">Account & Build Controls</h2>
+            <h2 className="text-sm font-semibold text-white">Account & Swarm Budgets</h2>
           </div>
 
           <div>
@@ -221,14 +295,14 @@ export const SettingsView: React.FC = () => {
                 </button>
               </div>
 
-              <div className="text-[11px] text-neutral-500 leading-relaxed">
-                Token is encrypted at rest using AES-256-GCM. Completed software builds will automatically push commits to this account.
+              <div className="text-[11px] text-neutral-500 leading-relaxed font-mono">
+                Pushes to branch "feature/autonomous-development-team" and opens a reviewable Pull Request. Never pushes to main.
               </div>
             </div>
           ) : (
             <div className="space-y-4">
               <p className="text-xs text-neutral-400 leading-relaxed">
-                Connect your GitHub account to enable automatic repository creation and commit pushes upon swarm completion.
+                Connect your GitHub account to enable automatic branch creation and Pull Requests upon project completion.
               </p>
 
               <button
@@ -236,7 +310,7 @@ export const SettingsView: React.FC = () => {
                 className="w-full flex items-center justify-center gap-2 py-2 px-4 text-xs font-medium text-white bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 rounded-lg transition-colors"
               >
                 <Github className="w-4 h-4" />
-                <span>Connect with GitHub OAuth (Popup)</span>
+                <span>Connect with GitHub OAuth</span>
               </button>
 
               <form onSubmit={handleConnectPAT} className="space-y-2 pt-2 border-t border-neutral-800">
@@ -275,10 +349,10 @@ export const SettingsView: React.FC = () => {
           <div>
             <h2 className="text-sm font-semibold text-white flex items-center gap-2">
               <Cpu className="w-4 h-4 text-cyan-400" />
-              <span>Model Registry Config ({allModels.length} Models)</span>
+              <span>Multi-Agent Model Registry ({allModels.length} Agents)</span>
             </h2>
             <p className="text-xs text-neutral-400 mt-0.5">
-              Config-driven architecture. Toggle models on/off or register an 11th model dynamically.
+              Config-driven architecture. Each agent has an assigned development role.
             </p>
           </div>
 
@@ -340,7 +414,7 @@ export const SettingsView: React.FC = () => {
               <label className="block text-xs font-medium text-neutral-300 mb-1">Description</label>
               <input
                 type="text"
-                placeholder="RAG-optimized enterprise code synthesis"
+                placeholder="Specialized model description"
                 value={newDescription}
                 onChange={(e) => setNewDescription(e.target.value)}
                 className="w-full px-3 py-1.5 text-xs bg-neutral-900 border border-neutral-800 rounded text-white"
@@ -370,9 +444,9 @@ export const SettingsView: React.FC = () => {
           <table className="w-full text-left text-xs">
             <thead>
               <tr className="border-b border-neutral-800 text-neutral-400 font-mono text-[11px]">
-                <th className="py-2.5 px-3">Model</th>
+                <th className="py-2.5 px-3">Agent & Model</th>
+                <th className="py-2.5 px-3">Specialized Role</th>
                 <th className="py-2.5 px-3">Provider String</th>
-                <th className="py-2.5 px-3">Strengths</th>
                 <th className="py-2.5 px-3 text-right">Status Toggle</th>
               </tr>
             </thead>
@@ -387,8 +461,12 @@ export const SettingsView: React.FC = () => {
                       <span className="font-sans font-semibold text-white">{model.displayName}</span>
                     </div>
                   </td>
+                  <td className="py-3 px-3">
+                    <span className="text-purple-300 font-sans">
+                      {model.agentRole?.replace('_', ' ') || 'Engineer'}
+                    </span>
+                  </td>
                   <td className="py-3 px-3 text-neutral-400">{model.providerModel}</td>
-                  <td className="py-3 px-3 text-neutral-400">{model.strengths.join(', ')}</td>
                   <td className="py-3 px-3 text-right">
                     <button
                       onClick={() => handleToggleModelEnabled(model)}
