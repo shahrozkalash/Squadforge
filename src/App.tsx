@@ -1,0 +1,97 @@
+import React, { useState } from 'react';
+import { AuthProvider, useAuth } from './context/AuthContext.js';
+import { SwarmProvider, useSwarm } from './context/SwarmContext.js';
+import { Navbar, NavTab } from './components/Navbar.js';
+import { MainIdeaView } from './components/MainIdeaView.js';
+import { LiveSwarmView } from './components/LiveSwarmView.js';
+import { ProjectCodeView } from './components/ProjectCodeView.js';
+import { MergeHistoryView } from './components/MergeHistoryView.js';
+import { BuildHistoryView } from './components/BuildHistoryView.js';
+import { SettingsView } from './components/SettingsView.js';
+import { AuthModal } from './components/AuthModal.js';
+import { ConcurrencyTestModal } from './components/ConcurrencyTestModal.js';
+
+function DashboardContent() {
+  const [currentTab, setCurrentTab] = useState<NavTab>('dashboard');
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isTestOpen, setIsTestOpen] = useState(false);
+
+  const { activeBuild, fetchBuildDetails } = useSwarm();
+
+  const handleSelectBuild = async (buildId: string) => {
+    await fetchBuildDetails(buildId);
+    setCurrentTab('code');
+  };
+
+  return (
+    <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-amber-500/20 selection:text-amber-200">
+      {/* Universal Top Bar */}
+      <Navbar
+        currentTab={currentTab}
+        onSelectTab={setCurrentTab}
+        onOpenAuth={() => setIsAuthOpen(true)}
+        onOpenTestModal={() => setIsTestOpen(true)}
+      />
+
+      {/* Main Content Area */}
+      <main className="flex-1">
+        {currentTab === 'dashboard' && (
+          <MainIdeaView onSwarmStarted={() => setCurrentTab('live')} />
+        )}
+
+        {currentTab === 'live' && (
+          <LiveSwarmView onViewCode={() => setCurrentTab('code')} />
+        )}
+
+        {currentTab === 'code' && (
+          <ProjectCodeView />
+        )}
+
+        {currentTab === 'merge' && (
+          <MergeHistoryView />
+        )}
+
+        {currentTab === 'builds' && (
+          <BuildHistoryView onSelectBuild={handleSelectBuild} />
+        )}
+
+        {currentTab === 'settings' && (
+          <SettingsView />
+        )}
+      </main>
+
+      {/* Footer */}
+      <footer className="border-t border-neutral-800/80 bg-neutral-950 py-6 px-6 text-xs text-neutral-500 flex flex-col sm:flex-row items-center justify-between gap-4 font-mono">
+        <div className="flex items-center gap-2">
+          <span className="font-bold text-neutral-300">SquadForge</span>
+          <span>·</span>
+          <span>Multi-AI Autonomous Software Engineering Swarm</span>
+        </div>
+        <div>
+          <span>Conflict-Free Sequential Merge Architecture</span>
+        </div>
+      </footer>
+
+      {/* Modals */}
+      <AuthModal 
+        isOpen={isAuthOpen} 
+        onClose={() => setIsAuthOpen(false)} 
+      />
+
+      <ConcurrencyTestModal 
+        isOpen={isTestOpen} 
+        onClose={() => setIsTestOpen(false)} 
+      />
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <SwarmProvider>
+        <DashboardContent />
+      </SwarmProvider>
+    </AuthProvider>
+  );
+}

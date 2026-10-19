@@ -1,0 +1,444 @@
+import { db } from '../store.js';
+import { 
+  ProjectFile, 
+  FileVersion, 
+  PatchAction, 
+  CreateFileAction, 
+  Checkpoint 
+} from '../types.js';
+
+export interface PatchResult {
+  success: boolean;
+  version?: number;
+  filePath: string;
+  error?: string;
+  currentContent?: string;
+}
+
+export class MergeManager {
+  private static FILE_LEASE_DURATION_MS = 60 * 1000; // 60 seconds per spec
+
+  // Sequential mutex queue per build so patches are processed strictly one at a time in order
+  private static patchQueues: Map<string, Promise<any>> = new Map();
+
+  /**
+   * Enqueues patch operations sequentially
+   */
+  static enqueuePatch<T>(buildId: string, operation: () => Promise<T>): Promise<T> {
+    const previousPromise = this.patchQueues.get(buildId) || Promise.resolve();
+    const currentPromise = previousPromise.then(operation, operation);
+    this.patchQueues.set(buildId, currentPromise);
+    return currentPromise;
+  }
+
+  /**
+   * Requests a 60-second exclusive lease on one or multiple files.
+   * If multiple files are requested, they MUST be acquired in alphabetical path order
+   * to strictly avoid deadlocks.
+   */
+  static acquireFileLeases(buildId: string, modelId: string, filePaths: string[]): { success: boolean; lockedBy?: string } {
+    const sortedPaths = [...filePaths].sort(); // Alphabetical order to prevent deadlocks
+    const now = Date.now();
+
+    // Check if any file is actively leased by another model
+    for (const p of sortedPaths) {
+      const file = db.getFile(buildId, p);
+      if (file && file.leaseOwner && file.leaseOwner !== modelId) {
+        if (file.leaseExpiresAt && file.leaseExpiresAt > now) {
+          return { success: false, lockedBy: file.leaseOwner };
+        }
+      }
+    }
+
+    // Grant lease
+    for (const p of sortedPaths) {
+      const file = db.getFile(buildId, p);
+      if (file) {
+        file.leaseOwner = modelId;
+        file.leaseExpiresAt = now + this.FILE_LEASE_DURATION_MS;
+        db.setFile(buildId, file);
+      }
+    }
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: now,
+      type: 'file_leased',
+      modelId,
+      details: `${modelId} acquired 60s refactor lease on: ${sortedPaths.join(', ')}`
+    });
+
+    return { success: true };
+  }
+
+  /**
+   * Releases file leases held by a model
+   */
+  static releaseFileLeases(buildId: string, modelId: string, filePaths: string[]): void {
+    for (const p of filePaths) {
+      const file = db.getFile(buildId, p);
+      if (file && file.leaseOwner === modelId) {
+        file.leaseOwner = null;
+        file.leaseExpiresAt = null;
+        db.setFile(buildId, file);
+      }
+    }
+  }
+
+  /**
+   * Creates a new file. Only succeeds if file does not exist.
+   * No whole-file rewrites of existing files allowed via create_file.
+   */
+  static async createFile(
+    buildId: string, 
+    modelId: string, 
+    action: CreateFileAction
+  ): Promise<PatchResult> {
+    return this.enqueuePatch(buildId, async () => {
+      const cleanPath = action.path.replace(/^\/+/, '').replace(/\.\.\//g, '');
+      const existing = db.getFile(buildId, cleanPath);
+
+      if (existing) {
+        const error = `File ${cleanPath} already exists (v${existing.version}). Models must use patch_file with exact find/replace edits.`;
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: Date.now(),
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected create_file from ${modelId}: File already exists. Use patch_file.`
+        });
+        return {
+          success: false,
+          filePath: cleanPath,
+          error,
+          currentContent: existing.content
+        };
+      }
+
+      const now = Date.now();
+      const initialVersion: FileVersion = {
+        version: 1,
+        content: action.content,
+        authorModel: modelId,
+        timestamp: now,
+        commitMessage: action.commitMessage || `Created ${cleanPath}`
+      };
+
+      const newFile: ProjectFile = {
+        path: cleanPath,
+        content: action.content,
+        version: 1,
+        ownerModel: modelId,
+        history: [initialVersion],
+        createdAt: now,
+        updatedAt: now
+      };
+
+      db.setFile(buildId, newFile);
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'file_created',
+        modelId,
+        filePath: cleanPath,
+        details: `${modelId} created ${cleanPath} (v1)`
+      });
+
+      return {
+        success: true,
+        filePath: cleanPath,
+        version: 1,
+        currentContent: action.content
+      };
+    });
+  }
+
+  /**
+   * Applies patch edits against the current file.
+   * If the "find" text exists EXACTLY once, apply it and increment version.
+   * If not (not found, or ambiguous multiple occurrences), reject and return latest content.
+   */
+  static async applyPatch(
+    buildId: string, 
+    modelId: string, 
+    action: PatchAction
+  ): Promise<PatchResult> {
+    return this.enqueuePatch(buildId, async () => {
+      const cleanPath = action.path.replace(/^\/+/, '').replace(/\.\.\//g, '');
+      const file = db.getFile(buildId, cleanPath);
+
+      if (!file) {
+        const error = `File ${cleanPath} does not exist yet. Use create_file first.`;
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: Date.now(),
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected patch from ${modelId}: File does not exist`
+        });
+        return {
+          success: false,
+          filePath: cleanPath,
+          error
+        };
+      }
+
+      // Check if file is leased by someone else
+      const now = Date.now();
+      if (file.leaseOwner && file.leaseOwner !== modelId && file.leaseExpiresAt && file.leaseExpiresAt > now) {
+        const error = `File is currently locked under refactor lease by ${file.leaseOwner}. Lease expires in ${Math.round((file.leaseExpiresAt - now) / 1000)}s.`;
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected patch from ${modelId}: File leased by ${file.leaseOwner}`
+        });
+        return {
+          success: false,
+          filePath: cleanPath,
+          error,
+          currentContent: file.content
+        };
+      }
+
+      let content = file.content;
+
+      // Validate each edit
+      for (let i = 0; i < action.edits.length; i++) {
+        const edit = action.edits[i];
+        if (!edit.find && edit.find !== '') {
+          continue;
+        }
+
+        // Count occurrences of find string
+        const occurrences = content.split(edit.find).length - 1;
+
+        if (occurrences === 0) {
+          const error = `Conflict: "find" text was not found in ${cleanPath} (current v${file.version}). File may have been edited by another model. Redo your edit on this version.`;
+          db.addEvent({
+            id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            buildId,
+            timestamp: Date.now(),
+            type: 'patch_rejected',
+            modelId,
+            filePath: cleanPath,
+            details: `Patch conflict from ${modelId} on ${cleanPath} (v${file.version}): Target text not found`
+          });
+          return {
+            success: false,
+            filePath: cleanPath,
+            error,
+            currentContent: content
+          };
+        }
+
+        if (occurrences > 1) {
+          const error = `Ambiguity: "find" text appears ${occurrences} times in ${cleanPath}. Provide more surrounding context lines in "find".`;
+          db.addEvent({
+            id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            buildId,
+            timestamp: Date.now(),
+            type: 'patch_rejected',
+            modelId,
+            filePath: cleanPath,
+            details: `Patch rejected from ${modelId} on ${cleanPath}: Ambiguous multiple occurrences (${occurrences})`
+          });
+          return {
+            success: false,
+            filePath: cleanPath,
+            error,
+            currentContent: content
+          };
+        }
+
+        // Exactly once! Apply the replacement
+        content = content.replace(edit.find, edit.replace);
+      }
+
+      // Success: save new version
+      const newVersionNum = file.version + 1;
+      const newVersion: FileVersion = {
+        version: newVersionNum,
+        content,
+        authorModel: modelId,
+        timestamp: now,
+        commitMessage: action.commitMessage || `Patch ${cleanPath} v${newVersionNum}`
+      };
+
+      file.content = content;
+      file.version = newVersionNum;
+      file.ownerModel = modelId;
+      file.updatedAt = now;
+      file.history.push(newVersion);
+
+      db.setFile(buildId, file);
+
+      // Increment build patch count
+      const build = db.getBuild(buildId);
+      if (build) {
+        build.patchesAppliedCount = (build.patchesAppliedCount || 0) + 1;
+        db.saveBuild(build);
+      }
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'patch_applied',
+        modelId,
+        filePath: cleanPath,
+        details: `${modelId} patched ${cleanPath} (v${newVersionNum})`
+      });
+
+      return {
+        success: true,
+        filePath: cleanPath,
+        version: newVersionNum,
+        currentContent: content
+      };
+    });
+  }
+
+  /**
+   * Creates a verified checkpoint of all files in the build
+   */
+  static createCheckpoint(buildId: string, description: string): Checkpoint {
+    const allFiles = db.getAllFiles(buildId);
+    const snapshot: Record<string, string> = {};
+    for (const f of allFiles) {
+      snapshot[f.path] = f.content;
+    }
+
+    const checkpoint: Checkpoint = {
+      id: `chk_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      buildId,
+      timestamp: Date.now(),
+      description,
+      filesSnapshot: snapshot,
+      patchCount: db.getBuild(buildId)?.patchesAppliedCount || 0
+    };
+
+    db.addCheckpoint(checkpoint);
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: checkpoint.timestamp,
+      type: 'checkpoint_saved',
+      details: `Checkpoint saved: "${description}" (${allFiles.length} files verified)`
+    });
+
+    return checkpoint;
+  }
+
+  /**
+   * Reverts the entire project to a specific checkpoint
+   */
+  static async revertToCheckpoint(buildId: string, checkpointId: string, modelId: string = 'system'): Promise<boolean> {
+    return this.enqueuePatch(buildId, async () => {
+      const checkpoints = db.getCheckpoints(buildId);
+      const target = checkpoints.find(c => c.id === checkpointId);
+      if (!target) return false;
+
+      const now = Date.now();
+      for (const [filePath, content] of Object.entries(target.filesSnapshot)) {
+        let file = db.getFile(buildId, filePath);
+        if (file) {
+          const nextVer = file.version + 1;
+          file.content = content;
+          file.version = nextVer;
+          file.ownerModel = `rollback(${modelId})`;
+          file.updatedAt = now;
+          file.history.push({
+            version: nextVer,
+            content,
+            authorModel: `rollback(${modelId})`,
+            timestamp: now,
+            commitMessage: `Reverted to checkpoint: ${target.description}`
+          });
+          db.setFile(buildId, file);
+        } else {
+          // File was deleted or didn't exist at checkpoint
+          const newFile: ProjectFile = {
+            path: filePath,
+            content,
+            version: 1,
+            ownerModel: `rollback(${modelId})`,
+            history: [{
+              version: 1,
+              content,
+              authorModel: `rollback(${modelId})`,
+              timestamp: now,
+              commitMessage: `Restored from checkpoint: ${target.description}`
+            }],
+            createdAt: now,
+            updatedAt: now
+          };
+          db.setFile(buildId, newFile);
+        }
+      }
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'checkpoint_reverted',
+        modelId,
+        details: `Project rolled back to checkpoint "${target.description}"`
+      });
+
+      return true;
+    });
+  }
+
+  /**
+   * Reverts a single file to a specific previous version
+   */
+  static async revertFileVersion(buildId: string, filePath: string, targetVersion: number, modelId: string = 'user'): Promise<boolean> {
+    return this.enqueuePatch(buildId, async () => {
+      const file = db.getFile(buildId, filePath);
+      if (!file) return false;
+
+      const historyItem = file.history.find(h => h.version === targetVersion);
+      if (!historyItem) return false;
+
+      const now = Date.now();
+      const nextVer = file.version + 1;
+      file.content = historyItem.content;
+      file.version = nextVer;
+      file.ownerModel = `revert(${modelId})`;
+      file.updatedAt = now;
+      file.history.push({
+        version: nextVer,
+        content: historyItem.content,
+        authorModel: `revert(${modelId})`,
+        timestamp: now,
+        commitMessage: `Reverted ${filePath} to v${targetVersion}`
+      });
+
+      db.setFile(buildId, file);
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'patch_applied',
+        modelId,
+        filePath,
+        details: `${filePath} reverted to version ${targetVersion} (now v${nextVer})`
+      });
+
+      return true;
+    });
+  }
+}

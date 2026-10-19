@@ -1,0 +1,6 @@
+{
+  "name": "SquadForge - Multi-AI Parallel Swarm Engineering",
+  "description": "Full-stack platform where 10+ AI models work silently in parallel as one team to build software from a single user idea.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
