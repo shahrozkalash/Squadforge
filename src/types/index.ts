@@ -271,6 +271,42 @@ export interface Build {
     score: number;
     findings: Array<{ severity: 'low' | 'medium' | 'high'; message: string }>;
   };
+  verificationReport?: VerificationReport;
+}
+
+export type VerificationVerdict = 'in_progress' | 'blocked' | 'failed' | 'partially_verified' | 'verified';
+
+export interface VerificationCheckItem {
+  category: 'requirements' | 'files' | 'syntax' | 'types' | 'tests' | 'build' | 'security' | 'config';
+  name: string;
+  status: 'passed' | 'failed' | 'skipped' | 'blocked';
+  evidence?: string;
+  reasonIfSkipped?: string;
+}
+
+export interface VerificationReport {
+  verdict: VerificationVerdict;
+  evaluatedAt: number;
+  checks: VerificationCheckItem[];
+  requirementsCoveragePercent: number;
+  syntaxChecksPassed: boolean;
+  typeChecksPassed: boolean;
+  testExecution: {
+    total: number;
+    passed: number;
+    failed: number;
+    skipped: number;
+    details: Array<{ name: string; status: 'passed' | 'failed' | 'skipped'; message?: string }>;
+  };
+  buildPassed: boolean;
+  buildOutput?: string;
+  securityAuditPassed: boolean;
+  securityScore: number;
+  knownDefects: string[];
+  missingEnvironmentVars: string[];
+  unresolvedCriteria: string[];
+  unresolvedRisks: string[];
+  evidenceSummary: string;
 }
 
 export interface ConcurrencyTestReport {

@@ -7,6 +7,7 @@ import {
   Build, 
   Task, 
   ProjectFile, 
+  FileVersion,
   SwarmEvent, 
   ModelRunStatus, 
   Checkpoint,
@@ -14,8 +15,7 @@ import {
   PasswordResetCodeRecord,
   PasswordResetAuthRecord,
   UsageLogEntry,
-  SwarmUsageStats,
-  LocalLLMConfig
+  SwarmUsageStats
 } from './types.js';
 import { 
   encryptToken, 
@@ -28,10 +28,11 @@ import {
   hashResetAuthToken,
   hashPassword
 } from './crypto.js';
-import { INITIAL_MODEL_REGISTRY, modelRegistry } from './modelRegistry.js';
+import { modelRegistry } from './modelRegistry.js';
 import { quotaManager } from './quotaManager.js';
 import { safeResultCache } from './cache.js';
 import { localLLMService } from './localLLM.js';
+import { DatabaseManager } from './db/database.js';
 
 interface ClientSSEListener {
   id: string;
@@ -42,28 +43,38 @@ interface ClientSSEListener {
 const DATA_FILE = path.resolve(process.cwd(), '.squadforge_data.json');
 const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
-class PersistentDatabase {
-  // Persistence maps
-  public users: Map<string, User> = new Map(); // userId -> User
-  public usersByEmail: Map<string, string> = new Map(); // normalizedEmail -> userId
-  public sessions: Map<string, Session> = new Map(); // hashedSessionToken -> Session
-  public passwordResetTokens: Map<string, PasswordResetToken> = new Map(); // hashedResetToken -> PasswordResetToken (legacy)
-  public passwordResetCodes: Map<string, PasswordResetCodeRecord> = new Map(); // codeId -> PasswordResetCodeRecord
-  public passwordResetAuths: Map<string, PasswordResetAuthRecord> = new Map(); // hashedResetAuthToken -> PasswordResetAuthRecord
-  public encryptedGithubTokens: Map<string, string> = new Map(); // userId -> encryptedToken
+export class PersistentDatabase {
+  public dbManager: DatabaseManager;
+
+  // In-memory synchronized entity caches
+  public users: Map<string, User> = new Map();
+  public usersByEmail: Map<string, string> = new Map();
+  public sessions: Map<string, Session> = new Map();
+  public passwordResetTokens: Map<string, PasswordResetToken> = new Map();
+  public passwordResetCodes: Map<string, PasswordResetCodeRecord> = new Map();
+  public passwordResetAuths: Map<string, PasswordResetAuthRecord> = new Map();
+  public encryptedGithubTokens: Map<string, string> = new Map();
   public builds: Map<string, Build> = new Map();
-  public tasks: Map<string, Task[]> = new Map(); // buildId -> tasks
-  public files: Map<string, Map<string, ProjectFile>> = new Map(); // buildId -> (filePath -> ProjectFile)
-  public events: Map<string, SwarmEvent[]> = new Map(); // buildId -> events
-  public modelRuns: Map<string, Map<string, ModelRunStatus>> = new Map(); // buildId -> (modelId -> ModelRunStatus)
-  public checkpoints: Map<string, Checkpoint[]> = new Map(); // buildId -> Checkpoints
-  public usageLogs: UsageLogEntry[] = []; // In-memory usage log entries
+  public tasks: Map<string, Task[]> = new Map();
+  public files: Map<string, Map<string, ProjectFile>> = new Map();
+  public events: Map<string, SwarmEvent[]> = new Map();
+  public modelRuns: Map<string, Map<string, ModelRunStatus>> = new Map();
+  public checkpoints: Map<string, Checkpoint[]> = new Map();
+  public usageLogs: UsageLogEntry[] = [];
 
   // In-memory rate limiter: identifier -> { attempts: number, lockUntil: number }
   private rateLimits: Map<string, { attempts: number; lockUntil: number }> = new Map();
 
   // Controllable clock for testing and production time enforcement
   private testClock: (() => number) | null = null;
+
+  // Active SSE listeners for real-time updates
+  private sseListeners: ClientSSEListener[] = [];
+
+  constructor(dbPath?: string) {
+    this.dbManager = DatabaseManager.getInstance(dbPath);
+    this.initializeStorage();
+  }
 
   public getTime(): number {
     return this.testClock ? this.testClock() : Date.now();
@@ -77,138 +88,340 @@ class PersistentDatabase {
     this.testClock = null;
   }
 
-  // Active SSE listeners for real-time updates
-  private sseListeners: ClientSSEListener[] = [];
-  private saveDebounceTimer: NodeJS.Timeout | null = null;
-
-  constructor() {
-    this.loadFromDisk();
-  }
-
-  private loadFromDisk() {
+  /**
+   * Initializes storage: loads data from SQLite database, or migrates existing .squadforge_data.json
+   */
+  private initializeStorage() {
     try {
-      if (fs.existsSync(DATA_FILE)) {
-        const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-        const parsed = JSON.parse(raw);
+      const sqlite = this.dbManager.db;
 
-        if (parsed.users && Array.isArray(parsed.users)) {
-          for (const u of parsed.users) {
-            this.users.set(u.id, u);
-            if (u.email) {
-              this.usersByEmail.set(u.email.toLowerCase().trim(), u.id);
-            }
-          }
-        }
+      // Check if sqlite has users
+      const userCountRow = sqlite.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
+      const hasSqliteData = userCountRow && userCountRow.count > 0;
 
-        if (parsed.sessions && Array.isArray(parsed.sessions)) {
-          const now = Date.now();
-          for (const s of parsed.sessions) {
-            if (s.expiresAt > now) {
-              this.sessions.set(s.id, s);
-            }
-          }
-        }
-
-        if (parsed.passwordResetTokens && Array.isArray(parsed.passwordResetTokens)) {
-          const now = this.getTime();
-          for (const prt of parsed.passwordResetTokens) {
-            if (prt.expiresAt > now) {
-              this.passwordResetTokens.set(prt.id, prt);
-            }
-          }
-        }
-
-        if (parsed.passwordResetCodes && Array.isArray(parsed.passwordResetCodes)) {
-          const now = this.getTime();
-          for (const prc of parsed.passwordResetCodes) {
-            if (prc.expiresAt > now && !prc.consumed && !prc.invalidated) {
-              this.passwordResetCodes.set(prc.id, prc);
-            }
-          }
-        }
-
-        if (parsed.passwordResetAuths && Array.isArray(parsed.passwordResetAuths)) {
-          const now = this.getTime();
-          for (const pra of parsed.passwordResetAuths) {
-            if (pra.expiresAt > now && !pra.consumed) {
-              this.passwordResetAuths.set(pra.id, pra);
-            }
-          }
-        }
-
-        if (parsed.encryptedGithubTokens) {
-          for (const [uId, enc] of Object.entries(parsed.encryptedGithubTokens)) {
-            this.encryptedGithubTokens.set(uId, enc as string);
-          }
-        }
-
-        if (parsed.builds) {
-          for (const b of parsed.builds) this.builds.set(b.id, b);
-        }
-
-        if (parsed.tasks) {
-          for (const [bId, tList] of Object.entries(parsed.tasks)) {
-            this.tasks.set(bId, tList as Task[]);
-          }
-        }
-
-        if (parsed.files) {
-          for (const [bId, fileMapObj] of Object.entries(parsed.files)) {
-            const map = new Map<string, ProjectFile>();
-            for (const [p, f] of Object.entries(fileMapObj as Record<string, ProjectFile>)) {
-              map.set(p, f);
-            }
-            this.files.set(bId, map);
-          }
-        }
-
-        if (parsed.events) {
-          for (const [bId, eList] of Object.entries(parsed.events)) {
-            this.events.set(bId, eList as SwarmEvent[]);
-          }
-        }
-
-        if (parsed.checkpoints) {
-          for (const [bId, cList] of Object.entries(parsed.checkpoints)) {
-            this.checkpoints.set(bId, cList as Checkpoint[]);
-          }
-        }
+      if (!hasSqliteData && fs.existsSync(DATA_FILE)) {
+        // Migrate legacy JSON file into SQLite
+        this.migrateJsonFileToSqlite();
       }
+
+      // Load all records from SQLite into memory cache
+      this.loadFromSqlite();
     } catch (err) {
-      console.warn('Could not load persistent database from disk:', err);
+      console.warn('Storage initialization fallback to memory:', err);
     }
   }
 
-  public scheduleDiskSave() {
-    if (this.saveDebounceTimer) clearTimeout(this.saveDebounceTimer);
-    this.saveDebounceTimer = setTimeout(() => {
-      try {
-        const serializedFiles: Record<string, Record<string, ProjectFile>> = {};
-        for (const [bId, map] of this.files.entries()) {
-          serializedFiles[bId] = Object.fromEntries(map.entries());
+  private loadFromSqlite() {
+    const sqlite = this.dbManager.db;
+    const now = this.getTime();
+
+    // 1. Users
+    const userRows = sqlite.prepare('SELECT * FROM users').all() as any[];
+    for (const u of userRows) {
+      const user: User = {
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        passwordHash: u.password_hash || undefined,
+        avatarUrl: u.avatar_url || undefined,
+        githubUsername: u.github_username || undefined,
+        githubConnected: Boolean(u.github_connected),
+        defaultRepo: u.default_repo || undefined,
+        costLimitPerBuild: u.cost_limit_per_build,
+        tokenLimitPerBuild: u.token_limit_per_build,
+        routingPreference: u.routing_preference || 'quality',
+        enabledModelIds: u.enabled_model_ids ? JSON.parse(u.enabled_model_ids) : [],
+        createdAt: u.created_at,
+        updatedAt: u.updated_at || undefined
+      };
+      this.users.set(user.id, user);
+      if (user.email) {
+        this.usersByEmail.set(user.email.toLowerCase().trim(), user.id);
+      }
+    }
+
+    // 2. Active Sessions
+    const sessionRows = sqlite.prepare('SELECT * FROM sessions WHERE expires_at > ?').all(now) as any[];
+    for (const s of sessionRows) {
+      this.sessions.set(s.id, {
+        id: s.id,
+        userId: s.user_id,
+        expiresAt: s.expires_at,
+        createdAt: s.created_at,
+        ip: s.ip || undefined,
+        userAgent: s.user_agent || undefined
+      });
+    }
+
+    // 3. Active Password Reset Codes
+    const resetCodeRows = sqlite.prepare('SELECT * FROM password_reset_codes WHERE expires_at > ? AND consumed = 0 AND invalidated = 0').all(now) as any[];
+    for (const r of resetCodeRows) {
+      this.passwordResetCodes.set(r.id, {
+        id: r.id,
+        userId: r.user_id,
+        email: r.email,
+        codeHash: r.code_hash,
+        createdAt: r.created_at,
+        expiresAt: r.expires_at,
+        attempts: r.attempts,
+        consumed: Boolean(r.consumed),
+        invalidated: Boolean(r.invalidated)
+      });
+    }
+
+    // 4. Password Reset Auths
+    const authRows = sqlite.prepare('SELECT * FROM password_reset_auths WHERE expires_at > ? AND consumed = 0').all(now) as any[];
+    for (const a of authRows) {
+      this.passwordResetAuths.set(a.id, {
+        id: a.id,
+        userId: a.user_id,
+        email: a.email,
+        createdAt: a.created_at,
+        expiresAt: a.expires_at,
+        consumed: Boolean(a.consumed)
+      });
+    }
+
+    // 5. Encrypted GitHub Tokens
+    const ghRows = sqlite.prepare('SELECT * FROM encrypted_github_tokens').all() as any[];
+    for (const g of ghRows) {
+      this.encryptedGithubTokens.set(g.user_id, g.encrypted_token);
+    }
+
+    // 6. Builds
+    const buildRows = sqlite.prepare('SELECT * FROM builds').all() as any[];
+    for (const b of buildRows) {
+      const build: Build = {
+        id: b.id,
+        userId: b.user_id,
+        idea: b.idea,
+        status: b.status,
+        createdAt: b.created_at,
+        updatedAt: b.updated_at,
+        completedAt: b.completed_at || undefined,
+        selectedModels: b.selected_models ? JSON.parse(b.selected_models) : [],
+        autoPushGithub: Boolean(b.auto_push_github),
+        totalTokens: b.total_tokens || 0,
+        totalCost: b.total_cost || 0.0,
+        costLimit: b.cost_limit || 5.0,
+        tokenBudget: b.token_budget || undefined,
+        maxDurationSeconds: b.max_duration_seconds || 300,
+        patchesAppliedCount: b.patches_applied_count || 0,
+        error: b.error || undefined,
+        failureReason: b.failure_reason || undefined,
+        techStack: b.tech_stack ? JSON.parse(b.tech_stack) : undefined,
+        milestones: b.milestones ? JSON.parse(b.milestones) : undefined,
+        testReport: b.test_report ? JSON.parse(b.test_report) : undefined,
+        securityAudit: b.security_audit ? JSON.parse(b.security_audit) : undefined,
+        verificationReport: b.verification_report ? JSON.parse(b.verification_report) : undefined,
+        verificationFeedback: b.verification_feedback || undefined,
+        verificationAttempts: b.verification_attempts || 0,
+        maxVerificationAttempts: b.max_verification_attempts || 3,
+        budgetWarningEmitted: Boolean(b.budget_warning_emitted),
+        githubRepoUrl: b.github_repo || undefined,
+        gitBranch: b.github_branch || undefined,
+        pullRequestUrl: b.github_pr_url || undefined
+      };
+      this.builds.set(build.id, build);
+    }
+
+    // 7. Tasks
+    const taskRows = sqlite.prepare('SELECT * FROM tasks').all() as any[];
+    for (const t of taskRows) {
+      const task: Task = {
+        id: t.id,
+        buildId: t.build_id,
+        title: t.title,
+        description: t.description,
+        filePaths: t.file_paths ? JSON.parse(t.file_paths) : [],
+        priority: t.priority as any,
+        status: t.status as any,
+        claimedBy: t.claimed_by || null,
+        leaseExpiresAt: t.lease_expires_at || null,
+        createdAt: t.created_at,
+        completedAt: t.completed_at || undefined,
+        error: t.error || undefined,
+        isFixTask: Boolean(t.is_fix_task),
+        retryCount: t.retry_count || 0,
+        maxRetries: t.max_retries || 3,
+        lastError: t.last_error || undefined,
+        dependencies: t.dependencies ? JSON.parse(t.dependencies) : undefined,
+        assignedRole: t.assigned_role || undefined,
+        milestone: t.milestone || undefined,
+        complexity: t.complexity || undefined,
+        tokenBudget: t.token_budget || undefined,
+        actualTokensUsed: t.actual_tokens_used || 0,
+        estimatedCost: t.estimated_cost || 0.0,
+        isPaused: Boolean(t.is_paused),
+        pausedReason: t.paused_reason || undefined,
+        executionLogs: t.execution_logs ? JSON.parse(t.execution_logs) : undefined
+      };
+      let list = this.tasks.get(task.buildId);
+      if (!list) {
+        list = [];
+        this.tasks.set(task.buildId, list);
+      }
+      list.push(task);
+    }
+
+    // 8. Project Files & Versions
+    const fileRows = sqlite.prepare('SELECT * FROM project_files').all() as any[];
+    for (const f of fileRows) {
+      const versionRows = sqlite.prepare('SELECT * FROM file_versions WHERE file_id = ? ORDER BY version ASC').all(f.id) as any[];
+      const history: FileVersion[] = versionRows.map(v => ({
+        version: v.version,
+        content: v.content,
+        authorModel: v.author_model,
+        timestamp: v.timestamp,
+        commitMessage: v.commit_message || undefined
+      }));
+
+      const projFile: ProjectFile = {
+        path: f.path,
+        content: f.content,
+        version: f.version,
+        ownerModel: f.owner_model,
+        history,
+        leaseOwner: f.lease_owner || null,
+        leaseExpiresAt: f.lease_expires_at || null,
+        createdAt: f.created_at,
+        updatedAt: f.updated_at
+      };
+
+      let buildFiles = this.files.get(f.build_id);
+      if (!buildFiles) {
+        buildFiles = new Map();
+        this.files.set(f.build_id, buildFiles);
+      }
+      buildFiles.set(projFile.path, projFile);
+    }
+
+    // 9. Swarm Events
+    const eventRows = sqlite.prepare('SELECT * FROM swarm_events ORDER BY timestamp ASC').all() as any[];
+    for (const e of eventRows) {
+      const event: SwarmEvent = {
+        id: e.id,
+        buildId: e.build_id,
+        timestamp: e.timestamp,
+        type: e.type,
+        modelId: e.model_id || undefined,
+        taskId: e.task_id || undefined,
+        filePath: e.file_path || undefined,
+        details: e.details
+      };
+      let list = this.events.get(event.buildId);
+      if (!list) {
+        list = [];
+        this.events.set(event.buildId, list);
+      }
+      list.push(event);
+    }
+
+    // 10. Checkpoints
+    const checkpointRows = sqlite.prepare('SELECT * FROM checkpoints ORDER BY timestamp ASC').all() as any[];
+    for (const c of checkpointRows) {
+      const checkpoint: Checkpoint = {
+        id: c.id,
+        buildId: c.build_id,
+        timestamp: c.timestamp,
+        description: c.description,
+        filesSnapshot: c.snapshot ? JSON.parse(c.snapshot) : {},
+        patchCount: 0
+      };
+      let list = this.checkpoints.get(checkpoint.buildId);
+      if (!list) {
+        list = [];
+        this.checkpoints.set(checkpoint.buildId, list);
+      }
+      list.push(checkpoint);
+    }
+
+    // 11. Usage Logs
+    const logRows = sqlite.prepare('SELECT * FROM usage_logs ORDER BY timestamp ASC LIMIT 5000').all() as any[];
+    for (const l of logRows) {
+      this.usageLogs.push({
+        id: l.id,
+        userId: l.user_id,
+        buildId: l.build_id || undefined,
+        timestamp: l.timestamp,
+        requestedModelId: l.requested_model_id,
+        actualModelUsed: l.actual_model_used,
+        provider: l.provider_used as any,
+        providerUsed: l.provider_used,
+        modelId: l.requested_model_id,
+        inputTokens: l.input_tokens,
+        outputTokens: l.output_tokens,
+        totalTokens: l.total_tokens,
+        estimatedCost: l.estimated_cost,
+        taskComplexity: l.task_complexity as any,
+        isFallback: Boolean(l.is_fallback),
+        cached: Boolean(l.cached),
+        latencyMs: l.latency_ms,
+        success: Boolean(l.success),
+        taskId: l.task_id || undefined,
+        taskTitle: l.task_title || undefined
+      });
+    }
+  }
+
+  private migrateJsonFileToSqlite() {
+    try {
+      const raw = fs.readFileSync(DATA_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      const sqlite = this.dbManager.db;
+
+      this.dbManager.transaction(() => {
+        if (parsed.users && Array.isArray(parsed.users)) {
+          const stmt = sqlite.prepare(`
+            INSERT OR REPLACE INTO users (
+              id, email, name, password_hash, avatar_url, github_username, github_connected,
+              default_repo, cost_limit_per_build, token_limit_per_build, routing_preference,
+              enabled_model_ids, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const u of parsed.users) {
+            stmt.run(
+              u.id, u.email, u.name, u.passwordHash || null, u.avatarUrl || null,
+              u.githubUsername || null, u.githubConnected ? 1 : 0, u.defaultRepo || null,
+              u.costLimitPerBuild || 5.0, u.tokenLimitPerBuild || 100000,
+              u.routingPreference || 'quality', JSON.stringify(u.enabledModelIds || []),
+              u.createdAt || Date.now(), u.updatedAt || Date.now()
+            );
+          }
         }
 
-        const data = {
-          users: Array.from(this.users.values()),
-          sessions: Array.from(this.sessions.values()),
-          passwordResetTokens: Array.from(this.passwordResetTokens.values()),
-          passwordResetCodes: Array.from(this.passwordResetCodes.values()),
-          passwordResetAuths: Array.from(this.passwordResetAuths.values()),
-          encryptedGithubTokens: Object.fromEntries(this.encryptedGithubTokens.entries()),
-          builds: Array.from(this.builds.values()),
-          tasks: Object.fromEntries(this.tasks.entries()),
-          files: serializedFiles,
-          events: Object.fromEntries(this.events.entries()),
-          checkpoints: Object.fromEntries(this.checkpoints.entries())
-        };
-        fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
-      } catch (err) {
-        // Disk write failed gracefully
-      }
-    }, 800);
-
-    if (this.saveDebounceTimer.unref) {
-      this.saveDebounceTimer.unref();
+        if (parsed.builds && Array.isArray(parsed.builds)) {
+          const stmt = sqlite.prepare(`
+            INSERT OR REPLACE INTO builds (
+              id, user_id, idea, status, created_at, updated_at, completed_at,
+              selected_models, auto_push_github, total_tokens, total_cost, cost_limit,
+              token_budget, max_duration_seconds, patches_applied_count, error, failure_reason,
+              tech_stack, milestones, test_report, security_audit, verification_report,
+              verification_feedback, verification_attempts, max_verification_attempts,
+              budget_warning_emitted, github_repo, github_branch, github_pr_url
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+          for (const b of parsed.builds) {
+            stmt.run(
+              b.id, b.userId, b.idea, b.status, b.createdAt, b.updatedAt, b.completedAt || null,
+              JSON.stringify(b.selectedModels || []), b.autoPushGithub ? 1 : 0,
+              b.totalTokens || 0, b.totalCost || 0.0, b.costLimit || 5.0,
+              b.tokenBudget || 100000, b.maxDurationSeconds || 300,
+              b.patchesAppliedCount || 0, b.error || null, b.failureReason || null,
+              b.techStack ? JSON.stringify(b.techStack) : null,
+              b.milestones ? JSON.stringify(b.milestones) : null,
+              b.testReport ? JSON.stringify(b.testReport) : null,
+              b.securityAudit ? JSON.stringify(b.securityAudit) : null,
+              b.verificationReport ? JSON.stringify(b.verificationReport) : null,
+              b.verificationFeedback || null, b.verificationAttempts || 0,
+              b.maxVerificationAttempts || 3, b.budgetWarningEmitted ? 1 : 0,
+              b.githubRepoUrl || null, b.gitBranch || null, b.pullRequestUrl || null
+            );
+          }
+        }
+      });
+    } catch (err) {
+      console.warn('JSON to SQLite migration skipped:', err);
     }
   }
 
@@ -252,10 +465,29 @@ class PersistentDatabase {
   saveUser(user: User): User {
     const normalized = user.email.toLowerCase().trim();
     user.email = normalized;
-    user.updatedAt = Date.now();
+    user.updatedAt = this.getTime();
     this.users.set(user.id, user);
     this.usersByEmail.set(normalized, user.id);
-    this.scheduleDiskSave();
+
+    try {
+      const sqlite = this.dbManager.db;
+      sqlite.prepare(`
+        INSERT OR REPLACE INTO users (
+          id, email, name, password_hash, avatar_url, github_username, github_connected,
+          default_repo, cost_limit_per_build, token_limit_per_build, routing_preference,
+          enabled_model_ids, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        user.id, user.email, user.name, user.passwordHash || null, user.avatarUrl || null,
+        user.githubUsername || null, user.githubConnected ? 1 : 0, user.defaultRepo || null,
+        user.costLimitPerBuild || 5.0, user.tokenLimitPerBuild || 100000,
+        user.routingPreference || 'quality', JSON.stringify(user.enabledModelIds || []),
+        user.createdAt, user.updatedAt
+      );
+    } catch (err) {
+      // Ignored
+    }
+
     return user;
   }
 
@@ -275,13 +507,22 @@ class PersistentDatabase {
     const session: Session = {
       id: hashed,
       userId,
-      expiresAt: Date.now() + SESSION_DURATION_MS,
-      createdAt: Date.now(),
+      expiresAt: this.getTime() + SESSION_DURATION_MS,
+      createdAt: this.getTime(),
       ip,
       userAgent
     };
     this.sessions.set(hashed, session);
-    this.scheduleDiskSave();
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO sessions (id, user_id, expires_at, created_at, ip, user_agent)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(session.id, session.userId, session.expiresAt, session.createdAt, session.ip || null, session.userAgent || null);
+    } catch (err) {
+      // Ignored
+    }
+
     return session;
   }
 
@@ -292,9 +533,8 @@ class PersistentDatabase {
     if (!session) return undefined;
 
     // Check expiration
-    if (session.expiresAt < Date.now()) {
-      this.sessions.delete(hashed);
-      this.scheduleDiskSave();
+    if (session.expiresAt < this.getTime()) {
+      this.deleteSession(plainToken);
       return undefined;
     }
     return session;
@@ -304,26 +544,28 @@ class PersistentDatabase {
     if (!plainToken) return false;
     const hashed = hashSessionToken(plainToken);
     const existed = this.sessions.delete(hashed);
-    if (existed) {
-      this.scheduleDiskSave();
+    try {
+      this.dbManager.db.prepare('DELETE FROM sessions WHERE id = ?').run(hashed);
+    } catch (err) {
+      // Ignored
     }
     return existed;
   }
 
   deleteUserSessions(userId: string): void {
-    let deleted = false;
     for (const [id, s] of this.sessions.entries()) {
       if (s.userId === userId) {
         this.sessions.delete(id);
-        deleted = true;
       }
     }
-    if (deleted) {
-      this.scheduleDiskSave();
+    try {
+      this.dbManager.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+    } catch (err) {
+      // Ignored
     }
   }
 
-  // --- Password Reset Tokens (1 hour TTL, one-time use - legacy fallback) ---
+  // --- Password Reset Tokens (Legacy fallback) ---
 
   createPasswordResetToken(email: string): string | null {
     const user = this.findUserByEmail(email);
@@ -339,7 +581,6 @@ class PersistentDatabase {
       createdAt: this.getTime()
     };
     this.passwordResetTokens.set(hashed, resetToken);
-    this.scheduleDiskSave();
     return plainToken;
   }
 
@@ -351,21 +592,15 @@ class PersistentDatabase {
 
     if (record.expiresAt < this.getTime()) {
       this.passwordResetTokens.delete(hashed);
-      this.scheduleDiskSave();
       return { valid: false };
     }
 
-    // One-time use: consume immediately
     this.passwordResetTokens.delete(hashed);
-    this.scheduleDiskSave();
     return { valid: true, userId: record.userId };
   }
 
   // --- Secure 6-Digit Email OTP Password Reset System ---
 
-  /**
-   * Retrieves the current active, unconsumed, uninvalidated code for an email
-   */
   getActiveResetCode(email: string): PasswordResetCodeRecord | undefined {
     if (!email) return undefined;
     const normalized = email.toLowerCase().trim();
@@ -386,14 +621,10 @@ class PersistentDatabase {
     return latest;
   }
 
-  /**
-   * Generates and stores a cryptographically secure 6-digit verification code with 300s TTL.
-   * Enforces 60-second cooldown between resends and invalidates previous codes.
-   */
   createPasswordResetCode(
     email: string, 
     code: string, 
-    customTtlMs = 300_000 // exactly 300 seconds / 5 minutes
+    customTtlMs = 300_000
   ): { 
     success: boolean; 
     record?: PasswordResetCodeRecord; 
@@ -409,9 +640,9 @@ class PersistentDatabase {
     const now = this.getTime();
     const normalizedEmail = user.email.toLowerCase().trim();
 
-    // Check 60-second cooldown from previous request for this email
+    // Check 60-second cooldown
     for (const rec of this.passwordResetCodes.values()) {
-      if (rec.email.toLowerCase() === normalizedEmail && !rec.consumed) {
+      if (rec.email.toLowerCase() === normalizedEmail && !rec.consumed && !rec.invalidated) {
         const timeSince = now - rec.createdAt;
         if (timeSince < 60_000 && timeSince >= 0) {
           const cooldownRemaining = Math.ceil((60_000 - timeSince) / 1000);
@@ -424,7 +655,7 @@ class PersistentDatabase {
       }
     }
 
-    // Invalidate ALL previous pending codes for this user/email
+    // Invalidate all previous pending codes
     for (const rec of this.passwordResetCodes.values()) {
       if (
         (rec.userId === user.id || rec.email.toLowerCase() === normalizedEmail) &&
@@ -435,7 +666,6 @@ class PersistentDatabase {
       }
     }
 
-    // Securely hash the 6-digit code with server-side keyed HMAC before storing
     const codeHash = hashVerificationCode(code);
     const id = `prc_${now}_${Math.random().toString(36).substring(2, 8)}`;
     const record: PasswordResetCodeRecord = {
@@ -444,22 +674,26 @@ class PersistentDatabase {
       email: user.email,
       codeHash,
       createdAt: now,
-      expiresAt: now + customTtlMs, // Exactly 300 seconds (5 minutes)
+      expiresAt: now + customTtlMs,
       attempts: 0,
       consumed: false,
       invalidated: false
     };
 
     this.passwordResetCodes.set(id, record);
-    this.scheduleDiskSave();
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT INTO password_reset_codes (id, user_id, email, code_hash, created_at, expires_at, attempts, consumed, invalidated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(record.id, record.userId, record.email, record.codeHash, record.createdAt, record.expiresAt, record.attempts, 0, 0);
+    } catch (err) {
+      // Ignored
+    }
 
     return { success: true, record };
   }
 
-  /**
-   * Verifies a 6-digit OTP code against server-side time and max 5 attempts.
-   * On success, consumes the code and issues a short-lived reset authorization token.
-   */
   verifyPasswordResetCode(
     email: string, 
     code: string
@@ -477,7 +711,6 @@ class PersistentDatabase {
     const normalizedEmail = email.toLowerCase().trim();
     const trimmedCode = code.trim();
 
-    // Find the latest active record
     let record: PasswordResetCodeRecord | undefined;
     for (const rec of this.passwordResetCodes.values()) {
       if (rec.email.toLowerCase() === normalizedEmail && !rec.consumed && !rec.invalidated) {
@@ -495,10 +728,8 @@ class PersistentDatabase {
       };
     }
 
-    // Check attempts limit (max 5)
     if (record.attempts >= 5) {
       record.invalidated = true;
-      this.scheduleDiskSave();
       return { 
         success: false, 
         error: 'Maximum verification attempts (5) exceeded. This code has been invalidated. Please request a new code.', 
@@ -507,11 +738,9 @@ class PersistentDatabase {
       };
     }
 
-    // Enforce server-side expiration (exactly 300 seconds)
     const now = this.getTime();
     if (now >= record.expiresAt) {
       record.invalidated = true;
-      this.scheduleDiskSave();
       return { 
         success: false, 
         error: 'Verification code has expired (5-minute limit). Please request a new code.', 
@@ -519,13 +748,11 @@ class PersistentDatabase {
       };
     }
 
-    // Constant-time hash verification against HMAC
     const isMatch = timingSafeVerifyCodeHash(trimmedCode, record.codeHash);
     if (!isMatch) {
       record.attempts += 1;
       if (record.attempts >= 5) {
         record.invalidated = true;
-        this.scheduleDiskSave();
         return { 
           success: false, 
           error: 'Incorrect verification code. Maximum verification attempts (5) exceeded. Code has been invalidated. Please request a new code.', 
@@ -533,7 +760,6 @@ class PersistentDatabase {
           attemptsRemaining: 0 
         };
       }
-      this.scheduleDiskSave();
       const remaining = 5 - record.attempts;
       return { 
         success: false, 
@@ -542,10 +768,8 @@ class PersistentDatabase {
       };
     }
 
-    // Successful verification -> consume code immediately (one-time use)
     record.consumed = true;
 
-    // Issue short-lived, single-use server-side reset authorization token (10 min TTL)
     const resetAuthToken = generateResetAuthToken();
     const hashedAuth = hashResetAuthToken(resetAuthToken);
     const authRecord: PasswordResetAuthRecord = {
@@ -553,23 +777,24 @@ class PersistentDatabase {
       userId: record.userId,
       email: record.email,
       createdAt: now,
-      expiresAt: now + 10 * 60 * 1000, // 10 minutes
+      expiresAt: now + 10 * 60 * 1000,
       consumed: false
     };
 
     this.passwordResetAuths.set(hashedAuth, authRecord);
-    this.scheduleDiskSave();
 
-    return { 
-      success: true, 
-      resetAuthToken 
-    };
+    try {
+      this.dbManager.db.prepare(`
+        INSERT INTO password_reset_auths (id, user_id, email, created_at, expires_at, consumed)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(authRecord.id, authRecord.userId, authRecord.email, authRecord.createdAt, authRecord.expiresAt, 0);
+    } catch (err) {
+      // Ignored
+    }
+
+    return { success: true, resetAuthToken };
   }
 
-  /**
-   * Completes password reset using a verified reset authorization token.
-   * Updates password, invalidates authorization token, and revokes all active sessions.
-   */
   async completePasswordReset(
     resetAuthToken: string, 
     newPassword: string
@@ -593,7 +818,6 @@ class PersistentDatabase {
       };
     }
 
-    // Invalidate authorization immediately (one-time use)
     authRecord.consumed = true;
     this.passwordResetAuths.delete(hashedAuth);
 
@@ -602,39 +826,26 @@ class PersistentDatabase {
       return { success: false, error: 'User account not found.' };
     }
 
-    // Hash new password using bcryptjs (salt 12)
     const newHash = await hashPassword(newPassword);
     user.passwordHash = newHash;
     user.updatedAt = now;
     this.saveUser(user);
 
-    // Revoke all existing sessions across devices
     this.deleteUserSessions(user.id);
-
-    // Invalidate any remaining reset codes for this user
     this.invalidateAllResetCodesForUser(user.id);
 
-    this.scheduleDiskSave();
     return { success: true };
   }
 
-  /**
-   * Invalidate all reset codes for a user
-   */
   invalidateAllResetCodesForUser(userId: string): void {
-    let changed = false;
     for (const rec of this.passwordResetCodes.values()) {
       if (rec.userId === userId && !rec.consumed && !rec.invalidated) {
         rec.invalidated = true;
-        changed = true;
       }
-    }
-    if (changed) {
-      this.scheduleDiskSave();
     }
   }
 
-  // --- Login Rate Limiting (5 failed attempts = 15 min lock) ---
+  // --- Rate Limiting ---
 
   checkRateLimit(key: string): { allowed: boolean; retryAfterSeconds: number } {
     const record = this.rateLimits.get(key);
@@ -655,7 +866,6 @@ class PersistentDatabase {
     const record = this.rateLimits.get(key) || { attempts: 0, lockUntil: 0 };
     record.attempts += 1;
 
-    // After 5 attempts, lock for 15 minutes
     if (record.attempts >= 5) {
       record.lockUntil = now + 15 * 60 * 1000;
     }
@@ -671,6 +881,16 @@ class PersistentDatabase {
   setGithubToken(userId: string, plainToken: string, username?: string): void {
     const encrypted = encryptToken(plainToken);
     this.encryptedGithubTokens.set(userId, encrypted);
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO encrypted_github_tokens (user_id, encrypted_token, created_at)
+        VALUES (?, ?, ?)
+      `).run(userId, encrypted, this.getTime());
+    } catch (err) {
+      // Ignored
+    }
+
     const user = this.users.get(userId);
     if (user) {
       user.githubConnected = true;
@@ -687,6 +907,12 @@ class PersistentDatabase {
 
   disconnectGithub(userId: string): void {
     this.encryptedGithubTokens.delete(userId);
+    try {
+      this.dbManager.db.prepare('DELETE FROM encrypted_github_tokens WHERE user_id = ?').run(userId);
+    } catch (err) {
+      // Ignored
+    }
+
     const user = this.users.get(userId);
     if (user) {
       user.githubConnected = false;
@@ -695,7 +921,7 @@ class PersistentDatabase {
     }
   }
 
-  // --- Builds (Scoped to User) ---
+  // --- Builds ---
 
   getBuild(buildId: string): Build | undefined {
     return this.builds.get(buildId);
@@ -704,7 +930,36 @@ class PersistentDatabase {
   saveBuild(build: Build): Build {
     this.builds.set(build.id, build);
     this.broadcast(build.id, 'build_updated', build);
-    this.scheduleDiskSave();
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO builds (
+          id, user_id, idea, status, created_at, updated_at, completed_at,
+          selected_models, auto_push_github, total_tokens, total_cost, cost_limit,
+          token_budget, max_duration_seconds, patches_applied_count, error, failure_reason,
+          tech_stack, milestones, test_report, security_audit, verification_report,
+          verification_feedback, verification_attempts, max_verification_attempts,
+          budget_warning_emitted, github_repo, github_branch, github_pr_url
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        build.id, build.userId, build.idea, build.status, build.createdAt, build.updatedAt,
+        build.completedAt || null, JSON.stringify(build.selectedModels || []),
+        build.autoPushGithub ? 1 : 0, build.totalTokens || 0, build.totalCost || 0.0,
+        build.costLimit || 5.0, build.tokenBudget || 100000, build.maxDurationSeconds || 300,
+        build.patchesAppliedCount || 0, build.error || null, build.failureReason || null,
+        build.techStack ? JSON.stringify(build.techStack) : null,
+        build.milestones ? JSON.stringify(build.milestones) : null,
+        build.testReport ? JSON.stringify(build.testReport) : null,
+        build.securityAudit ? JSON.stringify(build.securityAudit) : null,
+        build.verificationReport ? JSON.stringify(build.verificationReport) : null,
+        build.verificationFeedback || null, build.verificationAttempts || 0,
+        build.maxVerificationAttempts || 3, build.budgetWarningEmitted ? 1 : 0,
+        build.githubRepoUrl || null, build.gitBranch || null, build.pullRequestUrl || null
+      );
+    } catch (err) {
+      // Ignored
+    }
+
     return build;
   }
 
@@ -728,11 +983,38 @@ class PersistentDatabase {
   }
 
   addTask(buildId: string, task: Task): Task {
-    const list = this.getTasks(buildId);
+    let list = this.tasks.get(buildId);
+    if (!list) {
+      list = [];
+      this.tasks.set(buildId, list);
+    }
     list.push(task);
-    this.tasks.set(buildId, list);
     this.broadcast(buildId, 'task_added', task);
-    this.scheduleDiskSave();
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO tasks (
+          id, build_id, title, description, file_paths, priority, status,
+          claimed_by, lease_expires_at, created_at, completed_at, error,
+          is_fix_task, retry_count, max_retries, last_error, dependencies,
+          assigned_role, milestone, complexity, token_budget, actual_tokens_used,
+          estimated_cost, is_paused, paused_reason, execution_logs
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        task.id, task.buildId, task.title, task.description, JSON.stringify(task.filePaths || []),
+        task.priority, task.status, task.claimedBy || null, task.leaseExpiresAt || null,
+        task.createdAt, task.completedAt || null, task.error || null,
+        task.isFixTask ? 1 : 0, task.retryCount || 0, task.maxRetries || 3,
+        task.lastError || null, task.dependencies ? JSON.stringify(task.dependencies) : null,
+        task.assignedRole || null, task.milestone || null, task.complexity || null,
+        task.tokenBudget || null, task.actualTokensUsed || 0, task.estimatedCost || 0.0,
+        task.isPaused ? 1 : 0, task.pausedReason || null,
+        task.executionLogs ? JSON.stringify(task.executionLogs) : null
+      );
+    } catch (err) {
+      // Ignored
+    }
+
     return task;
   }
 
@@ -744,7 +1026,24 @@ class PersistentDatabase {
     list[index] = updated;
     this.tasks.set(buildId, list);
     this.broadcast(buildId, 'task_updated', updated);
-    this.scheduleDiskSave();
+
+    try {
+      this.dbManager.db.prepare(`
+        UPDATE tasks SET
+          status = ?, claimed_by = ?, lease_expires_at = ?, completed_at = ?,
+          error = ?, retry_count = ?, last_error = ?, is_paused = ?, paused_reason = ?,
+          actual_tokens_used = ?, estimated_cost = ?
+        WHERE id = ?
+      `).run(
+        updated.status, updated.claimedBy || null, updated.leaseExpiresAt || null,
+        updated.completedAt || null, updated.error || null, updated.retryCount || 0,
+        updated.lastError || null, updated.isPaused ? 1 : 0, updated.pausedReason || null,
+        updated.actualTokensUsed || 0, updated.estimatedCost || 0.0, updated.id
+      );
+    } catch (err) {
+      // Ignored
+    }
+
     return updated;
   }
 
@@ -771,8 +1070,47 @@ class PersistentDatabase {
     const files = this.getFilesMap(buildId);
     files.set(file.path, file);
     this.broadcast(buildId, 'file_updated', file);
-    this.scheduleDiskSave();
+
+    try {
+      const fileId = `${buildId}:${file.path}`;
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO project_files (
+          id, build_id, path, content, version, owner_model,
+          lease_owner, lease_expires_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        fileId, buildId, file.path, file.content, file.version, file.ownerModel,
+        file.leaseOwner || null, file.leaseExpiresAt || null, file.createdAt, file.updatedAt
+      );
+
+      // Latest version in file_versions
+      const latestVer = file.history[file.history.length - 1];
+      if (latestVer) {
+        this.dbManager.db.prepare(`
+          INSERT INTO file_versions (file_id, build_id, path, version, content, author_model, commit_message, timestamp)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(fileId, buildId, file.path, latestVer.version, latestVer.content, latestVer.authorModel, latestVer.commitMessage || null, latestVer.timestamp);
+      }
+    } catch (err) {
+      // Ignored
+    }
+
     return file;
+  }
+
+  deleteFile(buildId: string, filePath: string): boolean {
+    const files = this.getFilesMap(buildId);
+    const existed = files.delete(filePath);
+    if (existed) {
+      this.broadcast(buildId, 'file_deleted', { path: filePath });
+      try {
+        const fileId = `${buildId}:${filePath}`;
+        this.dbManager.db.prepare('DELETE FROM project_files WHERE id = ?').run(fileId);
+      } catch (err) {
+        // Ignored
+      }
+    }
+    return existed;
   }
 
   // --- Events ---
@@ -789,7 +1127,19 @@ class PersistentDatabase {
     }
     list.push(event);
     this.broadcast(event.buildId, 'event_added', event);
-    this.scheduleDiskSave();
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT INTO swarm_events (id, build_id, timestamp, type, model_id, task_id, file_path, details)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        event.id, event.buildId, event.timestamp, event.type,
+        event.modelId || null, event.taskId || null, event.filePath || null, event.details
+      );
+    } catch (err) {
+      // Ignored
+    }
+
     return event;
   }
 
@@ -821,11 +1171,30 @@ class PersistentDatabase {
       patchesRejected: 0,
       tokensUsed: 0,
       estimatedCost: 0,
-      lastActive: Date.now()
+      lastActive: this.getTime()
     };
-    const updated = { ...current, ...updates, lastActive: Date.now() };
+    const updated = { ...current, ...updates, lastActive: this.getTime() };
     map.set(modelId, updated);
     this.broadcast(buildId, 'model_run_updated', updated);
+
+    try {
+      const runId = `${buildId}:${modelId}`;
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO model_runs (
+          id, build_id, model_id, status, role, current_task_id,
+          tokens_used, estimated_cost, patches_applied, patches_rejected,
+          last_action_summary, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        runId, buildId, modelId, updated.status, updated.role || null,
+        updated.currentTaskId || null, updated.tokensUsed, updated.estimatedCost,
+        updated.patchesApplied, updated.patchesRejected, updated.lastActionSummary || null,
+        updated.error || null
+      );
+    } catch (err) {
+      // Ignored
+    }
+
     return updated;
   }
 
@@ -843,7 +1212,19 @@ class PersistentDatabase {
     }
     list.push(checkpoint);
     this.broadcast(checkpoint.buildId, 'checkpoint_saved', checkpoint);
-    this.scheduleDiskSave();
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT INTO checkpoints (id, build_id, timestamp, description, snapshot)
+        VALUES (?, ?, ?, ?, ?)
+      `).run(
+        checkpoint.id, checkpoint.buildId, checkpoint.timestamp, checkpoint.description,
+        JSON.stringify(checkpoint.filesSnapshot || {})
+      );
+    } catch (err) {
+      // Ignored
+    }
+
     return checkpoint;
   }
 
@@ -856,11 +1237,46 @@ class PersistentDatabase {
 
   addUsageLog(entry: UsageLogEntry): void {
     this.usageLogs.push(entry);
-    // Keep last 5000 entries in memory
     if (this.usageLogs.length > 5000) {
       this.usageLogs = this.usageLogs.slice(-4000);
     }
     this.broadcast(entry.buildId, 'usage_logged', entry);
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT INTO usage_logs (
+          id, user_id, build_id, timestamp, requested_model_id, actual_model_used,
+          provider_used, input_tokens, output_tokens, total_tokens, estimated_cost,
+          task_complexity, is_fallback, cached, latency_ms, success, task_id, task_title
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        entry.id, entry.userId, entry.buildId || null, entry.timestamp,
+        entry.requestedModelId || entry.modelId, entry.actualModelUsed || entry.modelId,
+        entry.provider || 'gemini', entry.inputTokens || 0, entry.outputTokens || 0,
+        entry.totalTokens, entry.estimatedCost, entry.taskComplexity || 'standard',
+        entry.isFallback ? 1 : 0, entry.cached ? 1 : 0, entry.latencyMs || 0,
+        entry.success ? 1 : 0, entry.taskId || null, entry.taskTitle || null
+      );
+    } catch (err) {
+      // Ignored
+    }
+  }
+
+  // --- Audit Logging ---
+
+  addAuditLog(entry: { userId?: string; eventType: string; ip?: string; userAgent?: string; details: string }): void {
+    const id = `aud_${this.getTime()}_${Math.random().toString(36).substring(2, 7)}`;
+    try {
+      this.dbManager.db.prepare(`
+        INSERT INTO audit_logs (id, user_id, event_type, ip, user_agent, details, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id, entry.userId || null, entry.eventType, entry.ip || null,
+        entry.userAgent || null, entry.details, this.getTime()
+      );
+    } catch (err) {
+      // Ignored
+    }
   }
 
   getUsageLogs(userId?: string, buildId?: string, limit: number = 100): UsageLogEntry[] {
@@ -894,7 +1310,6 @@ class PersistentDatabase {
     const providerStats: SwarmUsageStats['providerStats'] = {};
     const modelStats: SwarmUsageStats['modelStats'] = {};
 
-    // Agent Stats initialized prior to log scan
     const agentStats: SwarmUsageStats['agentStats'] = {} as any;
     const allAgents = modelRegistry.getAgentSpecs();
     for (const [role] of Object.entries(allAgents)) {
@@ -916,7 +1331,6 @@ class PersistentDatabase {
       totalEstimatedCost += log.estimatedCost || 0;
       totalBilledCost += log.billedCost || 0;
 
-      // Provider aggregation
       const p = log.provider || 'other';
       if (!providerStats[p]) {
         providerStats[p] = {
@@ -934,7 +1348,6 @@ class PersistentDatabase {
       providerStats[p].billedCost += log.billedCost || 0;
       if (!log.success) providerStats[p].errors++;
 
-      // Model aggregation
       const mId = log.requestedModelId || log.modelId;
       if (!modelStats[mId]) {
         const cfg = modelRegistry.getById(mId);
@@ -954,13 +1367,11 @@ class PersistentDatabase {
       if (!log.success) modelStats[mId].errors++;
       if (log.isFallback) modelStats[mId].fallbackCount++;
 
-      // Agent aggregation from logs
       if (log.agentRole && agentStats[log.agentRole]) {
         agentStats[log.agentRole].requests++;
       }
     }
 
-    // Set provider status from quota manager
     const allQuotas = quotaManager.getAllStatuses();
     for (const [, pVal] of Object.entries(allQuotas)) {
       if (providerStats[pVal.provider]) {
@@ -968,7 +1379,6 @@ class PersistentDatabase {
       }
     }
 
-    // Aggregate tasks if buildId provided
     const taskStats: SwarmUsageStats['taskStats'] = [];
     if (buildId) {
       const buildTasks = this.getTasks(buildId);

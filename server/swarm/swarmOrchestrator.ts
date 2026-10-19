@@ -698,6 +698,22 @@ Never write placeholder comments. Implement functional code.`;
               patchesApplied: (modelRun?.patchesApplied || 0) + 1
             });
           }
+        } else if (action.action === 'delete_file') {
+          const delRes = await MergeManager.deleteFile(buildId, model.id, action);
+          if (!delRes.success) {
+            allActionsSucceeded = false;
+            lastError = delRes.error || 'delete_file failed';
+          } else {
+            appliedCount++;
+          }
+        } else if (action.action === 'rename_file') {
+          const renRes = await MergeManager.renameFile(buildId, model.id, action);
+          if (!renRes.success) {
+            allActionsSucceeded = false;
+            lastError = renRes.error || 'rename_file failed';
+          } else {
+            appliedCount++;
+          }
         } else if (action.action === 'create_task') {
           TaskManager.createNewTask(buildId, {
             title: action.title,

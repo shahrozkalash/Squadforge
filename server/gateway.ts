@@ -8,6 +8,8 @@ import {
   VerifierResponse,
   PatchAction,
   CreateFileAction,
+  DeleteFileAction,
+  RenameFileAction,
   CreateTaskAction
 } from './types.js';
 
@@ -148,7 +150,7 @@ export function validateModelActionResponse(parsed: any): ModelActionResponse | 
     return null;
   }
 
-  const validActions: Array<PatchAction | CreateFileAction | CreateTaskAction> = [];
+  const validActions: Array<PatchAction | CreateFileAction | DeleteFileAction | RenameFileAction | CreateTaskAction> = [];
 
   for (const act of candidateActions) {
     if (!act || typeof act !== 'object') continue;
@@ -179,6 +181,23 @@ export function validateModelActionResponse(parsed: any): ModelActionResponse | 
             commitMessage: typeof act.commitMessage === 'string' ? act.commitMessage : undefined
           });
         }
+      }
+    } else if (act.action === 'delete_file') {
+      if (typeof act.path === 'string' && act.path.trim().length > 0) {
+        validActions.push({
+          action: 'delete_file',
+          path: act.path.trim(),
+          commitMessage: typeof act.commitMessage === 'string' ? act.commitMessage : undefined
+        });
+      }
+    } else if (act.action === 'rename_file') {
+      if (typeof act.oldPath === 'string' && act.oldPath.trim().length > 0 && typeof act.newPath === 'string' && act.newPath.trim().length > 0) {
+        validActions.push({
+          action: 'rename_file',
+          oldPath: act.oldPath.trim(),
+          newPath: act.newPath.trim(),
+          commitMessage: typeof act.commitMessage === 'string' ? act.commitMessage : undefined
+        });
       }
     } else if (act.action === 'create_task') {
       if (typeof act.title === 'string' && act.title.trim().length > 0 && typeof act.description === 'string') {

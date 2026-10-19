@@ -9,7 +9,8 @@ import {
   Checkpoint, 
   ModelConfig,
   ConfigStatusResponse,
-  TechStackConfig
+  TechStackConfig,
+  VerificationReport
 } from '../types/index.js';
 
 interface SwarmContextType {
@@ -22,6 +23,7 @@ interface SwarmContextType {
   allModels: ModelConfig[];
   configStatus: ConfigStatusResponse | null;
   selectedFile: ProjectFile | null;
+  verificationReport: VerificationReport | null;
   setSelectedFile: (file: ProjectFile | null) => void;
   startBuild: (idea: string, selectedModels: string[], autoPush: boolean, costLimit: number, techStack?: TechStackConfig) => Promise<string | null>;
   stopBuild: () => Promise<void>;
@@ -32,6 +34,12 @@ interface SwarmContextType {
   rollbackFile: (filePath: string, version: number) => Promise<boolean>;
   exportProjectZip: () => Promise<void>;
   fetchBuildDetails: (buildId: string) => Promise<void>;
+  fetchVerificationReport: (buildId?: string) => Promise<VerificationReport | null>;
+  runManualVerification: (buildId?: string) => Promise<VerificationReport | null>;
+  fetchHandoverGuide: (buildId?: string) => Promise<{ markdown: string; verdict: string } | null>;
+  createWorkspaceFile: (path: string, content: string) => Promise<boolean>;
+  deleteWorkspaceFile: (path: string) => Promise<boolean>;
+  renameWorkspaceFile: (oldPath: string, newPath: string) => Promise<boolean>;
   refreshModels: () => Promise<void>;
   refreshConfigStatus: () => Promise<void>;
 }
@@ -311,25 +319,129 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return false;
   };
 
-  const exportProjectZip = async () => {
-    if (!files || files.length === 0) return;
-    const zip = new JSZip();
+  const [verificationReport, setVerificationReport] = useState<VerificationReport | null>(null);
 
-    for (const file of files) {
-      zip.file(file.path, file.content);
+  const fetchVerificationReport = async (buildId?: string): Promise<VerificationReport | null> => {
+    const targetId = buildId || activeBuild?.id;
+    if (!targetId) return null;
+    try {
+      const res = await fetch(`/api/builds/${targetId}/verification`);
+      if (res.ok) {
+        const data = await res.json();
+        setVerificationReport(data.report);
+        return data.report;
+      }
+    } catch (err) {
+      console.error('Failed to fetch verification report:', err);
     }
+    return null;
+  };
 
-    zip.file('.env.example', `# SquadForge Environment\nPORT=3000\nNODE_ENV=production\n`);
+  const runManualVerification = async (buildId?: string): Promise<VerificationReport | null> => {
+    const targetId = buildId || activeBuild?.id;
+    if (!targetId) return null;
+    try {
+      const res = await fetch(`/api/builds/${targetId}/verify`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setVerificationReport(data.report);
+        await fetchBuildDetails(targetId);
+        return data.report;
+      }
+    } catch (err) {
+      console.error('Failed to trigger manual verification:', err);
+    }
+    return null;
+  };
 
-    const blob = await zip.generateAsync({ type: 'blob' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `squadforge-${activeBuild?.idea.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 20) || 'project'}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const fetchHandoverGuide = async (buildId?: string): Promise<{ markdown: string; verdict: string } | null> => {
+    const targetId = buildId || activeBuild?.id;
+    if (!targetId) return null;
+    try {
+      const res = await fetch(`/api/builds/${targetId}/handover`);
+      if (res.ok) {
+        return await res.json();
+      }
+    } catch (err) {
+      console.error('Failed to fetch handover guide:', err);
+    }
+    return null;
+  };
+
+  const createWorkspaceFile = async (path: string, content: string): Promise<boolean> => {
+    if (!activeBuild) return false;
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, content })
+      });
+      if (res.ok) {
+        await fetchBuildDetails(activeBuild.id);
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to create file:', err);
+    }
+    return false;
+  };
+
+  const deleteWorkspaceFile = async (path: string): Promise<boolean> => {
+    if (!activeBuild) return false;
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/files`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path })
+      });
+      if (res.ok) {
+        await fetchBuildDetails(activeBuild.id);
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to delete file:', err);
+    }
+    return false;
+  };
+
+  const renameWorkspaceFile = async (oldPath: string, newPath: string): Promise<boolean> => {
+    if (!activeBuild) return false;
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/files/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oldPath, newPath })
+      });
+      if (res.ok) {
+        await fetchBuildDetails(activeBuild.id);
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to rename file:', err);
+    }
+    return false;
+  };
+
+  const exportProjectZip = async () => {
+    if (!activeBuild) return;
+    try {
+      // Use direct server-side export endpoint with complete structure and setup instructions
+      const res = await fetch(`/api/builds/${activeBuild.id}/export`);
+      if (res.ok) {
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const sanitizedName = activeBuild.idea.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 24) || 'project';
+        a.download = `squadforge-${sanitizedName}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+    } catch (err) {
+      console.error('Failed to export project zip:', err);
+    }
   };
 
   return (
@@ -343,6 +455,7 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       allModels,
       configStatus,
       selectedFile,
+      verificationReport,
       setSelectedFile,
       startBuild,
       stopBuild,
@@ -353,6 +466,12 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       rollbackFile,
       exportProjectZip,
       fetchBuildDetails,
+      fetchVerificationReport,
+      runManualVerification,
+      fetchHandoverGuide,
+      createWorkspaceFile,
+      deleteWorkspaceFile,
+      renameWorkspaceFile,
       refreshModels,
       refreshConfigStatus
     }}>

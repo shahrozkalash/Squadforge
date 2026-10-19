@@ -4,8 +4,11 @@ import {
   FileVersion, 
   PatchAction, 
   CreateFileAction, 
+  DeleteFileAction,
+  RenameFileAction,
   Checkpoint 
 } from '../types.js';
+import { ExecutionAdapter } from './executionAdapter.js';
 
 export interface PatchResult {
   success: boolean;
@@ -17,6 +20,8 @@ export interface PatchResult {
 
 export class MergeManager {
   private static FILE_LEASE_DURATION_MS = 60 * 1000; // 60 seconds per spec
+  private static MAX_FILE_SIZE_BYTES = 500 * 1024; // 500 KB limit per file
+  private static MAX_PROJECT_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB total project limit
 
   // Sequential mutex queue per build so patches are processed strictly one at a time in order
   private static patchQueues: Map<string, Promise<any>> = new Map();
@@ -88,7 +93,7 @@ export class MergeManager {
 
   /**
    * Creates a new file. Only succeeds if file does not exist.
-   * No whole-file rewrites of existing files allowed via create_file.
+   * Validates against path traversal and enforces file size limits.
    */
   static async createFile(
     buildId: string, 
@@ -96,9 +101,38 @@ export class MergeManager {
     action: CreateFileAction
   ): Promise<PatchResult> {
     return this.enqueuePatch(buildId, async () => {
-      const cleanPath = action.path.replace(/^\/+/, '').replace(/\.\.\//g, '');
-      const existing = db.getFile(buildId, cleanPath);
+      // Path traversal security check
+      const { valid, cleanPath, error: pathError } = ExecutionAdapter.sanitizeFilePath(action.path);
+      if (!valid) {
+        return {
+          success: false,
+          filePath: action.path,
+          error: `Invalid file path: ${pathError}`
+        };
+      }
 
+      // File size limit check
+      const byteLength = Buffer.byteLength(action.content, 'utf-8');
+      if (byteLength > this.MAX_FILE_SIZE_BYTES) {
+        return {
+          success: false,
+          filePath: cleanPath,
+          error: `File size limit exceeded (${byteLength} bytes > ${this.MAX_FILE_SIZE_BYTES} bytes max).`
+        };
+      }
+
+      // Total project size check
+      const allFiles = db.getAllFiles(buildId);
+      const totalProjectBytes = allFiles.reduce((acc, f) => acc + Buffer.byteLength(f.content, 'utf-8'), 0) + byteLength;
+      if (totalProjectBytes > this.MAX_PROJECT_SIZE_BYTES) {
+        return {
+          success: false,
+          filePath: cleanPath,
+          error: `Project size limit exceeded (${totalProjectBytes} bytes > ${this.MAX_PROJECT_SIZE_BYTES} bytes max).`
+        };
+      }
+
+      const existing = db.getFile(buildId, cleanPath);
       if (existing) {
         const error = `File ${cleanPath} already exists (v${existing.version}). Models must use patch_file with exact find/replace edits.`;
         db.addEvent({
@@ -169,9 +203,16 @@ export class MergeManager {
     action: PatchAction
   ): Promise<PatchResult> {
     return this.enqueuePatch(buildId, async () => {
-      const cleanPath = action.path.replace(/^\/+/, '').replace(/\.\.\//g, '');
-      const file = db.getFile(buildId, cleanPath);
+      const { valid, cleanPath, error: pathError } = ExecutionAdapter.sanitizeFilePath(action.path);
+      if (!valid) {
+        return {
+          success: false,
+          filePath: action.path,
+          error: `Invalid file path: ${pathError}`
+        };
+      }
 
+      const file = db.getFile(buildId, cleanPath);
       if (!file) {
         const error = `File ${cleanPath} does not exist yet. Use create_file first.`;
         db.addEvent({
@@ -220,7 +261,6 @@ export class MergeManager {
           continue;
         }
 
-        // Count occurrences of find string
         const occurrences = content.split(edit.find).length - 1;
 
         if (occurrences === 0) {
@@ -261,11 +301,19 @@ export class MergeManager {
           };
         }
 
-        // Exactly once! Apply the replacement
         content = content.replace(edit.find, edit.replace);
       }
 
-      // Success: save new version
+      // Check size limit after patch
+      const byteLength = Buffer.byteLength(content, 'utf-8');
+      if (byteLength > this.MAX_FILE_SIZE_BYTES) {
+        return {
+          success: false,
+          filePath: cleanPath,
+          error: `Patched file exceeds maximum file size limit (${byteLength} bytes > ${this.MAX_FILE_SIZE_BYTES} bytes max).`
+        };
+      }
+
       const newVersionNum = file.version + 1;
       const newVersion: FileVersion = {
         version: newVersionNum,
@@ -283,7 +331,6 @@ export class MergeManager {
 
       db.setFile(buildId, file);
 
-      // Increment build patch count
       const build = db.getBuild(buildId);
       if (build) {
         build.patchesAppliedCount = (build.patchesAppliedCount || 0) + 1;
@@ -306,6 +353,102 @@ export class MergeManager {
         version: newVersionNum,
         currentContent: content
       };
+    });
+  }
+
+  /**
+   * Safely deletes a file from the project workspace
+   */
+  static async deleteFile(
+    buildId: string,
+    modelId: string,
+    action: DeleteFileAction
+  ): Promise<{ success: boolean; filePath: string; error?: string }> {
+    return this.enqueuePatch(buildId, async () => {
+      const { valid, cleanPath, error: pathError } = ExecutionAdapter.sanitizeFilePath(action.path);
+      if (!valid) {
+        return { success: false, filePath: action.path, error: `Invalid file path: ${pathError}` };
+      }
+
+      const existing = db.getFile(buildId, cleanPath);
+      if (!existing) {
+        return { success: false, filePath: cleanPath, error: `File ${cleanPath} does not exist.` };
+      }
+
+      db.deleteFile(buildId, cleanPath);
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'patch_applied',
+        modelId,
+        filePath: cleanPath,
+        details: `${modelId} deleted file: ${cleanPath}`
+      });
+
+      return { success: true, filePath: cleanPath };
+    });
+  }
+
+  /**
+   * Safely renames/moves a file within the project workspace
+   */
+  static async renameFile(
+    buildId: string,
+    modelId: string,
+    action: RenameFileAction
+  ): Promise<{ success: boolean; oldPath: string; newPath: string; error?: string }> {
+    return this.enqueuePatch(buildId, async () => {
+      const sanitizeOld = ExecutionAdapter.sanitizeFilePath(action.oldPath);
+      const sanitizeNew = ExecutionAdapter.sanitizeFilePath(action.newPath);
+
+      if (!sanitizeOld.valid) {
+        return { success: false, oldPath: action.oldPath, newPath: action.newPath, error: `Invalid source path: ${sanitizeOld.error}` };
+      }
+      if (!sanitizeNew.valid) {
+        return { success: false, oldPath: action.oldPath, newPath: action.newPath, error: `Invalid destination path: ${sanitizeNew.error}` };
+      }
+
+      const file = db.getFile(buildId, sanitizeOld.cleanPath);
+      if (!file) {
+        return { success: false, oldPath: sanitizeOld.cleanPath, newPath: sanitizeNew.cleanPath, error: `File ${sanitizeOld.cleanPath} does not exist.` };
+      }
+
+      const targetExisting = db.getFile(buildId, sanitizeNew.cleanPath);
+      if (targetExisting) {
+        return { success: false, oldPath: sanitizeOld.cleanPath, newPath: sanitizeNew.cleanPath, error: `Destination ${sanitizeNew.cleanPath} already exists.` };
+      }
+
+      db.deleteFile(buildId, sanitizeOld.cleanPath);
+
+      const now = Date.now();
+      const newVersionNum = file.version + 1;
+      file.path = sanitizeNew.cleanPath;
+      file.version = newVersionNum;
+      file.ownerModel = modelId;
+      file.updatedAt = now;
+      file.history.push({
+        version: newVersionNum,
+        content: file.content,
+        authorModel: modelId,
+        timestamp: now,
+        commitMessage: action.commitMessage || `Renamed from ${sanitizeOld.cleanPath} to ${sanitizeNew.cleanPath}`
+      });
+
+      db.setFile(buildId, file);
+
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'patch_applied',
+        modelId,
+        filePath: sanitizeNew.cleanPath,
+        details: `${modelId} renamed ${sanitizeOld.cleanPath} -> ${sanitizeNew.cleanPath}`
+      });
+
+      return { success: true, oldPath: sanitizeOld.cleanPath, newPath: sanitizeNew.cleanPath };
     });
   }
 
@@ -368,7 +511,6 @@ export class MergeManager {
           });
           db.setFile(buildId, file);
         } else {
-          // File was deleted or didn't exist at checkpoint
           const newFile: ProjectFile = {
             path: filePath,
             content,
