@@ -15,8 +15,10 @@ import { safeResultCache } from './server/cache.js';
 import { 
   hashPassword, 
   verifyPassword, 
-  generateSessionToken 
+  generateSessionToken,
+  generateVerificationCode
 } from './server/crypto.js';
+import { emailService } from './server/email.js';
 import { User, SafeUser } from './server/types.js';
 
 dotenv.config();
@@ -249,15 +251,20 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
-// 5. Forgot Password Request (Generic feedback to prevent email enumeration)
-app.post('/api/auth/forgot-password', async (req, res) => {
+// 5. Forgot Password Request (Generates 6-digit OTP verification code)
+const handleForgotPasswordRequest = async (req: express.Request, res: express.Response) => {
   try {
     const { email } = req.body;
     if (!email || typeof email !== 'string') {
       return res.status(400).json({ error: 'Valid email address is required.' });
     }
 
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     const normalizedEmail = email.toLowerCase().trim();
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid email format.' });
+    }
+
     const rateLimitKey = `forgot_${req.ip}_${normalizedEmail}`;
     const rateCheck = db.checkRateLimit(rateLimitKey);
     if (!rateCheck.allowed) {
@@ -266,31 +273,196 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       });
     }
 
-    const resetToken = db.createPasswordResetToken(normalizedEmail);
-    if (!resetToken) {
-      db.recordFailedLogin(rateLimitKey);
-    } else {
-      console.log(`[AUTH] Password reset token generated for: ${normalizedEmail}`);
+    // Check if email delivery provider is configured
+    if (!emailService.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        missingConfig: true,
+        error: 'Email delivery service is not configured. To send verification codes, configure RESEND_API_KEY or SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM.',
+        requiredEnv: emailService.getRequiredEnvVars()
+      });
     }
 
+    const user = db.findUserByEmail(normalizedEmail);
+    if (user) {
+      // Generate cryptographically secure 6-digit code
+      const code = generateVerificationCode();
+      const codeResult = db.createPasswordResetCode(normalizedEmail, code);
+
+      if (!codeResult.success) {
+        if (codeResult.cooldownRemaining) {
+          return res.status(429).json({
+            error: codeResult.error,
+            cooldownRemaining: codeResult.cooldownRemaining
+          });
+        }
+        return res.status(400).json({ error: codeResult.error || 'Failed to generate reset code.' });
+      }
+
+      // Dispatch verification code email
+      const delivery = await emailService.sendPasswordResetCode({
+        to: normalizedEmail,
+        code
+      });
+
+      if (!delivery.success) {
+        return res.status(502).json({
+          success: false,
+          error: delivery.error || 'Failed to deliver password reset verification code. Please try again later.'
+        });
+      }
+    } else {
+      // Record failed lookup under rate limit to prevent account harvesting
+      db.recordFailedLogin(rateLimitKey);
+    }
+
+    // Generic success response prevents email enumeration
     return res.json({
       success: true,
-      message: 'If an account with that email exists, password reset instructions have been generated.',
-      devToken: (!process.env.SMTP_HOST && !process.env.RESEND_API_KEY) ? resetToken : undefined
+      message: 'If an account with that email exists, a 6-digit verification code has been sent.',
+      cooldownSeconds: 60
     });
   } catch (err: any) {
     console.error('Forgot password error:', err);
     return res.status(500).json({ error: 'Failed to process password reset request.' });
   }
+};
+
+app.post('/api/auth/forgot-password', handleForgotPasswordRequest);
+app.post('/api/auth/request-reset-code', handleForgotPasswordRequest);
+
+// 6. Resend Verification Code with 60s cooldown enforcement
+app.post('/api/auth/resend-code', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Valid email address is required.' });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const normalizedEmail = email.toLowerCase().trim();
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid email format.' });
+    }
+
+    const rateLimitKey = `resend_${req.ip}_${normalizedEmail}`;
+    const rateCheck = db.checkRateLimit(rateLimitKey);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({ 
+        error: `Too many resend attempts. Please wait ${rateCheck.retryAfterSeconds} seconds before trying again.` 
+      });
+    }
+
+    // Check email delivery configuration
+    if (!emailService.isConfigured()) {
+      return res.status(503).json({
+        success: false,
+        missingConfig: true,
+        error: 'Email delivery service is not configured. To send verification codes, configure RESEND_API_KEY or SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM.',
+        requiredEnv: emailService.getRequiredEnvVars()
+      });
+    }
+
+    const user = db.findUserByEmail(normalizedEmail);
+    if (user) {
+      const code = generateVerificationCode();
+      const codeResult = db.createPasswordResetCode(normalizedEmail, code);
+
+      if (!codeResult.success) {
+        if (codeResult.cooldownRemaining) {
+          return res.status(429).json({
+            error: codeResult.error,
+            cooldownRemaining: codeResult.cooldownRemaining
+          });
+        }
+        return res.status(400).json({ error: codeResult.error || 'Failed to generate reset code.' });
+      }
+
+      const delivery = await emailService.sendPasswordResetCode({
+        to: normalizedEmail,
+        code
+      });
+
+      if (!delivery.success) {
+        return res.status(502).json({
+          success: false,
+          error: delivery.error || 'Failed to deliver password reset verification code.'
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'A new 6-digit verification code has been dispatched.',
+      cooldownSeconds: 60
+    });
+  } catch (err: any) {
+    console.error('Resend code error:', err);
+    return res.status(500).json({ error: 'Failed to resend verification code.' });
+  }
 });
 
-// 6. Reset Password Confirmation
+// 7. Verify 6-Digit Reset Code (Enforces 300s TTL and Max 5 Attempts)
+app.post('/api/auth/verify-reset-code', (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({ error: 'Email address is required.' });
+    }
+
+    if (!code || typeof code !== 'string') {
+      return res.status(400).json({ error: 'Verification code is required.' });
+    }
+
+    const trimmedCode = code.trim();
+    if (!/^\d{6}$/.test(trimmedCode)) {
+      return res.status(400).json({ error: 'Verification code must be exactly 6 numeric digits.' });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const rateLimitKey = `verify_${req.ip}_${normalizedEmail}`;
+    const rateCheck = db.checkRateLimit(rateLimitKey);
+    if (!rateCheck.allowed) {
+      return res.status(429).json({ 
+        error: `Too many verification attempts from this IP. Please wait ${rateCheck.retryAfterSeconds} seconds before trying again.` 
+      });
+    }
+
+    const verifyResult = db.verifyPasswordResetCode(normalizedEmail, trimmedCode);
+
+    if (!verifyResult.success) {
+      db.recordFailedLogin(rateLimitKey);
+      return res.status(400).json({
+        success: false,
+        error: verifyResult.error,
+        codeExpiredOrInvalid: verifyResult.codeExpiredOrInvalid,
+        attemptsRemaining: verifyResult.attemptsRemaining
+      });
+    }
+
+    // Success -> Clear rate limit key
+    db.clearRateLimit(rateLimitKey);
+
+    return res.json({
+      success: true,
+      resetAuthToken: verifyResult.resetAuthToken,
+      message: 'Code verified successfully. You may now set a new password.'
+    });
+  } catch (err: any) {
+    console.error('Verify reset code error:', err);
+    return res.status(500).json({ error: 'Failed to verify reset code.' });
+  }
+});
+
+// 8. Reset Password Confirmation (Requires valid resetAuthToken or legacy token)
 app.post('/api/auth/reset-password', async (req, res) => {
   try {
-    const { token, newPassword, confirmPassword } = req.body;
+    const { token, resetAuthToken, newPassword, confirmPassword } = req.body;
+    const effectiveToken = (resetAuthToken || token) as string;
 
-    if (!token || typeof token !== 'string') {
-      return res.status(400).json({ error: 'Reset token is required.' });
+    if (!effectiveToken || typeof effectiveToken !== 'string') {
+      return res.status(400).json({ error: 'Reset authorization token is required.' });
     }
 
     if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
@@ -301,27 +473,36 @@ app.post('/api/auth/reset-password', async (req, res) => {
       return res.status(400).json({ error: 'Passwords do not match.' });
     }
 
-    const verification = db.verifyAndConsumePasswordResetToken(token.trim());
-    if (!verification.valid || !verification.userId) {
-      return res.status(400).json({ error: 'Invalid or expired reset token. Please request a new password reset.' });
+    // Attempt 1: Modern OTP Reset Authorization Token
+    const authResult = await db.completePasswordReset(effectiveToken.trim(), newPassword);
+    if (authResult.success) {
+      res.clearCookie(SESSION_COOKIE_NAME);
+      return res.json({
+        success: true,
+        message: 'Password successfully updated. Please log in with your new password.'
+      });
     }
 
-    const user = db.getUser(verification.userId);
-    if (!user) {
-      return res.status(404).json({ error: 'User account not found.' });
+    // Attempt 2: Legacy Token Fallback for backward compatibility
+    const legacyVerification = db.verifyAndConsumePasswordResetToken(effectiveToken.trim());
+    if (legacyVerification.valid && legacyVerification.userId) {
+      const user = db.getUser(legacyVerification.userId);
+      if (user) {
+        user.passwordHash = await hashPassword(newPassword);
+        user.updatedAt = db.getTime();
+        db.saveUser(user);
+        db.deleteUserSessions(user.id);
+        res.clearCookie(SESSION_COOKIE_NAME);
+
+        return res.json({
+          success: true,
+          message: 'Password successfully updated. Please log in with your new password.'
+        });
+      }
     }
 
-    const newHash = await hashPassword(newPassword);
-    user.passwordHash = newHash;
-    db.saveUser(user);
-
-    // Invalidate existing sessions across all devices
-    db.deleteUserSessions(user.id);
-    res.clearCookie(SESSION_COOKIE_NAME);
-
-    return res.json({
-      success: true,
-      message: 'Password successfully updated. Please log in with your new password.'
+    return res.status(400).json({ 
+      error: authResult.error || 'Invalid or expired reset authorization. Please request a new verification code.' 
     });
   } catch (err: any) {
     console.error('Reset password error:', err);

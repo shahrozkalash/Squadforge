@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext.js';
 import { 
   Lock, 
@@ -9,25 +9,49 @@ import {
   ArrowRight, 
   ShieldCheck, 
   Cpu, 
-  Layers, 
   CheckCircle2, 
   AlertCircle, 
   KeyRound, 
   RefreshCw,
-  Sparkles
+  Sparkles,
+  Clock,
+  RotateCcw,
+  Check,
+  ChevronLeft
 } from 'lucide-react';
 
-type AuthMode = 'login' | 'signup' | 'forgot' | 'reset';
+type AuthMode = 'login' | 'signup' | 'forgot' | 'verify' | 'reset';
 
 export const AuthPage: React.FC = () => {
-  const { login, register, requestPasswordReset, resetPassword } = useAuth();
+  const { 
+    login, 
+    register, 
+    requestPasswordReset, 
+    resendVerificationCode,
+    verifyResetCode, 
+    resetPassword 
+  } = useAuth();
 
   const [mode, setMode] = useState<AuthMode>('login');
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [resetToken, setResetToken] = useState('');
+  
+  // OTP state
+  const [codeDigits, setCodeDigits] = useState<string[]>(['', '', '', '', '', '']);
+  const [resetAuthToken, setResetAuthToken] = useState<string>('');
+  const [countdownSeconds, setCountdownSeconds] = useState<number>(300); // 5 minutes
+  const [resendCooldownSeconds, setResendCooldownSeconds] = useState<number>(60); // 60 seconds
+  const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(5);
+  const [isCodeExpired, setIsCodeExpired] = useState<boolean>(false);
+  const [isCodeInvalidated, setIsCodeInvalidated] = useState<boolean>(false);
+
+  // Missing email provider state
+  const [missingConfigInfo, setMissingConfigInfo] = useState<{
+    missing: boolean;
+    requiredEnv?: string[];
+  } | null>(null);
 
   // Password visibility toggles
   const [showPassword, setShowPassword] = useState(false);
@@ -37,21 +61,72 @@ export const AuthPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  const [devResetTokenHint, setDevResetTokenHint] = useState<string | null>(null);
+
+  // References to 6 digit inputs for seamless typing & pasting
+  const digitInputRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   // Clear messages when switching tabs
   const switchMode = (newMode: AuthMode) => {
     setMode(newMode);
     setErrorMessage(null);
     setSuccessMessage(null);
-    setDevResetTokenHint(null);
+    setMissingConfigInfo(null);
   };
+
+  // 5-Minute (300s) Server-aligned Countdown Timer
+  useEffect(() => {
+    if (mode !== 'verify') return;
+
+    if (countdownSeconds <= 0) {
+      setIsCodeExpired(true);
+      return;
+    }
+
+    const timer = setInterval(() => {
+      setCountdownSeconds((prev) => {
+        if (prev <= 1) {
+          setIsCodeExpired(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [mode, countdownSeconds]);
+
+  // 60-Second Resend Cooldown Timer
+  useEffect(() => {
+    if (mode !== 'verify' || resendCooldownSeconds <= 0) return;
+
+    const cooldownTimer = setInterval(() => {
+      setResendCooldownSeconds((prev) => (prev <= 1 ? 0 : prev - 1));
+    }, 1000);
+
+    return () => clearInterval(cooldownTimer);
+  }, [mode, resendCooldownSeconds]);
+
+  // Auto-focus first digit input when entering verify mode
+  useEffect(() => {
+    if (mode === 'verify') {
+      setTimeout(() => {
+        digitInputRefs.current[0]?.focus();
+      }, 100);
+    }
+  }, [mode]);
 
   // Validation helpers
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const isEmailValid = emailRegex.test(email.trim());
   const isPasswordLongEnough = password.length >= 8;
   const doPasswordsMatch = password === confirmPassword;
+
+  // Format MM:SS for countdown timer
+  const formatCountdown = (totalSeconds: number): string => {
+    const mins = Math.floor(totalSeconds / 60);
+    const secs = totalSeconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
 
   // Handle Login submission
   const handleLoginSubmit = async (e: React.FormEvent) => {
@@ -106,12 +181,12 @@ export const AuthPage: React.FC = () => {
     }
   };
 
-  // Handle Forgot Password submission
+  // Handle Request Verification Code submission (Forgot Password step 1)
   const handleForgotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage(null);
     setSuccessMessage(null);
-    setDevResetTokenHint(null);
+    setMissingConfigInfo(null);
 
     if (!isEmailValid) {
       setErrorMessage('Please enter a valid email address.');
@@ -123,13 +198,148 @@ export const AuthPage: React.FC = () => {
     setIsLoading(false);
 
     if (result.success) {
-      setSuccessMessage(result.message);
-      if (result.devToken) {
-        setDevResetTokenHint(result.devToken);
-        setResetToken(result.devToken);
-      }
+      // Transition to verification mode
+      setCodeDigits(['', '', '', '', '', '']);
+      setCountdownSeconds(300); // exactly 5 minutes
+      setResendCooldownSeconds(result.cooldownSeconds || 60);
+      setAttemptsRemaining(5);
+      setIsCodeExpired(false);
+      setIsCodeInvalidated(false);
+      setSuccessMessage(result.message || 'If an account with that email exists, a 6-digit verification code has been sent.');
+      setMode('verify');
     } else {
+      if (result.missingConfig) {
+        setMissingConfigInfo({
+          missing: true,
+          requiredEnv: result.requiredEnv || ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM', 'RESEND_API_KEY']
+        });
+      }
       setErrorMessage(result.error || 'Failed to process password reset request.');
+    }
+  };
+
+  // Handle Resend Verification Code
+  const handleResendCode = async () => {
+    if (resendCooldownSeconds > 0 || isLoading) return;
+
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setIsLoading(true);
+
+    const result = await resendVerificationCode(email.trim());
+    setIsLoading(false);
+
+    if (result.success) {
+      setCodeDigits(['', '', '', '', '', '']);
+      setCountdownSeconds(300); // Fresh 5 minutes
+      setResendCooldownSeconds(60); // 60 seconds cooldown
+      setAttemptsRemaining(5);
+      setIsCodeExpired(false);
+      setIsCodeInvalidated(false);
+      setSuccessMessage('A new six-digit verification code has been sent to your email.');
+      digitInputRefs.current[0]?.focus();
+    } else {
+      if (result.cooldownRemaining) {
+        setResendCooldownSeconds(result.cooldownRemaining);
+      }
+      if (result.missingConfig) {
+        setMissingConfigInfo({
+          missing: true,
+          requiredEnv: result.requiredEnv
+        });
+      }
+      setErrorMessage(result.error || 'Failed to resend verification code.');
+    }
+  };
+
+  // Handle Digit Box changes
+  const handleDigitChange = (index: number, val: string) => {
+    // Only accept numeric digits
+    const cleaned = val.replace(/\D/g, '');
+    if (!cleaned) {
+      const nextDigits = [...codeDigits];
+      nextDigits[index] = '';
+      setCodeDigits(nextDigits);
+      return;
+    }
+
+    const nextDigits = [...codeDigits];
+    nextDigits[index] = cleaned[cleaned.length - 1]; // Take last character entered
+    setCodeDigits(nextDigits);
+
+    // Auto-advance to next input
+    if (index < 5 && cleaned.length > 0) {
+      digitInputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  // Handle keydown for backspace navigation
+  const handleDigitKeyDown = (index: number, e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Backspace' && !codeDigits[index] && index > 0) {
+      digitInputRefs.current[index - 1]?.focus();
+    } else if (e.key === 'ArrowLeft' && index > 0) {
+      digitInputRefs.current[index - 1]?.focus();
+    } else if (e.key === 'ArrowRight' && index < 5) {
+      digitInputRefs.current[index + 1]?.focus();
+    }
+  };
+
+  // Handle Paste into any digit box
+  const handleDigitPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    e.preventDefault();
+    const pastedData = e.clipboardData.getData('text').trim();
+    const digitsOnly = pastedData.replace(/\D/g, '').slice(0, 6);
+    if (!digitsOnly) return;
+
+    const nextDigits = [...codeDigits];
+    for (let i = 0; i < 6; i++) {
+      nextDigits[i] = digitsOnly[i] || '';
+    }
+    setCodeDigits(nextDigits);
+
+    // Focus either the next empty slot or the last digit
+    const focusIndex = Math.min(digitsOnly.length, 5);
+    digitInputRefs.current[focusIndex]?.focus();
+  };
+
+  // Handle 6-Digit Code Verification submission
+  const handleVerifySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMessage(null);
+    setSuccessMessage(null);
+
+    const fullCode = codeDigits.join('');
+    if (fullCode.length !== 6) {
+      setErrorMessage('Please enter all 6 digits of the verification code.');
+      return;
+    }
+
+    if (isCodeExpired) {
+      setErrorMessage('This verification code has expired (5-minute limit). Please request a new code.');
+      return;
+    }
+
+    if (isCodeInvalidated) {
+      setErrorMessage('This code has been invalidated due to excessive attempts. Please request a new code.');
+      return;
+    }
+
+    setIsLoading(true);
+    const result = await verifyResetCode(email.trim(), fullCode);
+    setIsLoading(false);
+
+    if (result.success && result.resetAuthToken) {
+      setResetAuthToken(result.resetAuthToken);
+      setSuccessMessage('Code verified successfully! You can now set your new password.');
+      setMode('reset');
+    } else {
+      if (result.attemptsRemaining !== undefined) {
+        setAttemptsRemaining(result.attemptsRemaining);
+      }
+      if (result.codeExpiredOrInvalid) {
+        setIsCodeInvalidated(true);
+      }
+      setErrorMessage(result.error || 'Invalid verification code.');
     }
   };
 
@@ -139,8 +349,8 @@ export const AuthPage: React.FC = () => {
     setErrorMessage(null);
     setSuccessMessage(null);
 
-    if (!resetToken.trim()) {
-      setErrorMessage('Password reset token is required.');
+    if (!resetAuthToken.trim()) {
+      setErrorMessage('Reset authorization token is missing. Please restart the password reset flow.');
       return;
     }
 
@@ -150,23 +360,25 @@ export const AuthPage: React.FC = () => {
     }
 
     if (!doPasswordsMatch) {
-      setErrorMessage('Passwords do not match.');
+      setErrorMessage('Passwords do not match. Please verify your confirmation.');
       return;
     }
 
     setIsLoading(true);
-    const result = await resetPassword(resetToken.trim(), password, confirmPassword);
+    const result = await resetPassword(resetAuthToken.trim(), password, confirmPassword);
     setIsLoading(false);
 
     if (result.success) {
-      setSuccessMessage(result.message || 'Password reset successfully! You can now log in.');
+      setSuccessMessage('Password successfully updated! You can now sign in with your new password.');
       setPassword('');
       setConfirmPassword('');
+      setResetAuthToken('');
       setTimeout(() => {
         switchMode('login');
-      }, 2000);
+        setSuccessMessage('Password successfully reset. Please sign in with your new credentials.');
+      }, 1500);
     } else {
-      setErrorMessage(result.error || 'Failed to reset password.');
+      setErrorMessage(result.error || 'Failed to update password.');
     }
   };
 
@@ -174,14 +386,12 @@ export const AuthPage: React.FC = () => {
   const fillDemoCredentials = async () => {
     setIsLoading(true);
     setErrorMessage(null);
-    // Register or login a test architect user
     const demoEmail = 'lead.architect@squadforge.dev';
     const demoPass = 'ForgeMaster#2026!';
     const demoName = 'Lead Architect';
 
     const loginRes = await login(demoEmail, demoPass);
     if (!loginRes.success) {
-      // Create if doesn't exist yet
       const regRes = await register(demoName, demoEmail, demoPass, demoPass);
       if (!regRes.success) {
         setErrorMessage('Could not initialize demo user: ' + regRes.error);
@@ -189,6 +399,8 @@ export const AuthPage: React.FC = () => {
     }
     setIsLoading(false);
   };
+
+  const fullCodeLength = codeDigits.join('').length;
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col justify-between selection:bg-amber-500/20 selection:text-amber-200">
@@ -217,22 +429,30 @@ export const AuthPage: React.FC = () => {
       {/* Main Authentication Card */}
       <main className="flex-1 flex items-center justify-center p-4 sm:p-6 lg:p-8">
         <div className="w-full max-w-md bg-neutral-900/90 border border-neutral-800 rounded-2xl shadow-2xl p-6 sm:p-8 backdrop-blur-xl">
-          {/* Header & Tabs */}
+          {/* Header */}
           <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-amber-400/10 border border-amber-400/20 text-amber-400 mb-3">
-              <Lock className="w-6 h-6" />
+              {mode === 'verify' ? (
+                <KeyRound className="w-6 h-6 text-amber-400" />
+              ) : mode === 'reset' ? (
+                <ShieldCheck className="w-6 h-6 text-amber-400" />
+              ) : (
+                <Lock className="w-6 h-6" />
+              )}
             </div>
             <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
               {mode === 'login' && 'Sign in to SquadForge'}
               {mode === 'signup' && 'Create your account'}
               {mode === 'forgot' && 'Reset your password'}
-              {mode === 'reset' && 'Set new password'}
+              {mode === 'verify' && 'Enter Verification Code'}
+              {mode === 'reset' && 'Set New Password'}
             </h1>
             <p className="text-xs sm:text-sm text-neutral-400 mt-1.5">
               {mode === 'login' && 'Access your autonomous multi-agent development swarm.'}
               {mode === 'signup' && 'Join SquadForge to build full-stack apps with 10 AI models.'}
-              {mode === 'forgot' && 'Enter your verified email address to receive reset instructions.'}
-              {mode === 'reset' && 'Enter your reset token and your new account password.'}
+              {mode === 'forgot' && 'Enter your email to receive a secure six-digit verification code.'}
+              {mode === 'verify' && `We sent a six-digit code to ${email || 'your email'}. Enter it below.`}
+              {mode === 'reset' && 'Create a strong, new password for your SquadForge account.'}
             </p>
           </div>
 
@@ -279,31 +499,26 @@ export const AuthPage: React.FC = () => {
             </div>
           )}
 
-          {/* Dev mode reset token assistant banner */}
-          {devResetTokenHint && (
-            <div className="mb-5 p-3.5 bg-cyan-950/40 border border-cyan-800/50 rounded-xl text-xs text-cyan-300 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-cyan-200 flex items-center gap-1.5">
-                  <KeyRound className="w-3.5 h-3.5" />
-                  Development Reset Token
-                </span>
-                <span className="font-mono text-[10px] text-cyan-400 bg-cyan-900/40 px-2 py-0.5 rounded">
-                  Local Simulation
-                </span>
+          {/* Missing Email Configuration Advisory */}
+          {missingConfigInfo?.missing && (
+            <div className="mb-5 p-4 bg-amber-500/10 border border-amber-500/30 rounded-xl text-xs text-amber-200 space-y-2">
+              <div className="flex items-center gap-2 font-semibold text-amber-300">
+                <AlertCircle className="w-4 h-4 text-amber-400" />
+                <span>Email Delivery Service Unconfigured</span>
               </div>
-              <p className="text-[11px] text-neutral-400">
-                Email delivery service is currently not configured in production. Your one-time reset token has been generated below:
+              <p className="text-[11px] text-neutral-300 leading-relaxed">
+                SquadForge cannot dispatch verification codes because email delivery credentials are not set. Configure one of the following providers in your environment:
               </p>
-              <div className="p-2 bg-neutral-950 border border-cyan-900/60 rounded font-mono text-[11px] text-cyan-300 break-all select-all">
-                {devResetTokenHint}
+              <div className="bg-neutral-950 p-2.5 rounded-lg border border-neutral-800 font-mono text-[10px] text-amber-300 space-y-1">
+                <div className="text-neutral-400 font-bold">Option A: Resend API</div>
+                <div>RESEND_API_KEY=re_xxxxxxxxxxxx</div>
+                <div className="text-neutral-400 font-bold mt-1.5">Option B: Standard SMTP</div>
+                <div>SMTP_HOST=smtp.example.com</div>
+                <div>SMTP_PORT=587</div>
+                <div>SMTP_USER=user@example.com</div>
+                <div>SMTP_PASS=••••••••</div>
+                <div>SMTP_FROM="SquadForge" &lt;security@example.com&gt;</div>
               </div>
-              <button
-                type="button"
-                onClick={() => switchMode('reset')}
-                className="w-full py-1.5 px-3 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/30 text-cyan-200 rounded text-xs font-medium transition-colors"
-              >
-                Proceed to Reset Password Form →
-              </button>
             </div>
           )}
 
@@ -544,12 +759,12 @@ export const AuthPage: React.FC = () => {
             </form>
           )}
 
-          {/* 3. FORGOT PASSWORD FORM */}
+          {/* 3. FORGOT PASSWORD (EMAIL ENTRY) */}
           {mode === 'forgot' && (
             <form onSubmit={handleForgotSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-neutral-300 mb-1.5">
-                  Account Email Address
+                  Registered Account Email
                 </label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-500">
@@ -560,10 +775,14 @@ export const AuthPage: React.FC = () => {
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
                     placeholder="you@company.com"
+                    autoComplete="email"
                     required
                     className="w-full pl-9 pr-3 py-2.5 text-sm bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-amber-400 transition-colors"
                   />
                 </div>
+                <p className="text-[11px] text-neutral-400 mt-1.5">
+                  A 6-digit numeric verification code valid for 5 minutes will be dispatched.
+                </p>
               </div>
 
               <button
@@ -574,57 +793,147 @@ export const AuthPage: React.FC = () => {
                 {isLoading ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Processing request...</span>
+                    <span>Sending Code...</span>
                   </>
                 ) : (
                   <>
-                    <span>Send Reset Instructions</span>
+                    <span>Send Verification Code</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
               </button>
 
-              <div className="flex items-center justify-between pt-2 text-xs">
+              <div className="pt-2 text-center">
                 <button
                   type="button"
                   onClick={() => switchMode('login')}
-                  className="text-neutral-400 hover:text-white transition-colors"
+                  className="text-xs text-neutral-400 hover:text-white transition-colors flex items-center justify-center gap-1 mx-auto"
                 >
-                  ← Back to Sign In
-                </button>
-                <button
-                  type="button"
-                  onClick={() => switchMode('reset')}
-                  className="text-amber-400 hover:underline"
-                >
-                  Already have a reset token?
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                  <span>Back to Sign In</span>
                 </button>
               </div>
             </form>
           )}
 
-          {/* 4. RESET PASSWORD FORM */}
-          {mode === 'reset' && (
-            <form onSubmit={handleResetSubmit} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-neutral-300 mb-1.5">
-                  Reset Token
-                </label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-neutral-500">
-                    <KeyRound className="w-4 h-4" />
+          {/* 4. VERIFY 6-DIGIT OTP CODE */}
+          {mode === 'verify' && (
+            <form onSubmit={handleVerifySubmit} className="space-y-5">
+              {/* Countdown & Status Bar */}
+              <div className="p-3.5 bg-neutral-950 border border-neutral-800 rounded-xl flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Clock className={`w-4 h-4 ${countdownSeconds < 60 ? 'text-rose-400 animate-pulse' : 'text-amber-400'}`} />
+                  <div>
+                    <div className="text-[10px] uppercase font-mono tracking-wider text-neutral-400">
+                      Code Expiration
+                    </div>
+                    <div className={`text-base font-mono font-bold ${countdownSeconds < 60 ? 'text-rose-400' : 'text-white'}`}>
+                      {formatCountdown(countdownSeconds)}
+                    </div>
                   </div>
-                  <input
-                    type="text"
-                    value={resetToken}
-                    onChange={(e) => setResetToken(e.target.value)}
-                    placeholder="Enter 64-character token"
-                    required
-                    className="w-full pl-9 pr-3 py-2.5 text-xs bg-neutral-950 border border-neutral-800 rounded-xl text-white font-mono placeholder-neutral-600 focus:outline-none focus:border-amber-400 transition-colors"
-                  />
+                </div>
+
+                <div className="text-right">
+                  <div className="text-[10px] uppercase font-mono tracking-wider text-neutral-400">
+                    Attempts
+                  </div>
+                  <div className={`text-xs font-mono font-bold ${attemptsRemaining !== null && attemptsRemaining <= 1 ? 'text-rose-400' : 'text-neutral-300'}`}>
+                    {attemptsRemaining !== null ? `${attemptsRemaining} of 5 remaining` : '5 of 5'}
+                  </div>
                 </div>
               </div>
 
+              {/* Expired / Invalidated Alert */}
+              {isCodeExpired && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl text-xs text-rose-300 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold block">Verification Code Expired</span>
+                    <span className="text-[11px] text-rose-300/80">
+                      The 5-minute security window has elapsed. Please request a new verification code below.
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Six Digit Inputs */}
+              <div>
+                <label className="block text-xs font-medium text-neutral-300 mb-2 text-center">
+                  Enter 6-Digit Verification Code
+                </label>
+                <div className="flex justify-between gap-2 max-w-xs mx-auto">
+                  {codeDigits.map((digit, idx) => (
+                    <input
+                      key={idx}
+                      ref={(el) => { digitInputRefs.current[idx] = el; }}
+                      type="text"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
+                      maxLength={1}
+                      value={digit}
+                      onChange={(e) => handleDigitChange(idx, e.target.value)}
+                      onKeyDown={(e) => handleDigitKeyDown(idx, e)}
+                      onPaste={handleDigitPaste}
+                      disabled={isCodeExpired || isCodeInvalidated || isLoading}
+                      className={`w-11 h-13 text-center text-xl font-mono font-bold rounded-xl border bg-neutral-950 text-white transition-all focus:outline-none ${
+                        digit 
+                          ? 'border-amber-400 shadow-[0_0_12px_rgba(251,191,36,0.15)] bg-amber-400/5' 
+                          : 'border-neutral-800 focus:border-amber-400'
+                      } disabled:opacity-40 disabled:cursor-not-allowed`}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              {/* Verify Button */}
+              <button
+                type="submit"
+                disabled={fullCodeLength !== 6 || isCodeExpired || isCodeInvalidated || isLoading}
+                className="w-full py-2.5 px-4 bg-amber-400 hover:bg-amber-300 disabled:bg-neutral-800 disabled:text-neutral-500 text-neutral-950 font-semibold text-sm rounded-xl transition-all shadow-md flex items-center justify-center gap-2"
+              >
+                {isLoading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Verifying Code...</span>
+                  </>
+                ) : (
+                  <>
+                    <Check className="w-4 h-4" />
+                    <span>Verify Code</span>
+                  </>
+                )}
+              </button>
+
+              {/* Resend Code Section with Cooldown */}
+              <div className="pt-2 flex flex-col items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleResendCode}
+                  disabled={resendCooldownSeconds > 0 || isLoading}
+                  className="text-xs font-medium text-amber-400 hover:text-amber-300 disabled:text-neutral-600 disabled:cursor-not-allowed flex items-center gap-1.5 transition-colors"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  {resendCooldownSeconds > 0 ? (
+                    <span>Resend Code ({resendCooldownSeconds}s cooldown)</span>
+                  ) : (
+                    <span>Resend Verification Code</span>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => switchMode('forgot')}
+                  className="text-xs text-neutral-400 hover:text-white transition-colors"
+                >
+                  Change Email Address
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* 5. RESET PASSWORD FORM */}
+          {mode === 'reset' && (
+            <form onSubmit={handleResetSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-neutral-300 mb-1.5">
                   New Password
@@ -638,6 +947,7 @@ export const AuthPage: React.FC = () => {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Minimum 8 characters"
+                    autoComplete="new-password"
                     required
                     className="w-full pl-9 pr-10 py-2.5 text-sm bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-amber-400 transition-colors"
                   />
@@ -648,6 +958,10 @@ export const AuthPage: React.FC = () => {
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
+                </div>
+                <div className="flex items-center gap-2 mt-1.5 text-[11px] text-neutral-400">
+                  <span className={`w-1.5 h-1.5 rounded-full ${isPasswordLongEnough ? 'bg-emerald-400' : 'bg-neutral-600'}`} />
+                  <span>At least 8 characters</span>
                 </div>
               </div>
 
@@ -663,7 +977,8 @@ export const AuthPage: React.FC = () => {
                     type={showConfirmPassword ? 'text' : 'password'}
                     value={confirmPassword}
                     onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="Confirm new password"
+                    placeholder="Re-enter new password"
+                    autoComplete="new-password"
                     required
                     className="w-full pl-9 pr-10 py-2.5 text-sm bg-neutral-950 border border-neutral-800 rounded-xl text-white placeholder-neutral-600 focus:outline-none focus:border-amber-400 transition-colors"
                   />
@@ -675,21 +990,29 @@ export const AuthPage: React.FC = () => {
                     {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+                {confirmPassword && (
+                  <div className="flex items-center gap-2 mt-1.5 text-[11px]">
+                    <span className={`w-1.5 h-1.5 rounded-full ${doPasswordsMatch ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+                    <span className={doPasswordsMatch ? 'text-emerald-400' : 'text-rose-400'}>
+                      {doPasswordsMatch ? 'Passwords match' : 'Passwords do not match'}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <button
                 type="submit"
-                disabled={isLoading}
-                className="w-full py-2.5 px-4 bg-amber-400 hover:bg-amber-300 disabled:bg-amber-400/50 text-neutral-950 font-semibold text-sm rounded-xl transition-all shadow-md flex items-center justify-center gap-2"
+                disabled={isLoading || !isPasswordLongEnough || !doPasswordsMatch}
+                className="w-full py-2.5 px-4 bg-amber-400 hover:bg-amber-300 disabled:bg-amber-400/50 text-neutral-950 font-semibold text-sm rounded-xl transition-all shadow-md flex items-center justify-center gap-2 mt-2"
               >
                 {isLoading ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Updating password...</span>
+                    <span>Updating Password...</span>
                   </>
                 ) : (
                   <>
-                    <span>Reset Password</span>
+                    <span>Set New Password & Sign In</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
@@ -701,7 +1024,7 @@ export const AuthPage: React.FC = () => {
                   onClick={() => switchMode('login')}
                   className="text-xs text-neutral-400 hover:text-white transition-colors"
                 >
-                  ← Back to Sign In
+                  Cancel & Return to Sign In
                 </button>
               </div>
             </form>
@@ -727,7 +1050,7 @@ export const AuthPage: React.FC = () => {
         <div className="max-w-5xl mx-auto flex flex-col md:flex-row items-center justify-between gap-3 text-center md:text-left">
           <div className="flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>Secure Backend Authentication: Argon2id/Bcrypt · AES-256-GCM Vault · HTTP-Only Cookies · Brute-Force Rate Limiter</span>
+            <span>Secure 6-Digit Email OTP · 300s Server TTL · Keyed HMAC · Session Revocation Guard</span>
           </div>
           <div className="text-neutral-400">
             SquadForge Enterprise v2.4

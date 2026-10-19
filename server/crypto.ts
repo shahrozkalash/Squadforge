@@ -70,3 +70,46 @@ export function generateSessionToken(): string {
 export function hashSessionToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
+
+/**
+ * Generates a cryptographically secure 6-digit numeric verification code
+ */
+export function generateVerificationCode(): string {
+  // Generates integer between 100000 and 999999 inclusive
+  return crypto.randomInt(100000, 1000000).toString();
+}
+
+/**
+ * Computes a keyed HMAC-SHA256 hash of a verification code.
+ * Ensures the verification code is never stored in plaintext at rest.
+ */
+export function hashVerificationCode(code: string): string {
+  return crypto.createHmac('sha256', KEY).update(code.trim()).digest('hex');
+}
+
+/**
+ * Constant-time verification of a provided code against a stored HMAC hash
+ */
+export function timingSafeVerifyCodeHash(code: string, storedHash: string): boolean {
+  if (!code || !storedHash) return false;
+  const computedHash = hashVerificationCode(code);
+  const bufA = Buffer.from(computedHash, 'hex');
+  const bufB = Buffer.from(storedHash, 'hex');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Generates a cryptographically secure reset authorization token (post-OTP verification)
+ */
+export function generateResetAuthToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+/**
+ * Hashes a reset authorization token for safe storage at rest
+ */
+export function hashResetAuthToken(token: string): string {
+  return crypto.createHash('sha256').update(token.trim()).digest('hex');
+}
+

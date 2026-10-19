@@ -11,11 +11,23 @@ import {
   ModelRunStatus, 
   Checkpoint,
   PasswordResetToken,
+  PasswordResetCodeRecord,
+  PasswordResetAuthRecord,
   UsageLogEntry,
   SwarmUsageStats,
   LocalLLMConfig
 } from './types.js';
-import { encryptToken, decryptToken, hashSessionToken, generateSessionToken } from './crypto.js';
+import { 
+  encryptToken, 
+  decryptToken, 
+  hashSessionToken, 
+  generateSessionToken,
+  hashVerificationCode,
+  timingSafeVerifyCodeHash,
+  generateResetAuthToken,
+  hashResetAuthToken,
+  hashPassword
+} from './crypto.js';
 import { INITIAL_MODEL_REGISTRY, modelRegistry } from './modelRegistry.js';
 import { quotaManager } from './quotaManager.js';
 import { safeResultCache } from './cache.js';
@@ -35,7 +47,9 @@ class PersistentDatabase {
   public users: Map<string, User> = new Map(); // userId -> User
   public usersByEmail: Map<string, string> = new Map(); // normalizedEmail -> userId
   public sessions: Map<string, Session> = new Map(); // hashedSessionToken -> Session
-  public passwordResetTokens: Map<string, PasswordResetToken> = new Map(); // hashedResetToken -> PasswordResetToken
+  public passwordResetTokens: Map<string, PasswordResetToken> = new Map(); // hashedResetToken -> PasswordResetToken (legacy)
+  public passwordResetCodes: Map<string, PasswordResetCodeRecord> = new Map(); // codeId -> PasswordResetCodeRecord
+  public passwordResetAuths: Map<string, PasswordResetAuthRecord> = new Map(); // hashedResetAuthToken -> PasswordResetAuthRecord
   public encryptedGithubTokens: Map<string, string> = new Map(); // userId -> encryptedToken
   public builds: Map<string, Build> = new Map();
   public tasks: Map<string, Task[]> = new Map(); // buildId -> tasks
@@ -47,6 +61,21 @@ class PersistentDatabase {
 
   // In-memory rate limiter: identifier -> { attempts: number, lockUntil: number }
   private rateLimits: Map<string, { attempts: number; lockUntil: number }> = new Map();
+
+  // Controllable clock for testing and production time enforcement
+  private testClock: (() => number) | null = null;
+
+  public getTime(): number {
+    return this.testClock ? this.testClock() : Date.now();
+  }
+
+  public setTestClock(fn: () => number) {
+    this.testClock = fn;
+  }
+
+  public resetTestClock() {
+    this.testClock = null;
+  }
 
   // Active SSE listeners for real-time updates
   private sseListeners: ClientSSEListener[] = [];
@@ -81,10 +110,28 @@ class PersistentDatabase {
         }
 
         if (parsed.passwordResetTokens && Array.isArray(parsed.passwordResetTokens)) {
-          const now = Date.now();
+          const now = this.getTime();
           for (const prt of parsed.passwordResetTokens) {
             if (prt.expiresAt > now) {
               this.passwordResetTokens.set(prt.id, prt);
+            }
+          }
+        }
+
+        if (parsed.passwordResetCodes && Array.isArray(parsed.passwordResetCodes)) {
+          const now = this.getTime();
+          for (const prc of parsed.passwordResetCodes) {
+            if (prc.expiresAt > now && !prc.consumed && !prc.invalidated) {
+              this.passwordResetCodes.set(prc.id, prc);
+            }
+          }
+        }
+
+        if (parsed.passwordResetAuths && Array.isArray(parsed.passwordResetAuths)) {
+          const now = this.getTime();
+          for (const pra of parsed.passwordResetAuths) {
+            if (pra.expiresAt > now && !pra.consumed) {
+              this.passwordResetAuths.set(pra.id, pra);
             }
           }
         }
@@ -145,6 +192,8 @@ class PersistentDatabase {
           users: Array.from(this.users.values()),
           sessions: Array.from(this.sessions.values()),
           passwordResetTokens: Array.from(this.passwordResetTokens.values()),
+          passwordResetCodes: Array.from(this.passwordResetCodes.values()),
+          passwordResetAuths: Array.from(this.passwordResetAuths.values()),
           encryptedGithubTokens: Object.fromEntries(this.encryptedGithubTokens.entries()),
           builds: Array.from(this.builds.values()),
           tasks: Object.fromEntries(this.tasks.entries()),
@@ -274,7 +323,7 @@ class PersistentDatabase {
     }
   }
 
-  // --- Password Reset Tokens (1 hour TTL, one-time use) ---
+  // --- Password Reset Tokens (1 hour TTL, one-time use - legacy fallback) ---
 
   createPasswordResetToken(email: string): string | null {
     const user = this.findUserByEmail(email);
@@ -286,8 +335,8 @@ class PersistentDatabase {
       id: hashed,
       userId: user.id,
       email: user.email,
-      expiresAt: Date.now() + 60 * 60 * 1000, // 1 hour
-      createdAt: Date.now()
+      expiresAt: this.getTime() + 60 * 60 * 1000, // 1 hour
+      createdAt: this.getTime()
     };
     this.passwordResetTokens.set(hashed, resetToken);
     this.scheduleDiskSave();
@@ -300,7 +349,7 @@ class PersistentDatabase {
     const record = this.passwordResetTokens.get(hashed);
     if (!record) return { valid: false };
 
-    if (record.expiresAt < Date.now()) {
+    if (record.expiresAt < this.getTime()) {
       this.passwordResetTokens.delete(hashed);
       this.scheduleDiskSave();
       return { valid: false };
@@ -312,13 +361,286 @@ class PersistentDatabase {
     return { valid: true, userId: record.userId };
   }
 
+  // --- Secure 6-Digit Email OTP Password Reset System ---
+
+  /**
+   * Retrieves the current active, unconsumed, uninvalidated code for an email
+   */
+  getActiveResetCode(email: string): PasswordResetCodeRecord | undefined {
+    if (!email) return undefined;
+    const normalized = email.toLowerCase().trim();
+    const now = this.getTime();
+    let latest: PasswordResetCodeRecord | undefined;
+    for (const rec of this.passwordResetCodes.values()) {
+      if (
+        rec.email.toLowerCase() === normalized && 
+        !rec.consumed && 
+        !rec.invalidated && 
+        rec.expiresAt > now
+      ) {
+        if (!latest || rec.createdAt > latest.createdAt) {
+          latest = rec;
+        }
+      }
+    }
+    return latest;
+  }
+
+  /**
+   * Generates and stores a cryptographically secure 6-digit verification code with 300s TTL.
+   * Enforces 60-second cooldown between resends and invalidates previous codes.
+   */
+  createPasswordResetCode(
+    email: string, 
+    code: string, 
+    customTtlMs = 300_000 // exactly 300 seconds / 5 minutes
+  ): { 
+    success: boolean; 
+    record?: PasswordResetCodeRecord; 
+    error?: string; 
+    cooldownRemaining?: number;
+    notFound?: boolean;
+  } {
+    const user = this.findUserByEmail(email);
+    if (!user) {
+      return { success: false, notFound: true };
+    }
+
+    const now = this.getTime();
+    const normalizedEmail = user.email.toLowerCase().trim();
+
+    // Check 60-second cooldown from previous request for this email
+    for (const rec of this.passwordResetCodes.values()) {
+      if (rec.email.toLowerCase() === normalizedEmail && !rec.consumed) {
+        const timeSince = now - rec.createdAt;
+        if (timeSince < 60_000 && timeSince >= 0) {
+          const cooldownRemaining = Math.ceil((60_000 - timeSince) / 1000);
+          return {
+            success: false,
+            error: `Please wait ${cooldownRemaining} seconds before requesting a new code.`,
+            cooldownRemaining
+          };
+        }
+      }
+    }
+
+    // Invalidate ALL previous pending codes for this user/email
+    for (const rec of this.passwordResetCodes.values()) {
+      if (
+        (rec.userId === user.id || rec.email.toLowerCase() === normalizedEmail) &&
+        !rec.consumed &&
+        !rec.invalidated
+      ) {
+        rec.invalidated = true;
+      }
+    }
+
+    // Securely hash the 6-digit code with server-side keyed HMAC before storing
+    const codeHash = hashVerificationCode(code);
+    const id = `prc_${now}_${Math.random().toString(36).substring(2, 8)}`;
+    const record: PasswordResetCodeRecord = {
+      id,
+      userId: user.id,
+      email: user.email,
+      codeHash,
+      createdAt: now,
+      expiresAt: now + customTtlMs, // Exactly 300 seconds (5 minutes)
+      attempts: 0,
+      consumed: false,
+      invalidated: false
+    };
+
+    this.passwordResetCodes.set(id, record);
+    this.scheduleDiskSave();
+
+    return { success: true, record };
+  }
+
+  /**
+   * Verifies a 6-digit OTP code against server-side time and max 5 attempts.
+   * On success, consumes the code and issues a short-lived reset authorization token.
+   */
+  verifyPasswordResetCode(
+    email: string, 
+    code: string
+  ): { 
+    success: boolean; 
+    error?: string; 
+    resetAuthToken?: string; 
+    codeExpiredOrInvalid?: boolean; 
+    attemptsRemaining?: number;
+  } {
+    if (!email || !code) {
+      return { success: false, error: 'Email and verification code are required.' };
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const trimmedCode = code.trim();
+
+    // Find the latest active record
+    let record: PasswordResetCodeRecord | undefined;
+    for (const rec of this.passwordResetCodes.values()) {
+      if (rec.email.toLowerCase() === normalizedEmail && !rec.consumed && !rec.invalidated) {
+        if (!record || rec.createdAt > record.createdAt) {
+          record = rec;
+        }
+      }
+    }
+
+    if (!record) {
+      return { 
+        success: false, 
+        error: 'No active verification code found for this email. Please request a new code.', 
+        codeExpiredOrInvalid: true 
+      };
+    }
+
+    // Check attempts limit (max 5)
+    if (record.attempts >= 5) {
+      record.invalidated = true;
+      this.scheduleDiskSave();
+      return { 
+        success: false, 
+        error: 'Maximum verification attempts (5) exceeded. This code has been invalidated. Please request a new code.', 
+        codeExpiredOrInvalid: true, 
+        attemptsRemaining: 0 
+      };
+    }
+
+    // Enforce server-side expiration (exactly 300 seconds)
+    const now = this.getTime();
+    if (now >= record.expiresAt) {
+      record.invalidated = true;
+      this.scheduleDiskSave();
+      return { 
+        success: false, 
+        error: 'Verification code has expired (5-minute limit). Please request a new code.', 
+        codeExpiredOrInvalid: true 
+      };
+    }
+
+    // Constant-time hash verification against HMAC
+    const isMatch = timingSafeVerifyCodeHash(trimmedCode, record.codeHash);
+    if (!isMatch) {
+      record.attempts += 1;
+      if (record.attempts >= 5) {
+        record.invalidated = true;
+        this.scheduleDiskSave();
+        return { 
+          success: false, 
+          error: 'Incorrect verification code. Maximum verification attempts (5) exceeded. Code has been invalidated. Please request a new code.', 
+          codeExpiredOrInvalid: true, 
+          attemptsRemaining: 0 
+        };
+      }
+      this.scheduleDiskSave();
+      const remaining = 5 - record.attempts;
+      return { 
+        success: false, 
+        error: `Incorrect verification code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`, 
+        attemptsRemaining: remaining 
+      };
+    }
+
+    // Successful verification -> consume code immediately (one-time use)
+    record.consumed = true;
+
+    // Issue short-lived, single-use server-side reset authorization token (10 min TTL)
+    const resetAuthToken = generateResetAuthToken();
+    const hashedAuth = hashResetAuthToken(resetAuthToken);
+    const authRecord: PasswordResetAuthRecord = {
+      id: hashedAuth,
+      userId: record.userId,
+      email: record.email,
+      createdAt: now,
+      expiresAt: now + 10 * 60 * 1000, // 10 minutes
+      consumed: false
+    };
+
+    this.passwordResetAuths.set(hashedAuth, authRecord);
+    this.scheduleDiskSave();
+
+    return { 
+      success: true, 
+      resetAuthToken 
+    };
+  }
+
+  /**
+   * Completes password reset using a verified reset authorization token.
+   * Updates password, invalidates authorization token, and revokes all active sessions.
+   */
+  async completePasswordReset(
+    resetAuthToken: string, 
+    newPassword: string
+  ): Promise<{ success: boolean; error?: string }> {
+    if (!resetAuthToken || typeof resetAuthToken !== 'string') {
+      return { success: false, error: 'Reset authorization is missing or invalid. Please verify your code again.' };
+    }
+
+    if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 8) {
+      return { success: false, error: 'Password must be at least 8 characters long.' };
+    }
+
+    const hashedAuth = hashResetAuthToken(resetAuthToken);
+    const authRecord = this.passwordResetAuths.get(hashedAuth);
+    const now = this.getTime();
+
+    if (!authRecord || authRecord.consumed || now >= authRecord.expiresAt) {
+      return { 
+        success: false, 
+        error: 'Reset authorization has expired or is invalid. Please request a new verification code.' 
+      };
+    }
+
+    // Invalidate authorization immediately (one-time use)
+    authRecord.consumed = true;
+    this.passwordResetAuths.delete(hashedAuth);
+
+    const user = this.getUser(authRecord.userId);
+    if (!user) {
+      return { success: false, error: 'User account not found.' };
+    }
+
+    // Hash new password using bcryptjs (salt 12)
+    const newHash = await hashPassword(newPassword);
+    user.passwordHash = newHash;
+    user.updatedAt = now;
+    this.saveUser(user);
+
+    // Revoke all existing sessions across devices
+    this.deleteUserSessions(user.id);
+
+    // Invalidate any remaining reset codes for this user
+    this.invalidateAllResetCodesForUser(user.id);
+
+    this.scheduleDiskSave();
+    return { success: true };
+  }
+
+  /**
+   * Invalidate all reset codes for a user
+   */
+  invalidateAllResetCodesForUser(userId: string): void {
+    let changed = false;
+    for (const rec of this.passwordResetCodes.values()) {
+      if (rec.userId === userId && !rec.consumed && !rec.invalidated) {
+        rec.invalidated = true;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.scheduleDiskSave();
+    }
+  }
+
   // --- Login Rate Limiting (5 failed attempts = 15 min lock) ---
 
   checkRateLimit(key: string): { allowed: boolean; retryAfterSeconds: number } {
     const record = this.rateLimits.get(key);
     if (!record) return { allowed: true, retryAfterSeconds: 0 };
 
-    const now = Date.now();
+    const now = this.getTime();
     if (record.lockUntil > now) {
       return { 
         allowed: false, 
@@ -329,7 +651,7 @@ class PersistentDatabase {
   }
 
   recordFailedLogin(key: string): void {
-    const now = Date.now();
+    const now = this.getTime();
     const record = this.rateLimits.get(key) || { attempts: 0, lockUntil: 0 };
     record.attempts += 1;
 
@@ -572,6 +894,19 @@ class PersistentDatabase {
     const providerStats: SwarmUsageStats['providerStats'] = {};
     const modelStats: SwarmUsageStats['modelStats'] = {};
 
+    // Agent Stats initialized prior to log scan
+    const agentStats: SwarmUsageStats['agentStats'] = {} as any;
+    const allAgents = modelRegistry.getAgentSpecs();
+    for (const [role] of Object.entries(allAgents)) {
+      agentStats[role as any] = {
+        role: role as any,
+        requests: 0,
+        tokens: 0,
+        tasksCompleted: 0,
+        estimatedCost: 0
+      };
+    }
+
     for (const log of logs) {
       if (log.success) successfulRequests++;
       else failedRequests++;
@@ -627,23 +962,10 @@ class PersistentDatabase {
 
     // Set provider status from quota manager
     const allQuotas = quotaManager.getAllStatuses();
-    for (const [pKey, pVal] of Object.entries(allQuotas)) {
+    for (const [, pVal] of Object.entries(allQuotas)) {
       if (providerStats[pVal.provider]) {
         providerStats[pVal.provider].status = pVal.status;
       }
-    }
-
-    // Agent Stats
-    const agentStats: SwarmUsageStats['agentStats'] = {} as any;
-    const allAgents = modelRegistry.getAgentSpecs();
-    for (const [role, spec] of Object.entries(allAgents)) {
-      agentStats[role as any] = {
-        role: role as any,
-        requests: 0,
-        tokens: 0,
-        tasksCompleted: 0,
-        estimatedCost: 0
-      };
     }
 
     // Aggregate tasks if buildId provided

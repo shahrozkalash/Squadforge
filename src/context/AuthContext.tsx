@@ -8,8 +8,36 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   register: (name: string, email: string, password: string, confirmPassword: string) => Promise<{ success: boolean; error?: string }>;
   logout: () => Promise<void>;
-  requestPasswordReset: (email: string) => Promise<{ success: boolean; message: string; error?: string; devToken?: string }>;
-  resetPassword: (token: string, newPassword: string, confirmPassword: string) => Promise<{ success: boolean; message?: string; error?: string }>;
+  requestPasswordReset: (email: string) => Promise<{ 
+    success: boolean; 
+    message: string; 
+    error?: string; 
+    missingConfig?: boolean; 
+    requiredEnv?: string[]; 
+    cooldownSeconds?: number;
+    devToken?: string;
+  }>;
+  resendVerificationCode: (email: string) => Promise<{
+    success: boolean;
+    message: string;
+    error?: string;
+    missingConfig?: boolean;
+    requiredEnv?: string[];
+    cooldownRemaining?: number;
+  }>;
+  verifyResetCode: (email: string, code: string) => Promise<{
+    success: boolean;
+    resetAuthToken?: string;
+    message?: string;
+    error?: string;
+    codeExpiredOrInvalid?: boolean;
+    attemptsRemaining?: number;
+  }>;
+  resetPassword: (
+    token: string, 
+    newPassword: string, 
+    confirmPassword: string
+  ) => Promise<{ success: boolean; message?: string; error?: string }>;
   connectGitHubOAuth: () => Promise<void>;
   connectGitHubPAT: (token: string, username?: string) => Promise<boolean>;
   disconnectGitHub: () => Promise<void>;
@@ -110,7 +138,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const requestPasswordReset = async (email: string): Promise<{ success: boolean; message: string; error?: string; devToken?: string }> => {
+  const requestPasswordReset = async (email: string): Promise<{ 
+    success: boolean; 
+    message: string; 
+    error?: string; 
+    missingConfig?: boolean;
+    requiredEnv?: string[];
+    cooldownSeconds?: number;
+    devToken?: string;
+  }> => {
     try {
       const res = await fetch('/api/auth/forgot-password', {
         method: 'POST',
@@ -119,11 +155,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       });
       const data = await res.json();
       if (!res.ok) {
-        return { success: false, message: '', error: data.error || 'Failed to request password reset.' };
+        return { 
+          success: false, 
+          message: '', 
+          error: data.error || 'Failed to request password reset code.',
+          missingConfig: data.missingConfig,
+          requiredEnv: data.requiredEnv
+        };
       }
       return { 
         success: true, 
-        message: data.message || 'If an account exists, instructions have been sent.',
+        message: data.message || 'If an account exists, a verification code has been sent.',
+        cooldownSeconds: data.cooldownSeconds || 60,
         devToken: data.devToken
       };
     } catch (err: any) {
@@ -131,8 +174,78 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const resendVerificationCode = async (email: string): Promise<{
+    success: boolean;
+    message: string;
+    error?: string;
+    missingConfig?: boolean;
+    requiredEnv?: string[];
+    cooldownRemaining?: number;
+  }> => {
+    try {
+      const res = await fetch('/api/auth/resend-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return {
+          success: false,
+          message: '',
+          error: data.error || 'Failed to resend verification code.',
+          missingConfig: data.missingConfig,
+          requiredEnv: data.requiredEnv,
+          cooldownRemaining: data.cooldownRemaining
+        };
+      }
+      return {
+        success: true,
+        message: data.message || 'A new verification code has been sent.'
+      };
+    } catch (err: any) {
+      return { success: false, message: '', error: err.message || 'Network error occurred.' };
+    }
+  };
+
+  const verifyResetCode = async (
+    email: string, 
+    code: string
+  ): Promise<{
+    success: boolean;
+    resetAuthToken?: string;
+    message?: string;
+    error?: string;
+    codeExpiredOrInvalid?: boolean;
+    attemptsRemaining?: number;
+  }> => {
+    try {
+      const res = await fetch('/api/auth/verify-reset-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        return {
+          success: false,
+          error: data.error || 'Verification code is invalid.',
+          codeExpiredOrInvalid: data.codeExpiredOrInvalid,
+          attemptsRemaining: data.attemptsRemaining
+        };
+      }
+      return {
+        success: true,
+        resetAuthToken: data.resetAuthToken,
+        message: data.message
+      };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Network error occurred during verification.' };
+    }
+  };
+
   const resetPassword = async (
-    token: string, 
+    tokenOrAuth: string, 
     newPassword: string, 
     confirmPassword: string
   ): Promise<{ success: boolean; message?: string; error?: string }> => {
@@ -140,7 +253,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const res = await fetch('/api/auth/reset-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, newPassword, confirmPassword })
+        body: JSON.stringify({ 
+          resetAuthToken: tokenOrAuth,
+          token: tokenOrAuth, 
+          newPassword, 
+          confirmPassword 
+        })
       });
       const data = await res.json();
       if (!res.ok) {
@@ -216,6 +334,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       register,
       logout,
       requestPasswordReset,
+      resendVerificationCode,
+      verifyResetCode,
       resetPassword,
       connectGitHubOAuth,
       connectGitHubPAT,

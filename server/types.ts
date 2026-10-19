@@ -93,6 +93,28 @@ export interface PasswordResetToken {
   createdAt: number;
 }
 
+export interface PasswordResetCodeRecord {
+  id: string; // unique ID
+  userId: string;
+  email: string; // normalized email
+  codeHash: string; // Keyed HMAC-SHA256 of 6-digit code
+  createdAt: number; // epoch ms
+  expiresAt: number; // exactly createdAt + 300_000 (300 seconds / 5 minutes)
+  attempts: number; // max 5
+  consumed: boolean;
+  invalidated: boolean;
+}
+
+export interface PasswordResetAuthRecord {
+  id: string; // SHA-256 of reset authorization token
+  userId: string;
+  email: string;
+  createdAt: number;
+  expiresAt: number; // epoch ms
+  consumed: boolean;
+}
+
+
 export type TaskStatus = 
   | 'pending'
   | 'planning'
