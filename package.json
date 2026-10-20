@@ -1,7 +1,8 @@
 {
-  "name": "react-example",
+  "name": "squadforge",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "SquadForge - Multi-AI Parallel Swarm Engineering platform where 10+ AI models work in parallel as one team to build software from a single idea.",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",

@@ -36,11 +36,22 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 \`\`\`
 
-Essential settings:
-- `ENCRYPTION_SECRET`: Set to a strong 32+ character random string.
-- `GEMINI_API_KEY`: Provide your Google Gemini API key.
-- `SQLITE_DB_PATH`: Specify storage location for database (e.g. `/var/lib/squadforge/squadforge.db`).
-- `APP_URL`: Set public URL (e.g. `https://squadforge.example.com`).
+Required for real AI work (at least one provider):
+- `GEMINI_API_KEY`: Your Google Gemini API key — the primary model provider.
+- `OPENROUTER_API_KEY`: Optional fallback model provider.
+
+Essential production settings:
+- `ENCRYPTION_SECRET`: Set to a strong 32+ character random string. If unset, the server falls back to a built-in default that is not safe for production.
+- `NODE_ENV`: Set to `production`.
+- `APP_URL`: Set public URL (e.g. `https://squadforge.example.com`). Used for OAuth redirects and trusted-origin checks.
+
+Optional settings:
+- `PORT`: Server port (default `3000`).
+- `SQLITE_DB_PATH`: Storage location for the database (default `./squadforge.db`, e.g. `/var/lib/squadforge/squadforge.db`).
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`: GitHub OAuth app credentials for Connect GitHub and auto-push.
+- `RESEND_API_KEY`, or `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM`: Email delivery for password-reset codes — configure one option.
+
+See `.env.example` for the full commented template — it lists every variable the server reads.
 
 ### 3. Build & Run
 \`\`\`bash
@@ -65,9 +76,11 @@ docker run -d \
   --name squadforge \
   -p 3000:3000 \
   -v squadforge_data:/app/data \
+  -e NODE_ENV=production \
   -e SQLITE_DB_PATH=/app/data/squadforge.db \
   -e ENCRYPTION_SECRET=your-secure-32-char-secret-key-here \
   -e GEMINI_API_KEY=your-gemini-api-key \
+  -e APP_URL=https://squadforge.example.com \
   --restart unless-stopped \
   squadforge:latest
 \`\`\`
