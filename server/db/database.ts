@@ -356,6 +356,28 @@ export class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_execution_jobs_build_id ON execution_jobs(build_id);
           `);
         }
+      },
+      {
+        id: 2,
+        name: '002_oauth_states',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            -- Persistent GitHub OAuth States
+            CREATE TABLE IF NOT EXISTS oauth_states (
+              state TEXT PRIMARY KEY,
+              user_id TEXT NOT NULL,
+              session_token_hash TEXT NOT NULL,
+              redirect_uri TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL,
+              consumed INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_oauth_states_user_id ON oauth_states(user_id);
+            CREATE INDEX IF NOT EXISTS idx_oauth_states_expires_at ON oauth_states(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_oauth_states_consumed ON oauth_states(consumed);
+          `);
+        }
       }
     ];
 

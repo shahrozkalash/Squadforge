@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'node:crypto';
 import { 
   User, 
   SafeUser,
@@ -918,6 +919,169 @@ export class PersistentDatabase {
       user.githubConnected = false;
       user.githubUsername = undefined;
       this.saveUser(user);
+    }
+  }
+
+  // ==========================================
+  // GitHub OAuth State Management (Persistent Storage)
+  // ==========================================
+
+  saveOAuthState(record: {
+    state: string;
+    userId: string;
+    sessionTokenHash: string;
+    redirectUri: string;
+    createdAt: number;
+    expiresAt: number;
+  }): void {
+    const sqlite = this.dbManager.db;
+    const stmt = sqlite.prepare(`
+      INSERT OR REPLACE INTO oauth_states (
+        state, user_id, session_token_hash, redirect_uri, created_at, expires_at, consumed
+      ) VALUES (?, ?, ?, ?, ?, ?, 0)
+    `);
+    stmt.run(
+      record.state,
+      record.userId,
+      record.sessionTokenHash,
+      record.redirectUri,
+      record.createdAt,
+      record.expiresAt
+    );
+  }
+
+  getOAuthState(state: string): {
+    state: string;
+    userId: string;
+    sessionTokenHash: string;
+    redirectUri: string;
+    createdAt: number;
+    expiresAt: number;
+    consumed: boolean;
+  } | null {
+    try {
+      const row = this.dbManager.db.prepare(
+        'SELECT * FROM oauth_states WHERE state = ?'
+      ).get(state) as any;
+      if (!row) return null;
+      return {
+        state: row.state,
+        userId: row.user_id,
+        sessionTokenHash: row.session_token_hash,
+        redirectUri: row.redirect_uri,
+        createdAt: row.created_at,
+        expiresAt: row.expires_at,
+        consumed: Boolean(row.consumed)
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  consumeOAuthState(
+    state: string,
+    sessionToken: string
+  ): { 
+    valid: boolean; 
+    record?: {
+      state: string;
+      userId: string;
+      sessionTokenHash: string;
+      redirectUri: string;
+      createdAt: number;
+      expiresAt: number;
+    }; 
+    error?: string; 
+  } {
+    if (!state || typeof state !== 'string' || state.trim().length === 0) {
+      return { valid: false, error: 'Missing or invalid OAuth state parameter.' };
+    }
+    if (!sessionToken || typeof sessionToken !== 'string' || sessionToken.trim().length === 0) {
+      return { valid: false, error: 'Missing or invalid session credentials.' };
+    }
+
+    const trimmedState = state.trim();
+    const now = this.getTime();
+
+    return this.dbManager.transaction(() => {
+      const sqlite = this.dbManager.db;
+      const row = sqlite.prepare('SELECT * FROM oauth_states WHERE state = ?').get(trimmedState) as any;
+
+      if (!row) {
+        return { valid: false, error: 'Invalid or already consumed OAuth state parameter.' };
+      }
+
+      if (row.consumed === 1) {
+        return { valid: false, error: 'Invalid or already consumed OAuth state parameter (replay attack prevented).' };
+      }
+
+      if (now > row.expires_at) {
+        return { valid: false, error: 'OAuth state parameter has expired. Please initiate authentication again.' };
+      }
+
+      // 1. Constant-time comparison of state
+      const stateBuf = Buffer.from(trimmedState, 'utf-8');
+      const expectedStateBuf = Buffer.from(row.state, 'utf-8');
+      if (stateBuf.length !== expectedStateBuf.length || !crypto.timingSafeEqual(stateBuf, expectedStateBuf)) {
+        return { valid: false, error: 'OAuth state comparison failed.' };
+      }
+
+      // 2. Constant-time comparison of session token hash
+      const currentSessionHash = hashSessionToken(sessionToken);
+      const currentHashBuf = Buffer.from(currentSessionHash, 'utf-8');
+      const expectedHashBuf = Buffer.from(row.session_token_hash, 'utf-8');
+      if (currentHashBuf.length !== expectedHashBuf.length || !crypto.timingSafeEqual(currentHashBuf, expectedHashBuf)) {
+        return { valid: false, error: 'OAuth state does not match the initiating browser session.' };
+      }
+
+      // 3. Atomic consumption: Mark consumed = 1 only if still consumed = 0
+      const updateResult = sqlite.prepare(
+        'UPDATE oauth_states SET consumed = 1 WHERE state = ? AND consumed = 0'
+      ).run(trimmedState);
+
+      if (updateResult.changes === 0) {
+        return { valid: false, error: 'OAuth state was concurrently consumed or already used.' };
+      }
+
+      const record = {
+        state: row.state,
+        userId: row.user_id,
+        sessionTokenHash: row.session_token_hash,
+        redirectUri: row.redirect_uri,
+        createdAt: row.created_at,
+        expiresAt: row.expires_at
+      };
+
+      return { valid: true, record };
+    });
+  }
+
+  cleanExpiredOAuthStates(): void {
+    try {
+      const now = this.getTime();
+      this.dbManager.db.prepare('DELETE FROM oauth_states WHERE expires_at < ?').run(now);
+    } catch {
+      // Ignored
+    }
+  }
+
+  clearOAuthStates(): void {
+    try {
+      this.dbManager.db.prepare('DELETE FROM oauth_states').run();
+    } catch {
+      // Ignored
+    }
+  }
+
+  getActiveOAuthStateCount(): number {
+    try {
+      const now = this.getTime();
+      const row = this.dbManager.db.prepare(
+        'SELECT COUNT(*) as count FROM oauth_states WHERE consumed = 0 AND expires_at >= ?'
+      ).get(now) as { count: number };
+      return row ? row.count : 0;
+    } catch {
+      return 0;
     }
   }
 

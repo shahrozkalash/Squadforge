@@ -620,9 +620,22 @@ app.put('/api/user/settings', requireAuth, (req, res) => {
   res.json({ success: true, user: db.toSafeUser(user) });
 });
 
+function sanitizeTargetOrigin(origin: string): string {
+  if (!origin || origin.trim() === '*' || typeof origin !== 'string') {
+    return 'http://127.0.0.1:3000';
+  }
+  try {
+    const u = new URL(origin);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return 'http://127.0.0.1:3000';
+  }
+}
+
 // GitHub OAuth & Connection
 function renderOAuthSuccessHtml(targetOrigin: string, username: string): string {
   const safeUsername = username.replace(/[^\w-]/g, '');
+  const exactOrigin = sanitizeTargetOrigin(targetOrigin);
   return `<!DOCTYPE html>
 <html>
   <head>
@@ -639,7 +652,7 @@ function renderOAuthSuccessHtml(targetOrigin: string, username: string): string 
     </div>
     <script>
       (function() {
-        var target = ${JSON.stringify(targetOrigin)};
+        var target = ${JSON.stringify(exactOrigin)};
         if (window.opener) {
           try {
             window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', username: ${JSON.stringify(safeUsername)} }, target);
@@ -656,6 +669,7 @@ function renderOAuthSuccessHtml(targetOrigin: string, username: string): string 
 
 function renderOAuthErrorHtml(targetOrigin: string, errorText: string): string {
   const safeError = errorText.replace(/[<>"]/g, '');
+  const exactOrigin = sanitizeTargetOrigin(targetOrigin);
   return `<!DOCTYPE html>
 <html>
   <head>
@@ -673,7 +687,7 @@ function renderOAuthErrorHtml(targetOrigin: string, errorText: string): string {
     </div>
     <script>
       (function() {
-        var target = ${JSON.stringify(targetOrigin)};
+        var target = ${JSON.stringify(exactOrigin)};
         if (window.opener) {
           try {
             window.opener.postMessage({ type: 'OAUTH_AUTH_FAILURE', error: ${JSON.stringify(safeError)} }, target);

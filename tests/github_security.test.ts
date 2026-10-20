@@ -117,7 +117,59 @@ describe('SquadForge Critical Security: GitHub OAuth & API Integrity', () => {
       assert.equal(GitHubService.getActiveOAuthStateCount(), 0);
     });
 
-    test('8. Trusted origin validation rejects unverified / spoofed Host headers', () => {
+    test('8. Rejects incorrect, unknown, or tampered state parameters', () => {
+      const validState = GitHubService.generateOAuthState('user_1', 'session_tok_valid', 'http://127.0.0.1:3000/auth/callback');
+
+      // Tampered state by changing the first character
+      const tamperedState = (validState[0] === 'a' ? 'b' : 'a') + validState.slice(1);
+      const resTampered = GitHubService.validateAndConsumeOAuthState(tamperedState, 'session_tok_valid');
+      assert.equal(resTampered.valid, false);
+      assert.match(resTampered.error || '', /invalid or already consumed/i);
+
+      // Completely arbitrary unknown state
+      const resUnknown = GitHubService.validateAndConsumeOAuthState('1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef', 'session_tok_valid');
+      assert.equal(resUnknown.valid, false);
+      assert.match(resUnknown.error || '', /invalid or already consumed/i);
+    });
+
+    test('9. Prevents race conditions on concurrent duplicate callbacks (atomic single-use consumption)', async () => {
+      const state = GitHubService.generateOAuthState('user_dup', 'session_tok_dup', 'http://127.0.0.1:3000/auth/callback');
+
+      // Fire multiple concurrent callback validations simultaneously
+      const results = await Promise.all([
+        Promise.resolve().then(() => GitHubService.validateAndConsumeOAuthState(state, 'session_tok_dup')),
+        Promise.resolve().then(() => GitHubService.validateAndConsumeOAuthState(state, 'session_tok_dup')),
+        Promise.resolve().then(() => GitHubService.validateAndConsumeOAuthState(state, 'session_tok_dup'))
+      ]);
+
+      const successCount = results.filter(r => r.valid).length;
+      const failureCount = results.filter(r => !r.valid).length;
+
+      assert.equal(successCount, 1, 'Exactly one concurrent callback must succeed');
+      assert.equal(failureCount, 2, 'All duplicate concurrent callbacks must be rejected');
+    });
+
+    test('10. Stores OAuth state in shared persistent storage (SQLite) accessible across restarts', () => {
+      const state = GitHubService.generateOAuthState('user_persist', 'session_tok_persist', 'http://127.0.0.1:3000/auth/callback');
+
+      // Direct check against persistent SQLite database
+      const persistedRecord = db.getOAuthState(state);
+      assert.ok(persistedRecord, 'OAuth state record must exist in SQLite database');
+      assert.equal(persistedRecord.userId, 'user_persist');
+      assert.equal(persistedRecord.redirectUri, 'http://127.0.0.1:3000/auth/callback');
+      assert.equal(persistedRecord.consumed, false);
+
+      // Validate and consume through service
+      const res = GitHubService.validateAndConsumeOAuthState(state, 'session_tok_persist');
+      assert.equal(res.valid, true);
+
+      // Verify persistent record is now marked consumed in SQLite
+      const consumedRecord = db.getOAuthState(state);
+      assert.ok(consumedRecord);
+      assert.equal(consumedRecord.consumed, true);
+    });
+
+    test('11. Trusted origin validation rejects unverified / spoofed Host headers', () => {
       const origAppUrl = process.env.APP_URL;
       try {
         delete process.env.APP_URL;
@@ -143,7 +195,7 @@ describe('SquadForge Critical Security: GitHub OAuth & API Integrity', () => {
       }
     });
 
-    test('9. OAuth authorization URL includes client_id, redirect_uri, scope, and cryptographically secure state', () => {
+    test('12. OAuth authorization URL includes client_id, redirect_uri, scope, and cryptographically secure state', () => {
       const authUrl = GitHubService.getAuthUrl('http://127.0.0.1:3000/auth/callback', 'abcdef123456');
       const parsed = new URL(authUrl);
 

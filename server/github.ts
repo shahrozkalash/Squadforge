@@ -16,19 +16,19 @@ export interface OAuthStateRecord {
 }
 
 export class GitHubService {
-  private static activeOAuthStates: Map<string, OAuthStateRecord> = new Map();
   public static OAUTH_STATE_TTL_MS = 10 * 60 * 1000; // 10 minutes lifetime
 
   /**
    * Generates a cryptographically secure, unpredictable 32-byte hex state token
    * bound to the initiating user's browser session with a strict 10-minute TTL.
+   * Stored in shared persistent SQLite storage.
    */
   static generateOAuthState(userId: string, sessionToken: string, redirectUri: string): string {
     this.cleanExpiredOAuthStates();
 
     // 32 cryptographically random bytes = 64 hex characters (256 bits of entropy)
     const state = crypto.randomBytes(32).toString('hex');
-    const now = Date.now();
+    const now = db.getTime();
 
     const record: OAuthStateRecord = {
       state,
@@ -39,12 +39,12 @@ export class GitHubService {
       expiresAt: now + this.OAUTH_STATE_TTL_MS
     };
 
-    this.activeOAuthStates.set(state, record);
+    db.saveOAuthState(record);
     return state;
   }
 
   /**
-   * Validates and single-use consumes the OAuth state parameter.
+   * Validates and single-use consumes the OAuth state parameter atomically from shared storage.
    * Compares state values using constant-time timingSafeEqual and enforces session binding.
    * Rejects missing, incorrect, expired, replayed, or session-mismatched states.
    */
@@ -53,72 +53,28 @@ export class GitHubService {
     sessionToken: string | undefined | null
   ): { valid: boolean; record?: OAuthStateRecord; error?: string } {
     this.cleanExpiredOAuthStates();
-
-    if (!state || typeof state !== 'string' || state.trim().length === 0) {
-      return { valid: false, error: 'Missing or invalid OAuth state parameter.' };
-    }
-
-    if (!sessionToken || typeof sessionToken !== 'string' || sessionToken.trim().length === 0) {
-      return { valid: false, error: 'Missing or invalid session credentials.' };
-    }
-
-    const trimmedState = state.trim();
-    const record = this.activeOAuthStates.get(trimmedState);
-
-    if (!record) {
-      return { valid: false, error: 'Invalid or already consumed OAuth state parameter.' };
-    }
-
-    // Single-use consumption: immediately remove state from active set to prevent replay attacks
-    this.activeOAuthStates.delete(trimmedState);
-
-    // 1. Check expiration
-    if (Date.now() > record.expiresAt) {
-      return { valid: false, error: 'OAuth state parameter has expired. Please initiate authentication again.' };
-    }
-
-    // 2. Constant-time comparison of state tokens
-    const stateBuf = Buffer.from(trimmedState, 'utf-8');
-    const expectedStateBuf = Buffer.from(record.state, 'utf-8');
-    if (stateBuf.length !== expectedStateBuf.length || !crypto.timingSafeEqual(stateBuf, expectedStateBuf)) {
-      return { valid: false, error: 'OAuth state comparison failed.' };
-    }
-
-    // 3. Constant-time comparison of bound session token hash
-    const currentSessionHash = hashSessionToken(sessionToken);
-    const currentHashBuf = Buffer.from(currentSessionHash, 'utf-8');
-    const expectedHashBuf = Buffer.from(record.sessionTokenHash, 'utf-8');
-    if (currentHashBuf.length !== expectedHashBuf.length || !crypto.timingSafeEqual(currentHashBuf, expectedHashBuf)) {
-      return { valid: false, error: 'OAuth state does not match the initiating browser session.' };
-    }
-
-    return { valid: true, record };
+    return db.consumeOAuthState(state as string, sessionToken as string);
   }
 
   /**
-   * Cleans up expired OAuth states
+   * Cleans up expired OAuth states from shared persistent storage
    */
   static cleanExpiredOAuthStates(): void {
-    const now = Date.now();
-    for (const [key, rec] of this.activeOAuthStates.entries()) {
-      if (now > rec.expiresAt) {
-        this.activeOAuthStates.delete(key);
-      }
-    }
+    db.cleanExpiredOAuthStates();
   }
 
   /**
    * Resets active OAuth states (used for test isolation)
    */
   static clearOAuthStates(): void {
-    this.activeOAuthStates.clear();
+    db.clearOAuthStates();
   }
 
   /**
-   * Returns count of active in-flight OAuth states
+   * Returns count of active in-flight OAuth states from shared persistent storage
    */
   static getActiveOAuthStateCount(): number {
-    return this.activeOAuthStates.size;
+    return db.getActiveOAuthStateCount();
   }
 
   /**

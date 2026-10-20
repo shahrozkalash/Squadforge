@@ -1,8 +1,29 @@
+# Dependencies
 node_modules/
+
+# Production build outputs & coverage
 build/
 dist/
 coverage/
-.DS_Store
-*.log
+
+# Database files & SQLite runtime artifacts
+*.db
+*.db-shm
+*.db-wal
+.squadforge_data.json
+squadforge.db
+squadforge.db-shm
+squadforge.db-wal
+
+# Local secrets & environment files
 .env*
 !.env.example
+*.pem
+*.key
+*.cert
+
+# Operating System & IDE
+.DS_Store
+*.log
+.idea/
+.vscode/
