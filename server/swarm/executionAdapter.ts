@@ -64,7 +64,7 @@ export interface VerificationExecutionResult {
 }
 
 export class ExecutionAdapter {
-  private static MAX_EXECUTION_TIMEOUT_MS = 6000; // 6 seconds execution timeout
+  private static MAX_EXECUTION_TIMEOUT_MS = 15000; // 15 seconds execution timeout
   private static MAX_FILE_SIZE_BYTES = 500 * 1024; // 500 KB limit per file
   private static MAX_TOTAL_PROJECT_BYTES = 10 * 1024 * 1024; // 10 MB total project limit
 
@@ -405,8 +405,19 @@ export class ExecutionAdapter {
 
       // Execute tests via tsx --test or node --test with scrubbed environment
       // CRITICAL SECURITY: Zero application secrets passed to child process
+      // Locate tsx executable: prefer local node_modules binary over global npx
+      const localBinDir = path.resolve(process.cwd(), 'node_modules/.bin');
+      const localTsxPath = path.join(localBinDir, process.platform === 'win32' ? 'tsx.cmd' : 'tsx');
+      const hasLocalTsx = fs.existsSync(localTsxPath);
+
+      // Prepend local node_modules/.bin to PATH so local tools take precedence
+      const pathSeparator = process.platform === 'win32' ? ';' : ':';
+      const augmentedPath = hasLocalTsx 
+        ? `${localBinDir}${pathSeparator}${process.env.PATH || ''}` 
+        : (process.env.PATH || '');
+
       const scrubbedEnv: NodeJS.ProcessEnv = {
-        PATH: process.env.PATH || '',
+        PATH: augmentedPath,
         NODE_ENV: 'test',
         HOME: tempDir,
         TEMP: tempDir,
@@ -414,9 +425,14 @@ export class ExecutionAdapter {
       };
 
       const startTime = Date.now();
+      const command = hasLocalTsx ? localTsxPath : 'npx';
+      const args = hasLocalTsx 
+        ? ['--test', ...testFiles.map(f => f.path)]
+        : ['--yes', 'tsx', '--test', ...testFiles.map(f => f.path)];
+
       const runResult = spawnSync(
-        'npx',
-        ['tsx', '--test', ...testFiles.map(f => f.path)],
+        command,
+        args,
         {
           cwd: tempDir,
           env: scrubbedEnv,
