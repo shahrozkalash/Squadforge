@@ -72,15 +72,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     refreshUser();
   }, []);
 
-  // Listen for OAuth postMessage from popup window per OAuth skill
+  // Listen for OAuth postMessage from popup window with strict origin and structure checks
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
-      const origin = event.origin;
-      if (!origin.endsWith('.run.app') && !origin.includes('localhost') && !origin.includes('0.0.0.0')) {
+      // Restrict strictly to expected origin (current window location)
+      if (event.origin !== window.location.origin) {
         return;
       }
-      if (event.data?.type === 'OAUTH_AUTH_SUCCESS') {
-        refreshUser();
+      if (event.data && typeof event.data === 'object') {
+        if (event.data.type === 'OAUTH_AUTH_SUCCESS' && typeof event.data.username === 'string') {
+          refreshUser();
+        }
       }
     };
     window.addEventListener('message', handleMessage);

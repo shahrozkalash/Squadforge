@@ -621,68 +621,153 @@ app.put('/api/user/settings', requireAuth, (req, res) => {
 });
 
 // GitHub OAuth & Connection
+function renderOAuthSuccessHtml(targetOrigin: string, username: string): string {
+  const safeUsername = username.replace(/[^\w-]/g, '');
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <title>GitHub Connected - SquadForge</title>
+    <meta charset="utf-8">
+  </head>
+  <body style="font-family: sans-serif; background: #0a0a0a; color: #f5f5f5; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+    <div style="text-align: center; padding: 32px; background: #171717; border-radius: 16px; border: 1px solid #262626; max-width: 420px; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+      <div style="display: inline-block; width: 44px; height: 44px; line-height: 44px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 12px; font-size: 20px; color: #10b981; margin-bottom: 16px;">
+        ✓
+      </div>
+      <h2 style="margin: 0 0 8px; color: #10b981; font-size: 18px;">GitHub Connected</h2>
+      <p style="margin: 0 0 16px; color: #a3a3a3; font-size: 13px;">Authentication successful as <strong>@${safeUsername}</strong>. Closing window...</p>
+    </div>
+    <script>
+      (function() {
+        var target = ${JSON.stringify(targetOrigin)};
+        if (window.opener) {
+          try {
+            window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', username: ${JSON.stringify(safeUsername)} }, target);
+          } catch(e) {}
+          setTimeout(function() { window.close(); }, 600);
+        } else {
+          window.location.href = '/';
+        }
+      })();
+    </script>
+  </body>
+</html>`;
+}
+
+function renderOAuthErrorHtml(targetOrigin: string, errorText: string): string {
+  const safeError = errorText.replace(/[<>"]/g, '');
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <title>GitHub Connection Failed - SquadForge</title>
+    <meta charset="utf-8">
+  </head>
+  <body style="font-family: sans-serif; background: #0a0a0a; color: #f5f5f5; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+    <div style="text-align: center; padding: 32px; background: #171717; border-radius: 16px; border: 1px solid #e11d48; max-width: 420px; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+      <div style="display: inline-block; width: 44px; height: 44px; line-height: 44px; background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 12px; font-size: 20px; color: #ef4444; margin-bottom: 16px;">
+        ✕
+      </div>
+      <h2 style="margin: 0 0 8px; color: #f43f5e; font-size: 18px;">GitHub Connection Failed</h2>
+      <p style="margin: 0 0 20px; color: #a3a3a3; font-size: 13px;">${safeError}</p>
+      <button onclick="window.close()" style="background: #262626; color: #e5e5e5; border: 1px solid #404040; padding: 8px 20px; border-radius: 8px; font-size: 12px; cursor: pointer;">Close Window</button>
+    </div>
+    <script>
+      (function() {
+        var target = ${JSON.stringify(targetOrigin)};
+        if (window.opener) {
+          try {
+            window.opener.postMessage({ type: 'OAUTH_AUTH_FAILURE', error: ${JSON.stringify(safeError)} }, target);
+          } catch(e) {}
+          setTimeout(function() { window.close(); }, 2500);
+        }
+      })();
+    </script>
+  </body>
+</html>`;
+}
+
+// GitHub OAuth & Connection
 app.get('/api/auth/github/url', requireAuth, (req, res) => {
-  const origin = getOrigin(req);
-  const url = GitHubService.getAuthUrl(origin);
-  res.json({ url });
+  const origin = GitHubService.getTrustedOrigin(req);
+  const redirectUri = `${origin}/auth/callback`;
+  const state = GitHubService.generateOAuthState(req.user!.id, req.sessionToken!, redirectUri);
+  const url = GitHubService.getAuthUrl(redirectUri, state);
+  res.json({ url, state });
 });
 
 const handleOAuthCallback = async (req: express.Request, res: express.Response) => {
-  const code = req.query.code as string;
-  const origin = getOrigin(req);
-  const redirectUri = `${origin}/auth/callback`;
+  const code = typeof req.query.code === 'string' ? req.query.code.trim() : '';
+  const state = typeof req.query.state === 'string' ? req.query.state.trim() : '';
+  const oauthError = typeof req.query.error === 'string' ? req.query.error : undefined;
 
-  // Check session token from cookie
-  const token = req.cookies[SESSION_COOKIE_NAME];
-  const session = token ? db.getSession(token) : null;
-  const user = session ? db.getUser(session.userId) : null;
+  const trustedOrigin = GitHubService.getTrustedOrigin(req);
+  const sessionToken = 
+    req.cookies[SESSION_COOKIE_NAME] || 
+    req.headers.authorization?.replace(/^Bearer\s+/i, '');
 
-  if (code && user) {
-    const exchange = await GitHubService.exchangeCodeForToken(code, redirectUri);
-    if (exchange) {
-      db.setGithubToken(user.id, exchange.token, exchange.username);
-    }
+  // 1. Handle GitHub user cancellation or error
+  if (oauthError) {
+    return res.status(400).send(renderOAuthErrorHtml(trustedOrigin, 'GitHub authorization was denied or canceled.'));
   }
 
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>Connecting GitHub...</title>
-      </head>
-      <body style="font-family: sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
-        <div style="text-align: center; padding: 24px; background: #1e293b; border-radius: 12px; border: 1px solid #334155;">
-          <h2 style="margin: 0 0 12px; color: #38bdf8;">GitHub Connected</h2>
-          <p style="margin: 0 0 16px; color: #94a3b8;">Authentication successful. Closing this window...</p>
-        </div>
-        <script>
-          if (window.opener) {
-            window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS' }, '*');
-            setTimeout(() => window.close(), 600);
-          } else {
-            window.location.href = '/';
-          }
-        </script>
-      </body>
-    </html>
-  `);
+  // 2. Reject missing code
+  if (!code) {
+    return res.status(400).send(renderOAuthErrorHtml(trustedOrigin, 'Missing authorization code from GitHub callback.'));
+  }
+
+  // 3. Reject missing state parameter
+  if (!state) {
+    return res.status(400).send(renderOAuthErrorHtml(trustedOrigin, 'Missing OAuth state parameter. Request rejected to prevent CSRF.'));
+  }
+
+  // 4. Reject if no active browser session
+  if (!sessionToken) {
+    return res.status(401).send(renderOAuthErrorHtml(trustedOrigin, 'No active browser session detected. Please log in before connecting GitHub.'));
+  }
+
+  // 5. Strictly validate and single-use consume state BEFORE token exchange
+  const stateValidation = GitHubService.validateAndConsumeOAuthState(state, sessionToken);
+  if (!stateValidation.valid || !stateValidation.record) {
+    return res.status(403).send(renderOAuthErrorHtml(trustedOrigin, stateValidation.error || 'Invalid, expired, or session-mismatched OAuth state.'));
+  }
+
+  const { userId, redirectUri } = stateValidation.record;
+  const user = db.getUser(userId);
+  if (!user) {
+    return res.status(404).send(renderOAuthErrorHtml(trustedOrigin, 'Authenticated user profile not found.'));
+  }
+
+  // 6. Exchange code for access token using the exact registered redirectUri from authorization
+  const exchange = await GitHubService.exchangeCodeForToken(code, redirectUri);
+  if (!exchange || !exchange.token || !exchange.username) {
+    return res.status(502).send(renderOAuthErrorHtml(trustedOrigin, 'Failed to complete authentication with GitHub. Code may be invalid or expired.'));
+  }
+
+  // 7. Securely store encrypted token with authentic username
+  db.setGithubToken(user.id, exchange.token, exchange.username);
+
+  // 8. Render success page with restricted postMessage target origin (NO wildcard '*')
+  return res.send(renderOAuthSuccessHtml(trustedOrigin, exchange.username));
 };
 
 app.get('/auth/callback', handleOAuthCallback);
 app.get('/auth/callback/', handleOAuthCallback);
 
 app.post('/api/auth/github/connect-pat', requireAuth, async (req, res) => {
-  const { token, username } = req.body;
-  if (!token) return res.status(400).json({ error: 'Token is required' });
-
-  const validUsername = await GitHubService.validateToken(token);
-  if (!validUsername && !token.startsWith('ghp_demo')) {
-    return res.status(400).json({ error: 'Invalid GitHub token or insufficient scopes (repo required)' });
+  const { token } = req.body;
+  if (!token || typeof token !== 'string' || !token.trim()) {
+    return res.status(400).json({ error: 'Personal Access Token is required' });
   }
 
-  const finalUsername = username || validUsername || 'squadforge-dev';
-  db.setGithubToken(req.user!.id, token, finalUsername);
-  res.json({ success: true, username: finalUsername });
+  const cleanToken = token.trim();
+  const validUsername = await GitHubService.validateToken(cleanToken);
+  if (!validUsername) {
+    return res.status(400).json({ error: 'Invalid GitHub token or insufficient scopes (repo scope required)' });
+  }
+
+  // Real verified username from GitHub API
+  db.setGithubToken(req.user!.id, cleanToken, validUsername);
+  res.json({ success: true, username: validUsername });
 });
 
 app.post('/api/auth/github/disconnect', requireAuth, (req, res) => {

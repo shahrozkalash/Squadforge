@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext.js';
-import { X, Github, Check, AlertCircle, Key, LogIn, Lock } from 'lucide-react';
+import { X, Github, Check, AlertCircle, Key, LogIn, Lock, ShieldCheck } from 'lucide-react';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -36,12 +36,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
     } else {
       setPatStatus('Failed to validate token. Ensure scope "repo" is granted.');
     }
-    setIsSubmitting(false);
-  };
-
-  const handleUseDemoGitHub = async () => {
-    setIsSubmitting(true);
-    await connectGitHubPAT('ghp_demo_valid_token_squadforge_2026', 'squadforge-demo-dev');
     setIsSubmitting(false);
   };
 
@@ -202,14 +196,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                   )}
                 </form>
 
-                <div className="pt-2">
-                  <button
-                    type="button"
-                    onClick={handleUseDemoGitHub}
-                    className="w-full py-2 text-xs font-mono text-cyan-400 bg-cyan-950/30 border border-cyan-800/40 rounded-lg hover:bg-cyan-900/40 transition-colors"
-                  >
-                    1-Click Connect Demo GitHub Account (@squadforge-demo-dev)
-                  </button>
+                <div className="pt-2 text-[11px] text-neutral-500 font-mono flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  <span>Tokens are verified directly against GitHub and stored encrypted at rest.</span>
                 </div>
               </div>
             )}
