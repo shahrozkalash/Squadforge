@@ -1,4 +1,6 @@
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
@@ -1236,19 +1238,28 @@ app.put('/api/builds/:id/budget', requireAuth, (req, res) => {
   res.json({ success: true, build });
 });
 
-// Mount Vite in dev mode
+// Mount Vite in dev mode or serve static bundle in production
 async function startServer() {
   const server = http.createServer(app);
 
-  const vite = await createViteServer({
-    server: { 
-      middlewareMode: true,
-      hmr: { server }
-    },
-    appType: 'spa',
-  });
+  const isProd = process.env.NODE_ENV === 'production';
+  const distPath = path.resolve(process.cwd(), 'dist');
 
-  app.use(vite.middlewares);
+  if (isProd && fs.existsSync(distPath)) {
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.resolve(distPath, 'index.html'));
+    });
+  } else {
+    const vite = await createViteServer({
+      server: { 
+        middlewareMode: true,
+        hmr: { server }
+      },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  }
 
   server.on('error', (err: any) => {
     if (err.code === 'EADDRINUSE') {
