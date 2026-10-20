@@ -90,6 +90,21 @@ export class PersistentDatabase {
   }
 
   /**
+   * Health and readiness probe for SQLite database storage
+   */
+  public checkHealth(): { healthy: boolean; error?: string } {
+    try {
+      const row = this.dbManager.db.prepare('SELECT 1 as alive').get() as { alive: number } | undefined;
+      if (!row || row.alive !== 1) {
+        return { healthy: false, error: 'Database ping returned invalid result' };
+      }
+      return { healthy: true };
+    } catch (err: any) {
+      return { healthy: false, error: err?.message || 'Database unavailable' };
+    }
+  }
+
+  /**
    * Initializes storage: loads data from SQLite database, or migrates existing .squadforge_data.json
    */
   private initializeStorage() {

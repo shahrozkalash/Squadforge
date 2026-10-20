@@ -88,14 +88,15 @@ docker run -d \
 ---
 
 ## Health Checks & Monitoring
-- **Liveness & Readiness**: `GET /healthz` or `GET /readyz`
-- Returns HTTP 200 with JSON payload:
-\`\`\`json
+- **Liveness Probe**: `GET /healthz` (returns HTTP 200 with process uptime when server is responsive)
+- **Readiness Probe**: `GET /readyz` (returns HTTP 200 when SQLite storage is accessible and writable; returns HTTP 503 if storage is unready or degraded)
+- **Diagnostic Health**: `GET /api/health` (detailed system status, storage verification, and configured model providers)
+```json
 {
-  "status": "healthy",
+  "status": "ready",
   "uptimeSeconds": 1420,
   "timestamp": 1729350000000,
   "environment": "production",
   "storage": "sqlite-persistent"
 }
-\`\`\`
+```

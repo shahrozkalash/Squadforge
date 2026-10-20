@@ -2,7 +2,16 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 
 // Server-side secret key derived or loaded from environment
-const ENCRYPTION_KEY_RAW = process.env.ENCRYPTION_SECRET || 'squadforge-production-master-encryption-key-2026';
+const ENCRYPTION_KEY_RAW = (() => {
+  const secret = process.env.ENCRYPTION_SECRET;
+  if (!secret) {
+    if (process.env.NODE_ENV === 'production') {
+      console.warn('[SECURITY WARNING] ENCRYPTION_SECRET environment variable is missing in production! Please configure a unique, high-entropy 32+ character ENCRYPTION_SECRET.');
+    }
+    return 'squadforge-development-master-encryption-key-2026';
+  }
+  return secret;
+})();
 const KEY = crypto.createHash('sha256').update(ENCRYPTION_KEY_RAW).digest();
 const ALGORITHM = 'aes-256-gcm';
 

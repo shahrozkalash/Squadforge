@@ -60,6 +60,17 @@ function getOrigin(req: express.Request): string {
   return process.env.APP_URL || '';
 }
 
+// Defense-in-depth HTTP security headers
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-XSS-Protection', '0');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  // Allow framing within AI Studio and verified deployment origins
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'self' https://*.google.com https://*.run.app https://ais.dev;");
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
 app.use(cookieParser());
 
@@ -105,13 +116,46 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
 }
 
 // --- SYSTEM HEALTH & READINESS ENDPOINTS ---
-app.get(['/healthz', '/readyz', '/api/health'], (_req, res) => {
+
+// Liveness probe: verifies process is responding
+app.get('/healthz', (_req, res) => {
   res.json({
     status: 'healthy',
     uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: Date.now()
+  });
+});
+
+// Truthful readiness probe: verifies database storage is accessible and writable
+app.get('/readyz', (_req, res) => {
+  const storageHealth = db.checkHealth();
+  if (!storageHealth.healthy) {
+    return res.status(503).json({
+      status: 'unready',
+      error: storageHealth.error || 'Database storage is unavailable',
+      timestamp: Date.now()
+    });
+  }
+  res.json({
+    status: 'ready',
+    uptimeSeconds: Math.floor(process.uptime()),
     timestamp: Date.now(),
     environment: process.env.NODE_ENV || 'development',
-    storage: 'sqlite-persistent',
+    storage: 'sqlite-persistent'
+  });
+});
+
+// Detailed system health diagnostics
+app.get('/api/health', (_req, res) => {
+  const storageHealth = db.checkHealth();
+  const statusCode = storageHealth.healthy ? 200 : 503;
+  res.status(statusCode).json({
+    status: storageHealth.healthy ? 'healthy' : 'degraded',
+    uptimeSeconds: Math.floor(process.uptime()),
+    timestamp: Date.now(),
+    environment: process.env.NODE_ENV || 'development',
+    storage: storageHealth.healthy ? 'sqlite-persistent' : 'error',
+    databaseError: storageHealth.error,
     modelProviders: {
       gemini: Boolean(process.env.GEMINI_API_KEY),
       openrouter: Boolean(process.env.OPENROUTER_API_KEY)
@@ -1353,7 +1397,7 @@ async function startServer() {
     const vite = await createViteServer({
       server: { 
         middlewareMode: true,
-        hmr: { server }
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server }
       },
       appType: 'spa',
     });

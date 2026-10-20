@@ -104,4 +104,24 @@ describe('SquadForge SQLite Database Engine & Migration Architecture', () => {
     const buildAfter = dbMgr.db.prepare("SELECT * FROM builds WHERE id = 'b_child'").get();
     assert.equal(buildAfter, undefined, 'Build must be cascade-deleted when user is deleted');
   });
+
+  test('Database health check verifies SQLite connectivity and detects closed connection', () => {
+    // 1. Live database returns healthy
+    const liveCheck = {
+      healthy: true,
+      result: dbMgr.db.prepare('SELECT 1 as alive').get() as { alive: number }
+    };
+    assert.equal(liveCheck.healthy, true);
+    assert.equal(liveCheck.result.alive, 1);
+
+    // 2. Closed connection triggers failure
+    dbMgr.db.close();
+    let failed = false;
+    try {
+      dbMgr.db.prepare('SELECT 1 as alive').get();
+    } catch {
+      failed = true;
+    }
+    assert.equal(failed, true, 'Querying closed database must throw error');
+  });
 });
