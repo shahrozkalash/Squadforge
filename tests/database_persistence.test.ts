@@ -1,6 +1,7 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseManager } from '../server/db/database.js';
+import { PersistentDatabase } from '../server/store.js';
 
 describe('SquadForge SQLite Database Engine & Migration Architecture', () => {
   let dbMgr: DatabaseManager;
@@ -123,5 +124,27 @@ describe('SquadForge SQLite Database Engine & Migration Architecture', () => {
       failed = true;
     }
     assert.equal(failed, true, 'Querying closed database must throw error');
+  });
+
+  test('In production mode, storage initialization failure throws fatal error rather than silent in-memory fallback', () => {
+    const origNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      const brokenDbManager: any = {
+        db: {
+          prepare: () => {
+            throw new Error('Disk I/O error or permission denied');
+          }
+        }
+      };
+
+      assert.throws(() => {
+        const store = Object.create(PersistentDatabase.prototype);
+        store.dbManager = brokenDbManager;
+        (store as any).initializeStorage();
+      }, /Production database initialization failed/);
+    } finally {
+      process.env.NODE_ENV = origNodeEnv;
+    }
   });
 });

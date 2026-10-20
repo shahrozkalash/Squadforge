@@ -171,8 +171,10 @@ describe('SquadForge Critical Security: GitHub OAuth & API Integrity', () => {
 
     test('11. Trusted origin validation rejects unverified / spoofed Host headers', () => {
       const origAppUrl = process.env.APP_URL;
+      const origNodeEnv = process.env.NODE_ENV;
       try {
         delete process.env.APP_URL;
+        process.env.NODE_ENV = 'test';
 
         const fakeReq1: any = {
           headers: { host: 'evil-phishing-site.com' },
@@ -188,9 +190,31 @@ describe('SquadForge Critical Security: GitHub OAuth & API Integrity', () => {
         };
         const originValid = GitHubService.getTrustedOrigin(validReq);
         assert.equal(originValid, 'http://localhost:3000');
+
+        // Production Mode: Explicit APP_URL enforcement
+        process.env.NODE_ENV = 'production';
+        process.env.APP_URL = 'https://squadforge.production.dev';
+        const prodConfigured = GitHubService.getTrustedOrigin(fakeReq1);
+        assert.equal(prodConfigured, 'https://squadforge.production.dev');
+
+        // Production Mode: Without APP_URL, request headers are NEVER trusted
+        delete process.env.APP_URL;
+        const prodUnconfigured = GitHubService.getTrustedOrigin({
+          headers: { host: 'attacker-app.run.app' },
+          protocol: 'https'
+        } as any);
+        assert.equal(prodUnconfigured.includes('attacker-app.run.app'), false);
+        assert.match(prodUnconfigured, /^http:\/\/127\.0\.0\.1:/);
       } finally {
         if (origAppUrl !== undefined) {
           process.env.APP_URL = origAppUrl;
+        } else {
+          delete process.env.APP_URL;
+        }
+        if (origNodeEnv !== undefined) {
+          process.env.NODE_ENV = origNodeEnv;
+        } else {
+          delete process.env.NODE_ENV;
         }
       }
     });

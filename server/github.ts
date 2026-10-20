@@ -78,10 +78,15 @@ export class GitHubService {
   }
 
   /**
-   * Validates and resolves a trusted application origin.
-   * Never trusts arbitrary request headers or unverified forwarded hosts.
+   * Validates and resolves a trusted application origin for OAuth redirects and callbacks.
+   * In production, strictly requires a validated, explicitly configured APP_URL and rejects
+   * relying on incoming request headers or broad host wildcard patterns.
    */
   static getTrustedOrigin(req: express.Request): string {
+    const isProduction = process.env.NODE_ENV === 'production';
+    const fallbackPort = process.env.PORT || '3000';
+    const defaultLocalOrigin = `http://127.0.0.1:${fallbackPort}`;
+
     // 1. Prioritize configured application URL if present and valid
     const configuredAppUrl = process.env.APP_URL?.trim();
     if (configuredAppUrl) {
@@ -90,34 +95,40 @@ export class GitHubService {
         if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
           return `${parsed.protocol}//${parsed.host}`;
         }
-      } catch (_) {
-        // Invalid configured URL format
+        console.error(`[SECURITY ERROR] Configured APP_URL '${configuredAppUrl}' has an invalid protocol. Must be http:// or https://.`);
+      } catch (err) {
+        console.error(`[SECURITY ERROR] Invalid APP_URL format '${configuredAppUrl}':`, err);
       }
     }
 
-    // 2. Validate request host against strict whitelist patterns
+    // 2. Production strict mode: Refuse to trust request headers or broad wildcard host patterns
+    if (isProduction) {
+      console.warn(
+        '[SECURITY WARNING] APP_URL is not configured in production environment! ' +
+        'Relying on request headers is disabled in production to prevent host header poisoning. ' +
+        'Falling back to loopback origin. Configure APP_URL (e.g., APP_URL=https://squadforge.example.com).'
+      );
+      return defaultLocalOrigin;
+    }
+
+    // 3. Development / Test environments only: Allow strictly verified local and preview hosts
     const rawHost = (req.headers['x-forwarded-host'] || req.headers.host || '') as string;
     const host = rawHost.split(',')[0].trim().toLowerCase();
 
-    const isAllowedHost = 
-      /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$/.test(host) ||
+    const isLocalHost = /^(localhost|127\.0\.0\.1|0\.0\.0\.0)(:\d+)?$/.test(host);
+    const isPreviewHost = 
       /^([a-z0-9-]+\.)*run\.app(:\d+)?$/.test(host) ||
       /^([a-z0-9-]+\.)*google\.com(:\d+)?$/.test(host) ||
       /^([a-z0-9-]+\.)*googleusercontent\.com(:\d+)?$/.test(host);
 
-    if (isAllowedHost) {
-      const forwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'https') as string;
-      const isHttps = (forwardedProto.includes('https') || process.env.NODE_ENV === 'production') && 
-        !host.startsWith('localhost') && 
-        !host.startsWith('127.0.0.1') &&
-        !host.startsWith('0.0.0.0');
+    if (isLocalHost || isPreviewHost) {
+      const forwardedProto = (req.headers['x-forwarded-proto'] || req.protocol || 'http') as string;
+      const isHttps = forwardedProto.includes('https') && !isLocalHost;
       const proto = isHttps ? 'https' : 'http';
       return `${proto}://${host}`;
     }
 
-    // Safe fallback to localhost on port 3000
-    const fallbackPort = process.env.PORT || '3000';
-    return `http://127.0.0.1:${fallbackPort}`;
+    return defaultLocalOrigin;
   }
 
   /**

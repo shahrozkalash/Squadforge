@@ -41,17 +41,17 @@ Required for real AI work (at least one provider):
 - `OPENROUTER_API_KEY`: Optional fallback model provider.
 
 Essential production settings:
-- `ENCRYPTION_SECRET`: Set to a strong 32+ character random string. If unset, the server falls back to a built-in default that is not safe for production.
-- `NODE_ENV`: Set to `production`.
-- `APP_URL`: Set public URL (e.g. `https://squadforge.example.com`). Used for OAuth redirects and trusted-origin checks.
+- `ENCRYPTION_SECRET`: Set to a strong 32+ character random string. If unset or default in production, the server emits a critical security alert.
+- `NODE_ENV`: Set to `production`. When `NODE_ENV=production`, SquadForge halts startup immediately if SQLite database initialization fails, preventing silent volatile in-memory fallback.
+- `APP_URL`: Set the canonical public URL (e.g. `https://squadforge.example.com`). In production, SquadForge strictly requires a validated `APP_URL` for OAuth redirects and rejects unverified incoming host headers or wildcard domain patterns to protect against host header poisoning.
 
 Optional settings:
 - `PORT`: Server port (default `3000`).
-- `SQLITE_DB_PATH`: Storage location for the database (default `./squadforge.db`, e.g. `/var/lib/squadforge/squadforge.db`).
-- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`: GitHub OAuth app credentials for Connect GitHub and auto-push.
-- `RESEND_API_KEY`, or `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM`: Email delivery for password-reset codes — configure one option.
+- `SQLITE_DB_PATH`: Storage location for the persistent SQLite database (default `./squadforge.db`, or mounted container volume e.g. `/app/data/squadforge.db`).
+- `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET`: GitHub OAuth application credentials.
+- `RESEND_API_KEY`, or `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` / `SMTP_FROM`: Email delivery credentials for password-reset OTP dispatch.
 
-See `.env.example` for the full commented template — it lists every variable the server reads.
+See `.env.example` for the template.
 
 ### 3. Build & Run
 \`\`\`bash

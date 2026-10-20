@@ -72,6 +72,9 @@ export class PersistentDatabase {
   // Active SSE listeners for real-time updates
   private sseListeners: ClientSSEListener[] = [];
 
+  // Tracks persistent storage health error state
+  private storageError: string | null = null;
+
   constructor(dbPath?: string) {
     this.dbManager = DatabaseManager.getInstance(dbPath);
     this.initializeStorage();
@@ -93,6 +96,9 @@ export class PersistentDatabase {
    * Health and readiness probe for SQLite database storage
    */
   public checkHealth(): { healthy: boolean; error?: string } {
+    if (this.storageError) {
+      return { healthy: false, error: this.storageError };
+    }
     try {
       const row = this.dbManager.db.prepare('SELECT 1 as alive').get() as { alive: number } | undefined;
       if (!row || row.alive !== 1) {
@@ -122,8 +128,13 @@ export class PersistentDatabase {
 
       // Load all records from SQLite into memory cache
       this.loadFromSqlite();
-    } catch (err) {
-      console.warn('Storage initialization fallback to memory:', err);
+    } catch (err: any) {
+      this.storageError = err?.message || 'Failed to initialize SQLite database storage';
+      if (process.env.NODE_ENV === 'production') {
+        console.error('FATAL: SQLite storage failed to initialize in production environment. Halting startup to prevent data loss:', err);
+        throw new Error(`Production database initialization failed: ${err?.message || err}`);
+      }
+      console.warn('Storage initialization fallback to memory (development only):', err);
     }
   }
 
