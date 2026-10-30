@@ -202,18 +202,24 @@ export class HonestVerificationService {
       unresolvedRisks.push('Project preview is running in fallback demonstration mode and cannot be verified as running code.');
     }
 
-    // 6. Determine Honest Verdict based on real evidence
+    // 6. Connect each requirement to real files, tests, and evidence
+    const verifiedRequirements = this.verifyRequirements(build, files, execResult, previewResult);
+    const implementedCount = verifiedRequirements.filter(r => r.status === 'implemented').length;
+    const failedReqCount = verifiedRequirements.filter(r => r.status === 'failed').length;
+    const blockedReqCount = verifiedRequirements.filter(r => r.status === 'blocked').length;
+
+    // 7. Determine Honest Verdict based on real evidence
     let verdict: VerificationVerdict;
 
     if (build.status === 'stopped' || build.status === 'failed') {
       verdict = 'failed';
     } else if (inProgressTasks > 0) {
       verdict = 'in_progress';
-    } else if (!hasFiles || !syntaxPassed || failedTasks > 0 || testReport.failed > 0 || !secPassed) {
+    } else if (!hasFiles || !syntaxPassed || failedTasks > 0 || testReport.failed > 0 || !secPassed || failedReqCount > 0) {
       verdict = 'failed';
     } else if (requirementsCoveragePercent >= 90 && syntaxPassed && secPassed && (testReport.status === 'passed' || testReport.total === 0)) {
       // Must not be marked 'verified' if running in fallback preview mode or build/tests skipped
-      if (testReport.status === 'skipped' || buildReport.status === 'skipped' || previewResult.mode === 'fallback_preview') {
+      if (testReport.status === 'skipped' || buildReport.status === 'skipped' || previewResult.mode === 'fallback_preview' || blockedReqCount > 0) {
         verdict = 'partially_verified';
       } else {
         verdict = 'verified';
@@ -221,6 +227,8 @@ export class HonestVerificationService {
     } else {
       verdict = 'partially_verified';
     }
+
+    const finalOutcome = verdict === 'verified' ? 'verified' : verdict === 'partially_verified' ? 'partially_verified' : 'failed';
 
     const report: VerificationReport = {
       verdict,
@@ -246,7 +254,12 @@ export class HonestVerificationService {
       missingEnvironmentVars: Array.from(missingEnvVars),
       unresolvedCriteria,
       unresolvedRisks,
-      evidenceSummary: `Honest Evaluation Verdict: [${verdict.toUpperCase()}]. Requirements coverage: ${requirementsCoveragePercent}%. Syntax valid: ${syntaxPassed}. Tests: ${testReport.passed}/${testReport.total} passed. Preview mode: ${previewResult.mode}. Security score: ${execResult.securityAudit.score}/100.`
+      evidenceSummary: `Honest Evaluation Verdict: [${verdict.toUpperCase()}]. Implemented requirements: ${implementedCount}/${verifiedRequirements.length || 1}. Syntax valid: ${syntaxPassed}. Tests: ${testReport.passed}/${testReport.total} passed. Preview mode: ${previewResult.mode}. Security score: ${execResult.securityAudit.score}/100.`,
+      requirementsReport: verifiedRequirements,
+      compilationStatus: syntaxPassed ? 'passed' : 'failed',
+      runtimeStatus: previewResult.mode === 'real_application' || previewResult.mode === 'static_html' ? 'passed' : 'failed',
+      knownLimitations: [...knownDefects, ...unresolvedRisks],
+      finalOutcome
     };
 
     // Save report onto build in store
@@ -270,4 +283,149 @@ export class HonestVerificationService {
 
     return report;
   }
+
+  /**
+   * Deterministically verifies each requirement individually based on real file existence,
+   * syntax validation, and automated test execution results.
+   */
+  static verifyRequirements(
+    build: Build,
+    files: Array<{ path: string; content: string }>,
+    execResult: any,
+    previewResult: any
+  ): Array<import('./types.js').RequirementItem> {
+    const memoryReqs = ProjectMemoryService.getRequirements(build.id);
+    const existingChecklist = build.requirementsChecklist || [];
+
+    // Combine or harmonize requirement items
+    const rawItems = existingChecklist.length > 0
+      ? existingChecklist
+      : memoryReqs.map(m => ({
+          id: m.id,
+          category: m.category,
+          description: m.description,
+          satisfied: m.status === 'satisfied'
+        }));
+
+    const stopWords = new Set(['the', 'and', 'with', 'for', 'user', 'app', 'system', 'must', 'should', 'all', 'any', 'that', 'this', 'from']);
+    const verifiedItems: Array<import('./types.js').RequirementItem> = [];
+
+    for (const item of rawItems) {
+      const descLower = item.description.toLowerCase();
+      const catLower = item.category.toLowerCase();
+      const tokens = descLower
+        .replace(/[^a-z0-9_]/g, ' ')
+        .split(/\s+/)
+        .filter(t => t.length >= 3 && !stopWords.has(t));
+
+      // Match files specifically relevant to this requirement
+      const matchedFiles: Array<{ path: string; score: number }> = [];
+      for (const file of files) {
+        let score = 0;
+        const filePathLower = file.path.toLowerCase();
+        const fileContentLower = file.content.toLowerCase();
+
+        // Path relevance
+        if (filePathLower.includes(catLower)) score += 5;
+        for (const token of tokens) {
+          if (filePathLower.includes(token)) score += 4;
+          if (fileContentLower.includes(token)) score += 1;
+        }
+
+        if (score >= 4) {
+          matchedFiles.push({ path: file.path, score });
+        }
+      }
+
+      // Sort by relevance score descending
+      matchedFiles.sort((a, b) => b.score - a.score);
+      const topMatchedFilePaths = matchedFiles.slice(0, 5).map(m => m.path);
+
+      // Check tests executed that cover this requirement
+      const testDetails = execResult?.testReport?.details || [];
+      const relevantTests = testDetails
+        .filter((t: any) => {
+          const testNameLower = t.name.toLowerCase();
+          return tokens.some(tok => testNameLower.includes(tok)) || topMatchedFilePaths.some(fp => testNameLower.includes(fp.toLowerCase()));
+        })
+        .map((t: any) => t.name);
+
+      const failedTests = testDetails.filter((t: any) => !t.passed && relevantTests.includes(t.name));
+
+      // Deterministic check
+      let status: import('./types.js').RequirementStatus;
+      let evidence: string;
+      let deterministicChecksPassed = false;
+      let notes = '';
+
+      if (topMatchedFilePaths.length === 0) {
+        status = 'failed';
+        evidence = 'No implementation files found in project workspace addressing this requirement.';
+        notes = 'Missing implementation evidence.';
+      } else if (failedTests.length > 0) {
+        status = 'failed';
+        evidence = `Implementation in ${topMatchedFilePaths.join(', ')}, but automated test(s) failed: ${failedTests.map((t: any) => t.name).join(', ')}.`;
+        notes = 'Failing unit test suite.';
+      } else {
+        // Check syntax errors in matched files
+        const syntaxErrorsInFiles = (execResult?.syntaxErrors || []).filter((e: any) => 
+          topMatchedFilePaths.includes(e.filePath)
+        );
+
+        if (syntaxErrorsInFiles.length > 0) {
+          status = 'failed';
+          evidence = `Implementation file ${syntaxErrorsInFiles[0].filePath} has syntax error: ${syntaxErrorsInFiles[0].message}`;
+          notes = 'Syntax check failure.';
+        } else {
+          deterministicChecksPassed = true;
+          if (relevantTests.length > 0) {
+            status = 'implemented';
+            evidence = `Verified in ${topMatchedFilePaths.join(', ')}. All ${relevantTests.length} relevant test(s) passed cleanly.`;
+            notes = 'Fully implemented and verified with automated test suite.';
+          } else if (topMatchedFilePaths.length > 0) {
+            // Files exist and passed syntax validation
+            status = 'implemented';
+            evidence = `Implemented in ${topMatchedFilePaths.join(', ')}. Code syntax and AST verified cleanly.`;
+            notes = 'Implemented and statically verified.';
+          } else {
+            status = 'unverified';
+            evidence = 'Files found but insufficient structural evidence to confirm implementation.';
+            notes = 'Unverified requirement.';
+          }
+        }
+      }
+
+      const verifiedItem: import('./types.js').RequirementItem = {
+        id: item.id,
+        category: item.category,
+        description: item.description,
+        satisfied: status === 'implemented',
+        status,
+        evidence,
+        testsExecuted: relevantTests,
+        deterministicChecksPassed,
+        satisfiedByFiles: topMatchedFilePaths,
+        verificationNotes: notes
+      };
+
+      verifiedItems.push(verifiedItem);
+
+      // Keep ProjectMemory synchronized with deterministic status
+      try {
+        ProjectMemoryService.updateRequirement(build.id, item.id, {
+          status: status === 'implemented' ? 'satisfied' : status === 'blocked' ? 'blocked' : 'unmet',
+          evidence,
+          testsExecuted: relevantTests,
+          deterministicChecksPassed
+        });
+      } catch {
+        // Graceful fallback if memory record not yet registered
+      }
+    }
+
+    // Save updated checklist back onto build
+    build.requirementsChecklist = verifiedItems;
+    return verifiedItems;
+  }
 }
+

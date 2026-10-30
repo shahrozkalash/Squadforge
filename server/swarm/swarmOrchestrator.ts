@@ -1239,21 +1239,63 @@ Output ONLY JSON in this exact schema:
       return;
     }
 
-    // 7. Update Requirements Checklist satisfaction
-    if (build.requirementsChecklist) {
-      for (const req of build.requirementsChecklist) {
-        req.satisfied = true;
-        req.satisfiedByFiles = allFiles.slice(0, 3).map(f => f.path);
-        req.verificationNotes = 'Verified by autonomous Verifier Model and Sandbox test suite';
+    // 7. Deterministic Verification & Requirements Evidence Evaluation
+    const verificationReport = HonestVerificationService.evaluateProjectReadiness(buildId);
+
+    // Reject completion if critical requirements failed or are blocked
+    const failedRequirements = (verificationReport.requirementsReport || []).filter(r => 
+      r.status === 'failed' || r.status === 'blocked'
+    );
+
+    if (failedRequirements.length > 0) {
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'verifier_rejected',
+        details: `Completion rejected: ${failedRequirements.length} requirement(s) failed deterministic verification.`
+      });
+
+      if (currentAttempt >= maxAttempts) {
+        build.status = 'failed';
+        build.completedAt = Date.now();
+        build.failureReason = `Verification failed: ${failedRequirements.length} requirement(s) failed verification: ${failedRequirements.map(r => r.description.slice(0, 40)).join('; ')}`;
+        build.error = build.failureReason;
+        db.saveBuild(build);
+        control.stopRequested = true;
+        return;
       }
+
+      // Spawn targeted fix tasks for failed requirements
+      for (const req of failedRequirements) {
+        TaskManager.createNewTask(buildId, {
+          title: `Fix Requirement: ${req.description.slice(0, 50)}`,
+          description: `Deterministic verification failed for: ${req.description}. Evidence: ${req.evidence || 'Missing'}`,
+          filePaths: req.satisfiedByFiles && req.satisfiedByFiles.length > 0 ? req.satisfiedByFiles : ['src/App.tsx'],
+          priority: 1,
+          isFixTask: true,
+          assignedRole: 'debugging_specialist',
+          maxRetries: this.MAX_TASK_RETRIES
+        });
+      }
+
+      build.status = 'running';
+      db.saveBuild(build);
+      return;
     }
 
-    // 8. Generate Interactive Live Preview Document
+    // 8. Generate Interactive Live Preview Document & persist preview metadata
     try {
       const preview = PreviewGenerator.generateInteractivePreview(build.idea, allFiles, build.projectType || 'fullstack');
       build.livePreviewHtml = preview.html;
-    } catch (prevErr) {
+      build.previewMode = preview.mode;
+      build.previewDiagnostic = preview.diagnosticInfo;
+      build.previewRuntimeErrors = preview.runtimeErrors;
+      build.previewEntryPoint = preview.entryPoint;
+    } catch (prevErr: any) {
       console.warn('Failed to compile preview bundle:', prevErr);
+      build.previewMode = 'fallback_preview';
+      build.previewDiagnostic = prevErr?.message || 'Preview generation failed';
     }
 
     // GENUINE SUCCESSFUL APPROVAL

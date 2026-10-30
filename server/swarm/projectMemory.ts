@@ -217,6 +217,18 @@ export class ProjectMemoryService {
   }
 
   /**
+   * Retrieves all requirements for the project
+   */
+  static getRequirements(buildId: string, userId?: string): any[] {
+    const memory = db.getProjectMemory(buildId);
+    if (memory && memory.requirements && memory.requirements.length > 0) {
+      return memory.requirements;
+    }
+    const build = db.getBuild(buildId);
+    return build?.requirementsChecklist || [];
+  }
+
+  /**
    * Updates requirement satisfaction status based on actual verified implementation
    */
   static updateRequirement(
@@ -225,7 +237,11 @@ export class ProjectMemoryService {
     reqId: string,
     satisfied: boolean,
     files?: string[],
-    notes?: string
+    notes?: string,
+    status?: 'implemented' | 'partially_implemented' | 'unverified' | 'blocked' | 'failed' | 'satisfied' | 'pending',
+    evidence?: string,
+    testsExecuted?: Array<{ name: string; passed: boolean; message?: string }>,
+    deterministicChecksPassed?: boolean
   ): boolean {
     const memory = this.getOrInitializeMemory(buildId, userId);
     if (!memory) return false;
@@ -234,9 +250,12 @@ export class ProjectMemoryService {
     if (!req) return false;
 
     req.satisfied = satisfied;
-    req.status = satisfied ? 'satisfied' : 'pending';
+    req.status = status || (satisfied ? 'satisfied' : 'unmet');
     if (files) req.satisfiedByFiles = files;
     if (notes) req.verificationNotes = notes;
+    if (evidence) req.evidence = evidence;
+    if (testsExecuted) req.testsExecuted = testsExecuted;
+    if (deterministicChecksPassed !== undefined) req.deterministicChecksPassed = deterministicChecksPassed;
 
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);
@@ -441,17 +460,49 @@ export class ProjectMemoryService {
       sections.push(`ARCHITECTURE CONSTRAINTS:\n${adrLines.join('\n')}`);
     }
 
-    // 3. Relevant Requirements matching target file paths or category
-    const relevantReqs = memory.requirements.filter(r => {
-      if (r.satisfied && !task.isFixTask) return false;
-      if (r.satisfiedByFiles?.some(f => task.filePaths.includes(f))) return true;
-      if (task.filePaths.some(p => p.toLowerCase().includes(r.category || ''))) return true;
-      return true;
-    }).slice(0, 4);
+    // 3. Relevant Requirements matching target file paths, keywords, or priority
+    const taskTokens = `${task.title} ${task.description} ${task.filePaths.join(' ')}`
+      .toLowerCase()
+      .split(/[^a-z0-9_]+/)
+      .filter(w => w.length > 2);
+
+    const scoredReqs = memory.requirements.map(req => {
+      let score = 0;
+      // High bonus if target file explicitly satisfies this requirement
+      if (req.satisfiedByFiles?.some(f => task.filePaths.includes(f))) {
+        score += 20;
+      }
+      // Category match
+      if (req.category && taskTokens.includes(req.category.toLowerCase())) {
+        score += 10;
+      }
+      // Keyword overlap
+      const reqText = `${req.title || ''} ${req.description}`.toLowerCase();
+      for (const token of taskTokens) {
+        if (reqText.includes(token)) {
+          score += 3;
+        }
+      }
+      // Unsatisfied requirements get priority boost so engineers know unfinished goals
+      if (!req.satisfied) {
+        score += 5;
+      }
+      // Priority weighting
+      if (req.priority === 'must_have') score += 4;
+      else if (req.priority === 'should_have') score += 2;
+
+      return { req, score };
+    });
+
+    // Sort by relevance score descending
+    scoredReqs.sort((a, b) => b.score - a.score);
+
+    // Pick top relevant requirements
+    const relevantReqs = scoredReqs.slice(0, 4).map(s => s.req);
 
     if (relevantReqs.length > 0) {
       const reqLines = relevantReqs.map(r => 
-        `- [${r.priority.toUpperCase()}] ${r.title || r.id}: ${r.description} (${r.satisfied ? 'SATISFIED' : 'PENDING'})`
+        `- [${(r.priority || 'core').toUpperCase()}] ${r.title || r.id}: ${r.description} (${r.satisfied ? 'SATISFIED' : 'PENDING'})`
       );
       sections.push(`TARGET REQUIREMENTS:\n${reqLines.join('\n')}`);
     }

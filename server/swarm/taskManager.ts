@@ -14,22 +14,30 @@ export class TaskManager {
 
     for (const task of tasks) {
       if ((task.status === 'in_progress' || task.status === 'claimed') && task.leaseExpiresAt && task.leaseExpiresAt < now) {
-        db.updateTask(buildId, task.id, {
-          status: 'pending',
-          claimedBy: null,
-          leaseExpiresAt: null,
-          lastError: 'Task lease timed out after 90 seconds'
-        });
+        const retries = (task.retryCount || 0) + 1;
+        const maxRetries = task.maxRetries || 3;
 
-        db.addEvent({
-          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          buildId,
-          timestamp: now,
-          type: 'task_released',
-          taskId: task.id,
-          modelId: task.claimedBy || 'system',
-          details: `Task lease expired (90s timeout). Task returned to open board: "${task.title}"`
-        });
+        if (retries >= maxRetries) {
+          this.failTask(buildId, task.id, task.claimedBy || 'system', `Task lease expired (90s timeout) and retries exhausted (${retries}/${maxRetries})`);
+        } else {
+          db.updateTask(buildId, task.id, {
+            status: 'pending',
+            claimedBy: null,
+            leaseExpiresAt: null,
+            retryCount: retries,
+            lastError: 'Task lease timed out after 90 seconds'
+          });
+
+          db.addEvent({
+            id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            buildId,
+            timestamp: now,
+            type: 'task_released',
+            taskId: task.id,
+            modelId: task.claimedBy || 'system',
+            details: `Task lease expired (90s timeout, attempt ${retries}/${maxRetries}). Returned to open board: "${task.title}"`
+          });
+        }
       }
     }
   }
@@ -56,7 +64,7 @@ export class TaskManager {
    * Atomically claims an open task for a specific model based on its role and strengths.
    * Atomic lock prevents two models from ever claiming the same task.
    */
-  static claimTask(buildId: string, modelId: string, strengths: ModelStrength[], agentRole?: AgentRole): Task | null {
+  static claimTask(buildId: string, modelId: string, strengths: ModelStrength[] = [], agentRole?: AgentRole): Task | null {
     this.cleanExpiredLeases(buildId);
 
     const tasks = db.getTasks(buildId);
@@ -69,106 +77,74 @@ export class TaskManager {
       t.priority === 1 &&
       this.areDependenciesMet(buildId, t)
     );
-    let chosenTask = fixTasks[0];
 
-    // 2. If no fix tasks, find an eligible task matching agent role or strengths
-    if (!chosenTask) {
+    // Collect candidate tasks ordered by suitability
+    const candidateTasks: Task[] = [];
+    if (fixTasks.length > 0) {
+      candidateTasks.push(...fixTasks);
+    } else {
       const eligibleTasks = tasks.filter(t => 
         !t.isPaused && t.status !== 'paused' &&
         (t.status === 'pending' || t.status === 'open' || t.status === 'retrying') &&
         this.areDependenciesMet(buildId, t)
       );
 
-      // Sort by priority (1 is highest)
-      eligibleTasks.sort((a, b) => a.priority - b.priority);
-
-      let bestScore = -1;
-      let bestMatchingTask: Task | null = null;
-
-      for (const task of eligibleTasks) {
+      // Score and sort eligible tasks
+      const scored = eligibleTasks.map(task => {
         let score = 0;
-
-        // Role match gives massive bonus
         if (agentRole && task.assignedRole === agentRole) {
-          score += 20;
+          score += 25;
         }
-
         const text = `${task.title} ${task.description} ${task.filePaths.join(' ')}`.toLowerCase();
         for (const strength of strengths) {
           if (text.includes(strength.toLowerCase())) {
-            score += 3;
+            score += 4;
           }
         }
+        score += (6 - task.priority) * 2;
+        return { task, score };
+      });
 
-        // Higher priority tasks get bonus
-        score += (6 - task.priority);
-
-        if (score > bestScore) {
-          bestScore = score;
-          bestMatchingTask = task;
-        }
-      }
-
-      chosenTask = bestMatchingTask || eligibleTasks[0];
+      scored.sort((a, b) => b.score - a.score);
+      candidateTasks.push(...scored.map(s => s.task));
     }
 
-    // 3. If no pending tasks, look for an unreviewed file (strictly preventing duplicate review tasks)
-    if (!chosenTask) {
-      const allFiles = db.getAllFiles(buildId);
-      const candidateFile = allFiles.find(f => 
-        f.ownerModel !== modelId && 
-        f.history.length < 4 &&
-        !tasks.some(t => t.title.includes(f.path))
-      );
-      if (candidateFile) {
-        const reviewTaskId = `tsk_rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-        chosenTask = {
-          id: reviewTaskId,
-          buildId,
-          title: `Code Review & Verification: ${candidateFile.path}`,
-          description: `Inspect ${candidateFile.path} written by ${candidateFile.ownerModel}. Verify types, edge cases, and patch any omissions.`,
-          filePaths: [candidateFile.path],
-          priority: 4,
-          status: 'pending',
-          claimedBy: null,
-          leaseExpiresAt: null,
-          createdAt: now
-        };
-        db.addTask(buildId, chosenTask);
-      }
-    }
-
-    if (!chosenTask) {
+    if (candidateTasks.length === 0) {
       return null;
     }
 
-    // Atomic claim: update status and lease duration
-    const claimed = db.updateTask(buildId, chosenTask.id, {
-      status: 'in_progress',
-      claimedBy: modelId,
-      leaseExpiresAt: now + this.LEASE_DURATION_MS
-    });
+    // Try claiming candidates atomically until one succeeds
+    for (const candidate of candidateTasks) {
+      const claimed = db.claimTaskAtomic(
+        buildId, 
+        candidate.id, 
+        modelId, 
+        now + this.LEASE_DURATION_MS
+      );
 
-    if (claimed) {
-      db.addEvent({
-        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        buildId,
-        timestamp: now,
-        type: 'task_claimed',
-        taskId: claimed.id,
-        modelId,
-        filePath: claimed.filePaths[0],
-        details: `${modelId} claimed task: "${claimed.title}" (lease: 90s)`
-      });
+      if (claimed) {
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'task_claimed',
+          taskId: claimed.id,
+          modelId,
+          filePath: claimed.filePaths[0],
+          details: `${modelId} atomically claimed task: "${claimed.title}" (lease: 90s)`
+        });
 
-      db.updateModelRun(buildId, modelId, {
-        status: 'working',
-        currentTaskId: claimed.id,
-        lastActionSummary: `Claimed: ${claimed.title}`
-      });
+        db.updateModelRun(buildId, modelId, {
+          status: 'working',
+          currentTaskId: claimed.id,
+          lastActionSummary: `Claimed: ${claimed.title}`
+        });
+
+        return claimed;
+      }
     }
 
-    return claimed;
+    return null;
   }
 
   /**

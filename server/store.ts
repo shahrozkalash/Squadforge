@@ -271,7 +271,11 @@ export class PersistentDatabase {
         architectureDecisions: b.architecture_decisions ? JSON.parse(b.architecture_decisions) : undefined,
         requirementsChecklist: b.requirements_checklist ? JSON.parse(b.requirements_checklist) : undefined,
         revisions: b.revisions ? JSON.parse(b.revisions) : undefined,
-        livePreviewHtml: b.live_preview_html || undefined
+        livePreviewHtml: b.live_preview_html || undefined,
+        previewMode: b.preview_mode || undefined,
+        previewDiagnostic: b.preview_diagnostic || undefined,
+        previewRuntimeErrors: b.preview_runtime_errors ? JSON.parse(b.preview_runtime_errors) : undefined,
+        previewEntryPoint: b.preview_entry_point || undefined
       };
       this.builds.set(build.id, build);
     }
@@ -544,11 +548,11 @@ export class PersistentDatabase {
           enabled_model_ids, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        user.id, user.email, user.name, user.passwordHash || null, user.avatarUrl || null,
+        user.id, user.email, user.name || user.email || 'user', user.passwordHash || null, user.avatarUrl || null,
         user.githubUsername || null, user.githubConnected ? 1 : 0, user.defaultRepo || null,
         user.costLimitPerBuild || 5.0, user.tokenLimitPerBuild || 100000,
         user.routingPreference || 'quality', JSON.stringify(user.enabledModelIds || []),
-        user.createdAt, user.updatedAt
+        user.createdAt, user.updatedAt || user.createdAt
       );
     } catch (err: any) {
       this.handleDatabaseWriteError('saveUser', err);
@@ -1174,16 +1178,24 @@ export class PersistentDatabase {
     this.broadcast(build.id, 'build_updated', build);
 
     // Ensure referenced user exists in users table to satisfy foreign key constraint integrity
-    if (build.userId && !this.users.has(build.userId)) {
-      this.saveUser({
-        id: build.userId,
-        email: `${build.userId}@squadforge.internal`,
-        name: build.userId,
-        githubConnected: false,
-        costLimitPerBuild: 5.0,
-        enabledModelIds: [],
-        createdAt: this.getTime()
-      });
+    if (build.userId) {
+      try {
+        const userExists = this.dbManager.db.prepare('SELECT id FROM users WHERE id = ?').get(build.userId);
+        if (!userExists) {
+          this.saveUser({
+            id: build.userId,
+            email: `${build.userId}@squadforge.internal`,
+            name: build.userId,
+            githubConnected: false,
+            costLimitPerBuild: 5.0,
+            enabledModelIds: [],
+            createdAt: this.getTime(),
+            updatedAt: this.getTime()
+          });
+        }
+      } catch {
+        // Fallback
+      }
     }
 
     try {
@@ -1195,8 +1207,9 @@ export class PersistentDatabase {
           tech_stack, milestones, test_report, security_audit, verification_report,
           verification_feedback, verification_attempts, max_verification_attempts,
           budget_warning_emitted, github_repo, github_branch, github_pr_url,
-          project_type, architecture_decisions, requirements_checklist, revisions, live_preview_html
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          project_type, architecture_decisions, requirements_checklist, revisions, live_preview_html,
+          preview_mode, preview_diagnostic, preview_runtime_errors, preview_entry_point
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         build.id, build.userId, build.idea, build.status, build.createdAt, build.updatedAt,
         build.completedAt || null, JSON.stringify(build.selectedModels || []),
@@ -1215,7 +1228,11 @@ export class PersistentDatabase {
         build.architectureDecisions ? JSON.stringify(build.architectureDecisions) : null,
         build.requirementsChecklist ? JSON.stringify(build.requirementsChecklist) : null,
         build.revisions ? JSON.stringify(build.revisions) : null,
-        build.livePreviewHtml || null
+        build.livePreviewHtml || null,
+        build.previewMode || null,
+        build.previewDiagnostic || null,
+        build.previewRuntimeErrors ? JSON.stringify(build.previewRuntimeErrors) : null,
+        build.previewEntryPoint || null
       );
     } catch (err: any) {
       this.handleDatabaseWriteError('saveBuild', err);
@@ -1308,6 +1325,42 @@ export class PersistentDatabase {
     return updated;
   }
 
+  claimTaskAtomic(buildId: string, taskId: string, modelId: string, leaseExpiresAt: number): Task | null {
+    const list = this.getTasks(buildId);
+    const index = list.findIndex(t => t.id === taskId);
+    if (index === -1) return null;
+    const task = list[index];
+    if (task.isPaused || (task.status !== 'pending' && task.status !== 'open' && task.status !== 'retrying')) {
+      return null;
+    }
+
+    const updated: Task = {
+      ...task,
+      status: 'in_progress',
+      claimedBy: modelId,
+      leaseExpiresAt
+    };
+    list[index] = updated;
+    this.tasks.set(buildId, list);
+    this.broadcast(buildId, 'task_updated', updated);
+
+    try {
+      const res = this.dbManager.db.prepare(`
+        UPDATE tasks SET status = 'in_progress', claimed_by = ?, lease_expires_at = ?
+        WHERE id = ? AND is_paused = 0 AND (status IN ('pending', 'open', 'retrying'))
+      `).run(modelId, leaseExpiresAt, taskId);
+
+      if (res.changes === 0) {
+        // Lost race condition in database
+        return null;
+      }
+    } catch (err: any) {
+      this.handleDatabaseWriteError('claimTaskAtomic', err);
+    }
+
+    return updated;
+  }
+
   // --- Files ---
 
   getFilesMap(buildId: string): Map<string, ProjectFile> {
@@ -1340,8 +1393,8 @@ export class PersistentDatabase {
           lease_owner, lease_expires_at, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        fileId, buildId, file.path, file.content, file.version, file.ownerModel,
-        file.leaseOwner || null, file.leaseExpiresAt || null, file.createdAt, file.updatedAt
+        fileId, buildId, file.path, file.content, file.version, file.ownerModel || 'system',
+        file.leaseOwner || null, file.leaseExpiresAt || null, file.createdAt || Date.now(), file.updatedAt || Date.now()
       );
 
       // Latest version in file_versions

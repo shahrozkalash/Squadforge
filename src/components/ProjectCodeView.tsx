@@ -734,7 +734,7 @@ export const ProjectCodeView: React.FC = () => {
                 <h3 className="text-sm font-bold text-white">Requirements Verification Checklist</h3>
               </div>
               <span className="text-xs font-mono text-neutral-400">
-                {reqList.filter(r => r.status === 'satisfied').length} of {reqList.length} criteria satisfied
+                {reqList.filter(r => r.satisfied || r.status === 'satisfied' || r.status === 'implemented').length} of {reqList.length} criteria satisfied
               </span>
             </div>
 
@@ -742,33 +742,67 @@ export const ProjectCodeView: React.FC = () => {
               <p className="text-xs text-neutral-400 py-4">No requirements checklist initialized.</p>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {reqList.map((req) => (
-                  <div 
-                    key={req.id}
-                    className="p-3 bg-neutral-950 border border-neutral-800 rounded-lg flex items-start gap-3 text-xs"
-                  >
-                    <div className="mt-0.5 shrink-0">
-                      {req.status === 'satisfied' ? (
-                        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                      ) : (
-                        <Clock className="w-4 h-4 text-amber-400" />
-                      )}
-                    </div>
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2">
-                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase bg-neutral-900 text-neutral-400 border border-neutral-800">
-                          {req.category}
-                        </span>
-                        <span className="font-semibold text-neutral-200">
-                          {req.title}
+                {reqList.map((req) => {
+                  const isImplemented = req.status === 'implemented' || req.status === 'satisfied' || req.satisfied;
+                  const isFailed = req.status === 'failed';
+                  const isBlocked = req.status === 'blocked';
+                  const isPartial = req.status === 'partially_implemented';
+
+                  return (
+                    <div 
+                      key={req.id}
+                      className="p-3 bg-neutral-950 border border-neutral-800 rounded-lg space-y-2 text-xs"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono uppercase bg-neutral-900 text-neutral-400 border border-neutral-800">
+                            {req.category}
+                          </span>
+                          <span className="font-semibold text-neutral-200">
+                            {req.title || req.description?.slice(0, 40)}
+                          </span>
+                        </div>
+                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border uppercase shrink-0 ${
+                          isImplemented ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' :
+                          isPartial ? 'bg-amber-500/10 text-amber-300 border-amber-500/30' :
+                          isBlocked ? 'bg-purple-500/10 text-purple-300 border-purple-500/30' :
+                          isFailed ? 'bg-rose-500/10 text-rose-300 border-rose-500/30' :
+                          'bg-neutral-800 text-neutral-400 border-neutral-700'
+                        }`}>
+                          {req.status || (req.satisfied ? 'implemented' : 'unmet')}
                         </span>
                       </div>
+
                       <p className="text-[11px] text-neutral-400 leading-relaxed">
                         {req.description}
                       </p>
+
+                      {req.evidence && (
+                        <div className="p-2 bg-neutral-900/60 rounded border border-neutral-800/80 text-[11px] font-mono text-neutral-300 space-y-0.5">
+                          <span className="text-[10px] uppercase text-neutral-500 font-bold block">Deterministic Evidence:</span>
+                          <span className="text-neutral-300 leading-normal">{req.evidence}</span>
+                        </div>
+                      )}
+
+                      {req.satisfiedByFiles && req.satisfiedByFiles.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1 text-[10px] font-mono text-neutral-400 pt-1">
+                          <span className="text-neutral-500">Files:</span>
+                          {req.satisfiedByFiles.map((fp, idx) => (
+                            <span key={idx} className="px-1 py-0.2 bg-neutral-900 border border-neutral-800 rounded text-neutral-300">
+                              {fp}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+
+                      {req.testsExecuted && req.testsExecuted.length > 0 && (
+                        <div className="text-[10px] font-mono text-emerald-400/90 pt-0.5">
+                          Tests: {req.testsExecuted.join(', ')}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

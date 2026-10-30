@@ -465,6 +465,27 @@ export class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_project_memories_user_id ON project_memories(user_id);
           `);
         }
+      },
+      {
+        id: 5,
+        name: '005_preview_metadata_and_verification',
+        up: (db: DatabaseSync) => {
+          const tableInfo = db.prepare('PRAGMA table_info(builds)').all() as Array<{ name: string }>;
+          const existingCols = new Set(tableInfo.map(c => c.name));
+
+          if (!existingCols.has('preview_mode')) {
+            db.exec('ALTER TABLE builds ADD COLUMN preview_mode TEXT;');
+          }
+          if (!existingCols.has('preview_diagnostic')) {
+            db.exec('ALTER TABLE builds ADD COLUMN preview_diagnostic TEXT;');
+          }
+          if (!existingCols.has('preview_runtime_errors')) {
+            db.exec('ALTER TABLE builds ADD COLUMN preview_runtime_errors TEXT;');
+          }
+          if (!existingCols.has('preview_entry_point')) {
+            db.exec('ALTER TABLE builds ADD COLUMN preview_entry_point TEXT;');
+          }
+        }
       }
     ];
 

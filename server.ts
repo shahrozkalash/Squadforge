@@ -1038,7 +1038,7 @@ app.get('/api/builds/:id/preview', requireAuth, (req, res) => {
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https: data: blob:; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://unpkg.com https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https:; font-src https://fonts.gstatic.com data:; object-src 'none'; base-uri 'self';");
+  res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://fonts.googleapis.com https://esm.sh; style-src 'self' 'unsafe-inline' https:; font-src https://fonts.gstatic.com data:; object-src 'none'; base-uri 'self';");
   res.send(preview.html);
 });
 
@@ -1063,7 +1063,12 @@ app.get('/api/builds/:id/preview-bundle', requireAuth, (req, res) => {
       html: preview.html,
       title: preview.title,
       fileCount: preview.fileCount,
-      generatedAt: preview.generatedAt
+      generatedAt: preview.generatedAt,
+      mode: preview.mode,
+      entryPoint: preview.entryPoint,
+      diagnosticInfo: preview.diagnosticInfo,
+      runtimeErrors: preview.runtimeErrors,
+      supportedDevices: preview.supportedDevices
     }
   });
 });

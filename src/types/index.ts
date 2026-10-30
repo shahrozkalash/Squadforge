@@ -281,6 +281,7 @@ export interface Build {
   previewMode?: 'real_application' | 'static_html' | 'fallback_preview';
   previewDiagnostic?: string;
   previewRuntimeErrors?: string[];
+  previewEntryPoint?: string;
 }
 
 export type ProjectType = 
@@ -306,6 +307,15 @@ export interface ArchitectureDecision {
   timestamp: number;
 }
 
+export type RequirementStatus = 
+  | 'implemented' 
+  | 'partially_implemented' 
+  | 'unverified' 
+  | 'blocked' 
+  | 'failed' 
+  | 'satisfied' 
+  | 'pending';
+
 export interface RequirementItem {
   id: string;
   title?: string;
@@ -313,9 +323,12 @@ export interface RequirementItem {
   description: string;
   priority: 'must_have' | 'should_have' | 'nice_to_have';
   satisfied: boolean;
-  status?: 'satisfied' | 'pending';
+  status?: RequirementStatus;
   satisfiedByFiles?: string[];
+  evidence?: string;
   verificationNotes?: string;
+  testsExecuted?: Array<{ name: string; passed: boolean; message?: string }>;
+  deterministicChecksPassed?: boolean;
 }
 
 export interface ProjectRevision {
@@ -337,6 +350,7 @@ export interface LivePreviewBundle {
   mode?: 'real_application' | 'static_html' | 'fallback_preview';
   diagnosticInfo?: string;
   runtimeErrors?: string[];
+  entryPoint?: string;
 }
 
 export type VerificationVerdict = 
@@ -362,6 +376,33 @@ export interface VerificationReport {
   evaluatedAt: number;
   checks: VerificationCheckItem[];
   requirementsCoveragePercent: number;
+  requirementsReport?: {
+    originalRequirements: string;
+    total: number;
+    implemented: number;
+    partiallyImplemented: number;
+    unverified: number;
+    failed: number;
+    blocked: number;
+    items: RequirementItem[];
+  };
+  compilationStatus?: {
+    syntaxPassed: boolean;
+    typePassed: boolean;
+    previewBundlePassed: boolean;
+    errors?: string[];
+  };
+  runtimeStatus?: {
+    mode: 'real_application' | 'static_html' | 'fallback_preview';
+    entryPoint?: string;
+    interactiveState: boolean;
+    errors?: string[];
+  };
+  knownLimitations?: string[];
+  finalOutcome?: {
+    verdict: VerificationVerdict;
+    summary: string;
+  };
   syntaxChecksPassed: boolean;
   typeChecksPassed: boolean;
   previewMode?: 'real_application' | 'static_html' | 'fallback_preview';

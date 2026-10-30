@@ -17,7 +17,38 @@ export interface GeneratedPreview {
   supportedDevices?: string[];
 }
 
+/**
+ * Safely removes temporary workspace directories in all execution paths
+ */
+export function cleanupTempDir(dir: string): void {
+  try {
+    if (dir && fs.existsSync(dir)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  } catch (err: any) {
+    console.warn(`[CLEANUP] Failed to remove temp directory ${dir}:`, err?.message);
+  }
+}
+
+/**
+ * Validates and sanitizes relative file paths, rejecting traversal attacks
+ */
+export function sanitizeProjectFilePath(filePath: string): string | null {
+  if (!filePath || typeof filePath !== 'string') return null;
+  if (filePath.includes('\0')) return null;
+  const normalized = filePath.replace(/\\/g, '/');
+  const stripped = normalized.replace(/^([a-zA-Z]:)?[/]+/, '');
+  const segments = stripped.split('/');
+  for (const seg of segments) {
+    if (seg === '..') return null;
+  }
+  return stripped;
+}
+
 export class PreviewGenerator {
+  static cleanupTempDir = cleanupTempDir;
+  static sanitizeProjectFilePath = sanitizeProjectFilePath;
+
   /**
    * Generates a self-contained, responsive HTML bundle for live preview in an iframe.
    * Priority:
@@ -137,36 +168,90 @@ export class PreviewGenerator {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `squadforge_prev_${Date.now()}_`));
 
     try {
-      // Write all project files to isolated temp workspace
+      // Write all project files to isolated temp workspace using safe path resolution
       for (const f of allFiles) {
-        const clean = f.path.replace(/^([a-zA-Z]:)?[\\/]+/, '').replace(/\\/g, '/');
-        if (clean.includes('..') || clean.includes('\0')) continue;
-        const target = path.join(tempDir, clean);
+        const sanitized = sanitizeProjectFilePath(f.path);
+        if (!sanitized) continue;
+        const target = path.join(tempDir, sanitized);
         fs.mkdirSync(path.dirname(target), { recursive: true });
         fs.writeFileSync(target, f.content, 'utf-8');
       }
 
+      // Collect project CSS files to inject directly into DOM
+      const cssFiles = allFiles.filter(f => f.path.endsWith('.css'));
+      const combinedCss = cssFiles.map(f => f.content).join('\n');
+
+      // Scan project files for non-relative package imports to externalize and map
+      const externalImports = new Set<string>([
+        'react',
+        'react-dom',
+        'react-dom/client',
+        'react/jsx-runtime',
+        'lucide-react'
+      ]);
+
+      const importRegex = /(?:import\s+(?:[\w*\s{},]*\s+from\s+)?['"]([^'"./\\][^'"]*)['"]|require\(['"]([^'"./\\][^'"]*)['"]\))/g;
+      for (const f of allFiles) {
+        if (!f.path.endsWith('.ts') && !f.path.endsWith('.tsx') && !f.path.endsWith('.js') && !f.path.endsWith('.jsx')) {
+          continue;
+        }
+        let match;
+        while ((match = importRegex.exec(f.content)) !== null) {
+          const pkg = match[1] || match[2];
+          if (pkg && !pkg.startsWith('.') && !pkg.startsWith('/') && !pkg.startsWith('node:')) {
+            // Strip subpaths if main package name
+            const basePkg = pkg.startsWith('@') ? pkg.split('/').slice(0, 2).join('/') : pkg.split('/')[0];
+            externalImports.add(basePkg);
+          }
+        }
+      }
+
       // Identify or synthesize entry point
       let entryRelPath = '';
-      if (allFiles.some(f => f.path === 'src/main.tsx' || f.path === 'src/index.tsx')) {
-        entryRelPath = allFiles.find(f => f.path === 'src/main.tsx')?.path || 'src/index.tsx';
+      const candidateEntryPaths = [
+        'src/main.tsx',
+        'src/main.jsx',
+        'src/index.tsx',
+        'src/index.jsx',
+        'client/src/main.tsx',
+        'client/src/index.tsx',
+        'app/main.tsx',
+        'app/page.tsx',
+        'main.tsx',
+        'index.tsx'
+      ];
+
+      // Check if any file already mounts to DOM via createRoot / ReactDOM.render
+      const explicitMountFile = allFiles.find(f => 
+        (f.path.endsWith('.tsx') || f.path.endsWith('.jsx') || f.path.endsWith('.ts') || f.path.endsWith('.js')) &&
+        (f.content.includes('createRoot(') || f.content.includes('ReactDOM.render('))
+      );
+
+      if (explicitMountFile) {
+        entryRelPath = sanitizeProjectFilePath(explicitMountFile.path) || explicitMountFile.path;
       } else {
-        // Find best primary component
-        const mainComp = 
-          allFiles.find(f => f.path === 'src/App.tsx') ||
-          allFiles.find(f => f.path === 'src/components/MainView.tsx') ||
-          allFiles.find(f => f.path.includes('Dashboard') || f.path.includes('Store') || f.path.includes('Hero')) ||
-          tsxFiles[0];
+        const foundStandard = allFiles.find(f => candidateEntryPaths.includes(f.path));
+        if (foundStandard && (foundStandard.content.includes('createRoot') || foundStandard.content.includes('render('))) {
+          entryRelPath = sanitizeProjectFilePath(foundStandard.path) || foundStandard.path;
+        } else {
+          // Find best primary component to wrap
+          const mainComp = 
+            foundStandard ||
+            allFiles.find(f => f.path === 'src/App.tsx' || f.path === 'src/App.jsx') ||
+            allFiles.find(f => f.path === 'App.tsx' || f.path === 'App.jsx') ||
+            allFiles.find(f => f.path === 'src/components/MainView.tsx') ||
+            allFiles.find(f => f.path.includes('Dashboard') || f.path.includes('Store') || f.path.includes('Hero')) ||
+            tsxFiles[0];
 
-        if (!mainComp) {
-          return null;
-        }
+          if (!mainComp) {
+            return null;
+          }
 
-        const compBaseName = mainComp.path.split('/').pop()?.replace(/\.(tsx|jsx)$/, '') || 'App';
-        const importRelative = './' + path.relative('src', mainComp.path).replace(/\\/g, '/').replace(/\.(tsx|jsx|ts|js)$/, '');
+          const compSanitized = sanitizeProjectFilePath(mainComp.path) || mainComp.path;
+          const importRelative = './' + path.relative('src', compSanitized).replace(/\\/g, '/').replace(/\.(tsx|jsx|ts|js)$/, '');
 
-        // Synthesize virtual mounting entry point with React Error Boundary
-        const syntheticEntry = `
+          // Synthesize virtual mounting entry point with React Error Boundary
+          const syntheticEntry = `
 import React, { Component, ReactNode, ErrorInfo } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as ImportedModule from '${importRelative}';
@@ -216,33 +301,88 @@ if (mountTarget) {
   }
 }
 `;
-        fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
-        fs.writeFileSync(path.join(tempDir, 'src/__preview_root.tsx'), syntheticEntry, 'utf-8');
-        entryRelPath = 'src/__preview_root.tsx';
+          fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+          fs.writeFileSync(path.join(tempDir, 'src/__preview_root.tsx'), syntheticEntry, 'utf-8');
+          entryRelPath = 'src/__preview_root.tsx';
+        }
       }
 
       // Bundle with esbuild to browser-ready ESM
-      const buildResult = esbuild.buildSync({
-        entryPoints: [path.join(tempDir, entryRelPath)],
-        bundle: true,
-        write: false,
-        format: 'esm',
-        target: 'es2022',
-        logLevel: 'silent',
-        external: [
-          'react',
-          'react-dom',
-          'react-dom/client',
-          'react/jsx-runtime',
-          'lucide-react'
-        ]
-      });
+      let bundledJs = '';
+      let compilationDiagnostics = '';
 
-      if (buildResult.errors.length > 0) {
-        return null;
+      try {
+        const buildResult = esbuild.buildSync({
+          entryPoints: [path.join(tempDir, entryRelPath)],
+          bundle: true,
+          write: false,
+          format: 'esm',
+          target: 'es2022',
+          logLevel: 'silent',
+          loader: {
+            '.css': 'text',
+            '.svg': 'dataurl',
+            '.png': 'dataurl',
+            '.jpg': 'dataurl',
+            '.jpeg': 'dataurl',
+            '.gif': 'dataurl',
+            '.webp': 'dataurl',
+            '.json': 'json'
+          },
+          external: Array.from(externalImports)
+        });
+
+        if (buildResult.errors && buildResult.errors.length > 0) {
+          compilationDiagnostics = buildResult.errors.map(e => `${e.location?.file || entryRelPath}:${e.location?.line || 1} ${e.text}`).join('\n');
+        } else if (buildResult.outputFiles && buildResult.outputFiles.length > 0) {
+          bundledJs = buildResult.outputFiles[0].text;
+        } else {
+          compilationDiagnostics = 'esbuild returned no output files';
+        }
+      } catch (bundleErr: any) {
+        if (bundleErr?.errors && Array.isArray(bundleErr.errors)) {
+          compilationDiagnostics = bundleErr.errors.map((e: any) => `${e.location?.file || entryRelPath}:${e.location?.line || 1} ${e.text}`).join('\n');
+        } else {
+          compilationDiagnostics = bundleErr?.message || 'Unknown esbuild bundling failure';
+        }
       }
 
-      const bundledJs = buildResult.outputFiles[0].text;
+      if (compilationDiagnostics || !bundledJs) {
+        const fallbackDiagnostic = `Bundle compilation failed for "${entryRelPath}": ${compilationDiagnostics}`;
+        const renderedHtml = this.buildThematicPreview(idea, projectType, allFiles, [], [], {
+          isFallback: true,
+          diagnostic: fallbackDiagnostic
+        });
+        return {
+          html: renderedHtml,
+          title,
+          fileCount: allFiles.length,
+          hasInteractiveState: false,
+          generatedAt: Date.now(),
+          mode: 'fallback_preview',
+          entryPoint: entryRelPath,
+          diagnosticInfo: fallbackDiagnostic,
+          runtimeErrors: [compilationDiagnostics],
+          supportedDevices: ['desktop', 'tablet', 'mobile']
+        };
+      }
+
+      // Build dynamic import map for browser execution
+      const importMapEntries: Record<string, string> = {
+        'react': 'https://esm.sh/react@19?dev',
+        'react-dom': 'https://esm.sh/react-dom@19?dev',
+        'react-dom/client': 'https://esm.sh/react-dom@19/client?dev',
+        'react/jsx-runtime': 'https://esm.sh/react@19/jsx-runtime?dev',
+        'lucide-react': 'https://esm.sh/lucide-react@0.475.0?dev'
+      };
+
+      for (const pkg of externalImports) {
+        if (!importMapEntries[pkg]) {
+          importMapEntries[pkg] = `https://esm.sh/${pkg}?dev`;
+        }
+      }
+
+      const importMapJson = JSON.stringify({ imports: importMapEntries }, null, 2);
       const safeTitle = this.escapeHtml(idea);
       const filesList = allFiles.map(f => `<span class="px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 font-mono text-xs border border-neutral-700">${this.escapeHtml(f.path)}</span>`).join(' ');
 
@@ -255,15 +395,7 @@ if (mountTarget) {
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
   <script type="importmap">
-  {
-    "imports": {
-      "react": "https://esm.sh/react@19?dev",
-      "react-dom": "https://esm.sh/react-dom@19?dev",
-      "react-dom/client": "https://esm.sh/react-dom@19/client?dev",
-      "react/jsx-runtime": "https://esm.sh/react@19/jsx-runtime?dev",
-      "lucide-react": "https://esm.sh/lucide-react@0.475.0?dev"
-    }
-  }
+${importMapJson}
   </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -272,6 +404,7 @@ if (mountTarget) {
     body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
     pre, code { font-family: 'JetBrains Mono', monospace; }
   </style>
+  ${combinedCss ? `<style id="project-custom-styles">\n${combinedCss}\n</style>` : ''}
 </head>
 <body class="bg-neutral-950 text-neutral-100 min-h-screen flex flex-col selection:bg-amber-500/20 selection:text-amber-200">
 
@@ -400,9 +533,7 @@ ${bundledJs}
       console.warn('[PREVIEW BUNDLE NOTICE] Could not bundle real application, falling back:', err.message);
       return null;
     } finally {
-      try {
-        fs.rmSync(tempDir, { recursive: true, force: true });
-      } catch {}
+      cleanupTempDir(tempDir);
     }
   }
 
