@@ -361,7 +361,7 @@ Output ONLY JSON matching this structure:
     if (lower.includes('api') || lower.includes('microservice') || lower.includes('rest') || lower.includes('endpoint')) {
       return 'api_service';
     }
-    if (lower.includes('internal tool') || lower.includes('crud') || lower.includes('management tool')) {
+    if (lower.includes('internal') || lower.includes('console') || lower.includes('admin tool') || lower.includes('crud') || lower.includes('management tool')) {
       return 'internal_tool';
     }
     return currentType || 'fullstack';

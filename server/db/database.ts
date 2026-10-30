@@ -392,8 +392,8 @@ export class DatabaseManager {
         }
       },
       {
-        id: 2,
-        name: '002_project_intelligence_memory',
+        id: 3,
+        name: '003_project_intelligence_memory',
         up: (db: DatabaseSync) => {
           const tableInfo = db.prepare('PRAGMA table_info(builds)').all() as Array<{ name: string }>;
           const existingCols = new Set(tableInfo.map(c => c.name));
