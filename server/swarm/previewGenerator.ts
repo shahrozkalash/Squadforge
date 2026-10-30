@@ -205,6 +205,11 @@ export class PreviewGenerator {
       document.body.appendChild(toast);
       setTimeout(() => toast.remove(), 2500);
     }
+
+    // Initialize Lucide icons
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
   </script>
 </body>
 </html>`;
@@ -251,17 +256,17 @@ export class PreviewGenerator {
             </div>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
               <div class="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-3">
-                <div class="w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold text-base">⚡</div>
+                <div class="w-10 h-10 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center font-bold text-base"><i data-lucide="zap" class="w-5 h-5"></i></div>
                 <h4 class="font-bold text-white text-base">High-Performance Core</h4>
                 <p class="text-xs text-neutral-400 leading-relaxed">Optimized rendering cycles with sub-millisecond local execution and zero unnecessary re-renders.</p>
               </div>
               <div class="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-3">
-                <div class="w-10 h-10 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center font-bold text-base">🛡</div>
+                <div class="w-10 h-10 rounded-lg bg-amber-500/10 text-amber-400 flex items-center justify-center font-bold text-base"><i data-lucide="shield-check" class="w-5 h-5"></i></div>
                 <h4 class="font-bold text-white text-base">Defensive Security</h4>
                 <p class="text-xs text-neutral-400 leading-relaxed">Strict input sanitization boundaries, rate-limiting guards, and constant-time secret handling.</p>
               </div>
               <div class="p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-3">
-                <div class="w-10 h-10 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center font-bold text-base">📱</div>
+                <div class="w-10 h-10 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center font-bold text-base"><i data-lucide="smartphone" class="w-5 h-5"></i></div>
                 <h4 class="font-bold text-white text-base">Adaptive Responsive Layout</h4>
                 <p class="text-xs text-neutral-400 leading-relaxed">Tailored for mobile, tablet, and widescreen desktop displays with fluid grid scaling.</p>
               </div>
@@ -279,13 +284,13 @@ export class PreviewGenerator {
           <div class="space-y-1">
             <span class="text-[10px] uppercase font-mono text-neutral-500 tracking-wider">Navigation</span>
             <button onclick="triggerAction('Dashboard View')" class="w-full text-left px-3 py-2 rounded-lg bg-amber-500/10 text-amber-400 text-xs font-semibold flex items-center gap-2">
-              <span>📊</span> Overview & Metrics
+              <i data-lucide="layout-dashboard" class="w-4 h-4"></i> Overview & Metrics
             </button>
             <button onclick="triggerAction('Analytics View')" class="w-full text-left px-3 py-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 text-xs font-medium flex items-center gap-2 transition">
-              <span>📈</span> Telemetry & Performance
+              <i data-lucide="line-chart" class="w-4 h-4"></i> Telemetry & Performance
             </button>
             <button onclick="triggerAction('Settings View')" class="w-full text-left px-3 py-2 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 text-xs font-medium flex items-center gap-2 transition">
-              <span>⚙️</span> Configuration
+              <i data-lucide="settings" class="w-4 h-4"></i> Configuration
             </button>
           </div>
           <div class="p-3 bg-neutral-950 border border-neutral-800 rounded-lg">

@@ -1,5 +1,6 @@
 import { db } from './store.js';
 import { ExecutionAdapter } from './swarm/executionAdapter.js';
+import { ProjectMemoryService } from './swarm/projectMemory.js';
 import { 
   Build, 
   VerificationReport, 
@@ -222,6 +223,21 @@ export class HonestVerificationService {
     // Save report onto build in store
     build.verificationReport = report;
     db.saveBuild(build);
+
+    // Synchronize known defects with persistent Project Memory
+    try {
+      if (knownDefects.length > 0 && build.userId) {
+        for (const def of knownDefects) {
+          ProjectMemoryService.recordDefect(buildId, build.userId, {
+            description: def,
+            filePaths: [],
+            severity: 'high'
+          });
+        }
+      }
+    } catch {
+      // Graceful fallback
+    }
 
     return report;
   }

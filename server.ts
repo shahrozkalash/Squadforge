@@ -28,6 +28,7 @@ import JSZip from 'jszip';
 import { HonestVerificationService } from './server/verificationService.js';
 import { ExecutionAdapter } from './server/swarm/executionAdapter.js';
 import { PreviewGenerator } from './server/swarm/previewGenerator.js';
+import { ProjectMemoryService } from './server/swarm/projectMemory.js';
 
 dotenv.config();
 
@@ -1036,6 +1037,8 @@ app.get('/api/builds/:id/preview', requireAuth, (req, res) => {
   );
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https: data: blob:; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://unpkg.com https://fonts.googleapis.com; style-src 'self' 'unsafe-inline' https:; font-src https://fonts.gstatic.com data:; object-src 'none'; base-uri 'self';");
   res.send(preview.html);
 });
 
@@ -1063,6 +1066,18 @@ app.get('/api/builds/:id/preview-bundle', requireAuth, (req, res) => {
       generatedAt: preview.generatedAt
     }
   });
+});
+
+// Project Intelligence & Persistent Memory Endpoint (Multi-tenant secured)
+app.get('/api/builds/:id/memory', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const memory = ProjectMemoryService.getOrInitializeMemory(build.id, req.user!.id);
+  res.json({ success: true, memory });
 });
 
 // Real-Time Server-Sent Events (SSE) Stream

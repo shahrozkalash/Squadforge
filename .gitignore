@@ -31,3 +31,9 @@ squadforge.db-wal
 *.log
 .idea/
 .vscode/
+
+# Foreign lockfiles
+bun.lock
+bun.lockb
+yarn.lock
+pnpm-lock.yaml

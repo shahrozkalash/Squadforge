@@ -414,6 +414,21 @@ export class DatabaseManager {
             db.exec('ALTER TABLE builds ADD COLUMN live_preview_html TEXT;');
           }
         }
+      },
+      {
+        id: 4,
+        name: '004_project_memory_engine',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            CREATE TABLE IF NOT EXISTS project_memories (
+              project_id TEXT PRIMARY KEY REFERENCES builds(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+              memory_data TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_memories_user_id ON project_memories(user_id);
+          `);
+        }
       }
     ];
 

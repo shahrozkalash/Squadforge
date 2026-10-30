@@ -12,6 +12,7 @@ import { GitHubService } from '../github.js';
 import { tokenOptimizer } from '../tokenOptimizer.js';
 import { PreviewGenerator } from './previewGenerator.js';
 import { IntegrationAgent } from './integrationAgent.js';
+import { ProjectMemoryService } from './projectMemory.js';
 import { 
   Build, 
   ModelConfig, 
@@ -208,7 +209,10 @@ export class SwarmOrchestrator {
     // 3. Project Requirements Checklist
     build.requirementsChecklist = this.generateRequirementsChecklist(build.idea, build.projectType);
 
-    // 4. Project Manager creates milestone breakdown
+    // 4. Persistent Project Memory System
+    ProjectMemoryService.getOrInitializeMemory(build.id, build.userId);
+
+    // 5. Project Manager creates milestone breakdown
     const m1Id = 'ms_1_foundation';
     const m2Id = 'ms_2_core';
     const m3Id = 'ms_3_qa_security';
@@ -841,6 +845,9 @@ Output ONLY JSON matching this structure:
     // Compact summary of recent team achievements to prevent repeating work
     const teamProgressSummary = tokenOptimizer.summarizeSwarmHistory(db.getEvents(buildId), 12);
 
+    // Project Intelligence & Memory Context (ADRs, requirements, confirmed facts, active defects)
+    const memoryContext = ProjectMemoryService.retrieveTaskContext(buildId, build.userId, task, 1600);
+
     const roleSpec = model.agentRole ? AGENT_SPECS[model.agentRole] : undefined;
     const roleInstruction = roleSpec ? `YOUR SPECIALIZED ROLE: ${roleSpec.title}\nResponsibilities: ${roleSpec.responsibilities.join('; ')}` : '';
 
@@ -850,6 +857,7 @@ DESCRIPTION: ${task.description}
 TARGET FILES: ${task.filePaths.join(', ')}
 IS FIX TASK: ${task.isFixTask ? 'YES - Analyze the error and generate exact surgical find/replace fix' : 'NO'}
 
+${memoryContext ? memoryContext + '\n' : ''}
 TEAM PROGRESS CONTEXT:
 ${teamProgressSummary}
 
@@ -980,6 +988,26 @@ Never write placeholder comments. Implement functional code.`;
       if (allActionsSucceeded && appliedCount > 0) {
         TaskManager.completeTask(buildId, task.id, model.id);
         taskDone = true;
+
+        // Synchronize Project Memory: update module graph & resolve defects if fix task
+        try {
+          const filesNow = db.getAllFiles(buildId);
+          ProjectMemoryService.updateModuleRelationships(buildId, build.userId, filesNow);
+
+          if (task.isFixTask) {
+            const memory = ProjectMemoryService.getOrInitializeMemory(buildId, build.userId);
+            if (memory) {
+              const matchingDefects = memory.knownDefects.filter(
+                d => !d.resolved && d.filePaths.some(fp => task.filePaths.includes(fp))
+              );
+              for (const md of matchingDefects) {
+                ProjectMemoryService.resolveDefect(buildId, build.userId, md.id);
+              }
+            }
+          }
+        } catch (e) {
+          // Graceful handling of memory synchronization
+        }
       } else {
         // Detect unproductive loop if attempts exhausted and zero edits succeeded
         if (attempts >= 3 && appliedCount === 0 && (task.retryCount || 0) >= 2) {

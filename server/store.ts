@@ -18,6 +18,7 @@ import {
   UsageLogEntry,
   SwarmUsageStats
 } from './types.js';
+import { ProjectMemory } from './swarm/projectMemory.js';
 import { 
   encryptToken, 
   decryptToken, 
@@ -62,6 +63,7 @@ export class PersistentDatabase {
   public modelRuns: Map<string, Map<string, ModelRunStatus>> = new Map();
   public checkpoints: Map<string, Checkpoint[]> = new Map();
   public usageLogs: UsageLogEntry[] = [];
+  public projectMemories: Map<string, ProjectMemory> = new Map();
 
   // In-memory rate limiter: identifier -> { attempts: number, lockUntil: number }
   private rateLimits: Map<string, { attempts: number; lockUntil: number }> = new Map();
@@ -410,6 +412,21 @@ export class PersistentDatabase {
         taskId: l.task_id || undefined,
         taskTitle: l.task_title || undefined
       });
+    }
+
+    // 12. Project Memories
+    try {
+      const memoryRows = sqlite.prepare('SELECT * FROM project_memories').all() as any[];
+      for (const m of memoryRows) {
+        try {
+          const parsed = JSON.parse(m.memory_data);
+          this.projectMemories.set(m.project_id, parsed);
+        } catch {
+          // Ignore individual malformed record
+        }
+      }
+    } catch {
+      // Table may not exist yet in unmigrated databases
     }
   }
 
@@ -1676,6 +1693,31 @@ export class PersistentDatabase {
       activeQuotas: allQuotas,
       localLLM: localLLMService.getConfig()
     };
+  }
+
+  public getProjectMemory(projectId: string): ProjectMemory | null {
+    return this.projectMemories.get(projectId) || null;
+  }
+
+  public saveProjectMemory(memory: ProjectMemory): void {
+    this.projectMemories.set(memory.projectId, memory);
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO project_memories (project_id, user_id, memory_data, updated_at)
+        VALUES (?, ?, ?, ?)
+      `).run(memory.projectId, memory.userId, JSON.stringify(memory), memory.lastUpdated || Date.now());
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveProjectMemory', err);
+    }
+  }
+
+  public deleteProjectMemory(projectId: string): void {
+    this.projectMemories.delete(projectId);
+    try {
+      this.dbManager.db.prepare('DELETE FROM project_memories WHERE project_id = ?').run(projectId);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('deleteProjectMemory', err);
+    }
   }
 }
 
