@@ -83,32 +83,54 @@ function setSessionCookie(req: express.Request, res: express.Response, token: st
   });
 }
 
-// Authentication Middleware to protect private endpoints.
-// CRITICAL SECURITY: Never accepts credentials in URL query parameters.
-function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+// Helper to retrieve existing session or automatically issue an isolated guest session
+function resolveUser(req: express.Request, res: express.Response): User {
   const token = 
     req.cookies[SESSION_COOKIE_NAME] || 
     req.headers.authorization?.replace(/^Bearer\s+/i, '');
 
-  if (!token) {
-    return res.status(401).json({ error: 'Unauthorized: Authentication required to access this resource.' });
+  if (token) {
+    const session = db.getSession(token);
+    if (session) {
+      const user = db.getUser(session.userId);
+      if (user) {
+        req.user = user;
+        req.sessionToken = token;
+        return user;
+      }
+    }
   }
 
-  const session = db.getSession(token);
-  if (!session) {
-    res.clearCookie(SESSION_COOKIE_NAME);
-    return res.status(401).json({ error: 'Unauthorized: Session invalid or expired. Please log in again.' });
-  }
+  // Create isolated public guest user and session
+  const guestHex = crypto.randomBytes(8).toString('hex');
+  const guestId = `guest_${Date.now()}_${guestHex}`;
+  const guestUser: User = {
+    id: guestId,
+    email: `guest-${guestHex.slice(0, 8)}@squadforge.local`,
+    name: 'Guest Developer',
+    githubConnected: false,
+    costLimitPerBuild: 2.0, // Abuse prevention: reasonable cost cap for anonymous execution
+    enabledModelIds: modelRegistry.getAll().map(m => m.id),
+    createdAt: db.getTime(),
+    isAnonymous: true
+  };
 
-  const user = db.getUser(session.userId);
-  if (!user) {
-    db.deleteSession(token);
-    res.clearCookie(SESSION_COOKIE_NAME);
-    return res.status(401).json({ error: 'Unauthorized: User account not found.' });
-  }
+  db.saveUser(guestUser);
+  const sessionToken = generateSessionToken();
+  db.createSession(guestUser.id, sessionToken, req.ip, req.headers['user-agent']);
+  setSessionCookie(req, res, sessionToken);
 
-  req.user = user;
-  req.sessionToken = token;
+  req.user = guestUser;
+  req.sessionToken = sessionToken;
+  return guestUser;
+}
+
+// Session Middleware: ensures an authentic or scoped guest session exists
+// CRITICAL SECURITY: Protects multi-tenant boundaries while allowing frictionless public access
+function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  if (!req.user) {
+    resolveUser(req, res);
+  }
   next();
 }
 

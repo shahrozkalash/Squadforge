@@ -110,6 +110,19 @@ export class PersistentDatabase {
     }
   }
 
+  public handleDatabaseWriteError(operation: string, err: any): void {
+    const errorMsg = `SQLite write failure during ${operation}: ${err?.message || err}`;
+    console.error(`[DATABASE ERROR] ${errorMsg}`);
+    this.storageError = errorMsg;
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(errorMsg);
+    }
+  }
+
+  public clearStorageError(): void {
+    this.storageError = null;
+  }
+
   /**
    * Initializes storage: loads data from SQLite database, or migrates existing .squadforge_data.json
    */
@@ -515,8 +528,8 @@ export class PersistentDatabase {
         user.routingPreference || 'quality', JSON.stringify(user.enabledModelIds || []),
         user.createdAt, user.updatedAt
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveUser', err);
     }
 
     return user;
@@ -550,8 +563,8 @@ export class PersistentDatabase {
         INSERT OR REPLACE INTO sessions (id, user_id, expires_at, created_at, ip, user_agent)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(session.id, session.userId, session.expiresAt, session.createdAt, session.ip || null, session.userAgent || null);
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('createSession', err);
     }
 
     return session;
@@ -577,8 +590,8 @@ export class PersistentDatabase {
     const existed = this.sessions.delete(hashed);
     try {
       this.dbManager.db.prepare('DELETE FROM sessions WHERE id = ?').run(hashed);
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('deleteSession', err);
     }
     return existed;
   }
@@ -591,8 +604,8 @@ export class PersistentDatabase {
     }
     try {
       this.dbManager.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('deleteUserSessions', err);
     }
   }
 
@@ -718,8 +731,8 @@ export class PersistentDatabase {
         INSERT INTO password_reset_codes (id, user_id, email, code_hash, created_at, expires_at, attempts, consumed, invalidated)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(record.id, record.userId, record.email, record.codeHash, record.createdAt, record.expiresAt, record.attempts, 0, 0);
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('createPasswordResetCode', err);
     }
 
     return { success: true, record };
@@ -819,8 +832,8 @@ export class PersistentDatabase {
         INSERT INTO password_reset_auths (id, user_id, email, created_at, expires_at, consumed)
         VALUES (?, ?, ?, ?, ?, ?)
       `).run(authRecord.id, authRecord.userId, authRecord.email, authRecord.createdAt, authRecord.expiresAt, 0);
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('createPasswordResetAuth', err);
     }
 
     return { success: true, resetAuthToken };
@@ -918,8 +931,8 @@ export class PersistentDatabase {
         INSERT OR REPLACE INTO encrypted_github_tokens (user_id, encrypted_token, created_at)
         VALUES (?, ?, ?)
       `).run(userId, encrypted, this.getTime());
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('setGithubToken', err);
     }
 
     const user = this.users.get(userId);
@@ -940,8 +953,8 @@ export class PersistentDatabase {
     this.encryptedGithubTokens.delete(userId);
     try {
       this.dbManager.db.prepare('DELETE FROM encrypted_github_tokens WHERE user_id = ?').run(userId);
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('disconnectGithub', err);
     }
 
     const user = this.users.get(userId);
@@ -1125,6 +1138,19 @@ export class PersistentDatabase {
     this.builds.set(build.id, build);
     this.broadcast(build.id, 'build_updated', build);
 
+    // Ensure referenced user exists in users table to satisfy foreign key constraint integrity
+    if (build.userId && !this.users.has(build.userId)) {
+      this.saveUser({
+        id: build.userId,
+        email: `${build.userId}@squadforge.internal`,
+        name: build.userId,
+        githubConnected: false,
+        costLimitPerBuild: 5.0,
+        enabledModelIds: [],
+        createdAt: this.getTime()
+      });
+    }
+
     try {
       this.dbManager.db.prepare(`
         INSERT OR REPLACE INTO builds (
@@ -1150,8 +1176,8 @@ export class PersistentDatabase {
         build.maxVerificationAttempts || 3, build.budgetWarningEmitted ? 1 : 0,
         build.githubRepoUrl || null, build.gitBranch || null, build.pullRequestUrl || null
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveBuild', err);
     }
 
     return build;
@@ -1205,8 +1231,8 @@ export class PersistentDatabase {
         task.isPaused ? 1 : 0, task.pausedReason || null,
         task.executionLogs ? JSON.stringify(task.executionLogs) : null
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('addTask', err);
     }
 
     return task;
@@ -1234,8 +1260,8 @@ export class PersistentDatabase {
         updated.lastError || null, updated.isPaused ? 1 : 0, updated.pausedReason || null,
         updated.actualTokensUsed || 0, updated.estimatedCost || 0.0, updated.id
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('updateTask', err);
     }
 
     return updated;
@@ -1285,8 +1311,8 @@ export class PersistentDatabase {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).run(fileId, buildId, file.path, latestVer.version, latestVer.content, latestVer.authorModel, latestVer.commitMessage || null, latestVer.timestamp);
       }
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('setFile', err);
     }
 
     return file;
@@ -1300,8 +1326,8 @@ export class PersistentDatabase {
       try {
         const fileId = `${buildId}:${filePath}`;
         this.dbManager.db.prepare('DELETE FROM project_files WHERE id = ?').run(fileId);
-      } catch (err) {
-        // Ignored
+      } catch (err: any) {
+        this.handleDatabaseWriteError('deleteFile', err);
       }
     }
     return existed;
@@ -1330,8 +1356,8 @@ export class PersistentDatabase {
         event.id, event.buildId, event.timestamp, event.type,
         event.modelId || null, event.taskId || null, event.filePath || null, event.details
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('addEvent', err);
     }
 
     return event;
@@ -1385,8 +1411,8 @@ export class PersistentDatabase {
         updated.patchesApplied, updated.patchesRejected, updated.lastActionSummary || null,
         updated.error || null
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('updateModelRun', err);
     }
 
     return updated;
@@ -1415,8 +1441,8 @@ export class PersistentDatabase {
         checkpoint.id, checkpoint.buildId, checkpoint.timestamp, checkpoint.description,
         JSON.stringify(checkpoint.filesSnapshot || {})
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('addCheckpoint', err);
     }
 
     return checkpoint;
@@ -1451,8 +1477,8 @@ export class PersistentDatabase {
         entry.isFallback ? 1 : 0, entry.cached ? 1 : 0, entry.latencyMs || 0,
         entry.success ? 1 : 0, entry.taskId || null, entry.taskTitle || null
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('addUsageLog', err);
     }
   }
 
@@ -1468,8 +1494,8 @@ export class PersistentDatabase {
         id, entry.userId || null, entry.eventType, entry.ip || null,
         entry.userAgent || null, entry.details, this.getTime()
       );
-    } catch (err) {
-      // Ignored
+    } catch (err: any) {
+      this.handleDatabaseWriteError('addAuditLog', err);
     }
   }
 

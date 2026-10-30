@@ -54,6 +54,7 @@ export interface User {
   enabledModelIds: string[];
   createdAt: number;
   updatedAt?: number;
+  isAnonymous?: boolean;
 }
 
 export type SafeUser = User;

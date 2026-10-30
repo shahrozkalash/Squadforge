@@ -119,10 +119,10 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
         <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg flex items-center justify-between text-xs font-mono">
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${configStatus?.gemini.configured ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-            <span className="text-neutral-300">Gemini Engine</span>
+            <span className="text-neutral-300">AI Engine</span>
           </div>
-          <span className={configStatus?.gemini.configured ? 'text-emerald-400' : 'text-neutral-500'}>
-            {configStatus?.gemini.configured ? 'Ready (3.8 Flash)' : 'Auto-Config'}
+          <span className={configStatus?.gemini.configured ? 'text-emerald-400' : 'text-amber-400'}>
+            {configStatus?.gemini.configured ? 'Ready' : 'Not Configured'}
           </span>
         </div>
 

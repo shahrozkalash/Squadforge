@@ -201,4 +201,28 @@ describe('SquadForge SQLite Database Engine & Migration Architecture', () => {
       }
     }
   });
+
+  test('Database write errors mark storage degraded and throw in production', () => {
+    const store = new PersistentDatabase(':memory:');
+    assert.equal(store.checkHealth().healthy, true);
+
+    // Simulate SQLite error handling
+    store.handleDatabaseWriteError('testWrite', new Error('Disk full or locked'));
+    
+    // Health probe must immediately report unhealthy
+    const health = store.checkHealth();
+    assert.equal(health.healthy, false);
+    assert.match(health.error || '', /Disk full or locked/);
+
+    // In production, write errors throw rather than being silently ignored
+    const origNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      assert.throws(() => {
+        store.handleDatabaseWriteError('criticalWrite', new Error('Constraint violation'));
+      }, /SQLite write failure during criticalWrite: Constraint violation/);
+    } finally {
+      process.env.NODE_ENV = origNodeEnv;
+    }
+  });
 });
