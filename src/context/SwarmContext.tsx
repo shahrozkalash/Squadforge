@@ -10,7 +10,8 @@ import {
   ModelConfig,
   ConfigStatusResponse,
   TechStackConfig,
-  VerificationReport
+  VerificationReport,
+  ProjectType
 } from '../types/index.js';
 
 interface SwarmContextType {
@@ -25,7 +26,7 @@ interface SwarmContextType {
   selectedFile: ProjectFile | null;
   verificationReport: VerificationReport | null;
   setSelectedFile: (file: ProjectFile | null) => void;
-  startBuild: (idea: string, selectedModels: string[], autoPush: boolean, costLimit: number, techStack?: TechStackConfig) => Promise<string | null>;
+  startBuild: (idea: string, selectedModels: string[], autoPush: boolean, costLimit: number, techStack?: TechStackConfig, projectType?: ProjectType) => Promise<string | null>;
   stopBuild: () => Promise<void>;
   resumeBuild: (buildId?: string) => Promise<boolean>;
   retryFailedTasks: () => Promise<void>;
@@ -40,6 +41,7 @@ interface SwarmContextType {
   createWorkspaceFile: (path: string, content: string) => Promise<boolean>;
   deleteWorkspaceFile: (path: string) => Promise<boolean>;
   renameWorkspaceFile: (oldPath: string, newPath: string) => Promise<boolean>;
+  requestRevision: (buildId: string, prompt: string) => Promise<{ success: boolean; revisionId?: string; error?: string }>;
   refreshModels: () => Promise<void>;
   refreshConfigStatus: () => Promise<void>;
 }
@@ -234,7 +236,8 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     selectedModels: string[], 
     autoPush: boolean, 
     costLimit: number,
-    techStack?: TechStackConfig
+    techStack?: TechStackConfig,
+    projectType?: ProjectType
   ): Promise<string | null> => {
     try {
       const res = await fetch('/api/builds', {
@@ -245,7 +248,8 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           selectedModels,
           autoPushGithub: autoPush,
           costLimit,
-          techStack
+          techStack,
+          projectType
         })
       });
 
@@ -257,6 +261,25 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch (err) {
       console.error('Error starting build:', err);
       return null;
+    }
+  };
+
+  const requestRevision = async (buildId: string, prompt: string): Promise<{ success: boolean; revisionId?: string; error?: string }> => {
+    try {
+      const res = await fetch(`/api/builds/${buildId}/revisions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await fetchBuildDetails(buildId);
+        return { success: true, revisionId: data.revision?.id };
+      }
+      return { success: false, error: data.error || 'Failed to submit revision' };
+    } catch (err: any) {
+      console.error('Error requesting revision:', err);
+      return { success: false, error: err.message || 'Network error' };
     }
   };
 
@@ -472,6 +495,7 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       createWorkspaceFile,
       deleteWorkspaceFile,
       renameWorkspaceFile,
+      requestRevision,
       refreshModels,
       refreshConfigStatus
     }}>

@@ -27,6 +27,7 @@ import { User, SafeUser } from './server/types.js';
 import JSZip from 'jszip';
 import { HonestVerificationService } from './server/verificationService.js';
 import { ExecutionAdapter } from './server/swarm/executionAdapter.js';
+import { PreviewGenerator } from './server/swarm/previewGenerator.js';
 
 dotenv.config();
 
@@ -845,7 +846,7 @@ app.get('/api/builds', requireAuth, (req, res) => {
 });
 
 app.post('/api/builds', requireAuth, async (req, res) => {
-  const { idea, selectedModels, autoPushGithub, costLimit, maxDurationSeconds, techStack } = req.body;
+  const { idea, selectedModels, autoPushGithub, costLimit, maxDurationSeconds, techStack, projectType } = req.body;
   if (!idea || !idea.trim()) {
     return res.status(400).json({ error: 'Idea is required' });
   }
@@ -857,10 +858,13 @@ app.post('/api/builds', requireAuth, async (req, res) => {
     ? selectedModels 
     : user.enabledModelIds;
 
+  const detectedType = SwarmOrchestrator.detectProjectType(idea.trim(), projectType);
+
   const newBuild = db.saveBuild({
     id: buildId,
     userId: user.id,
     idea: idea.trim(),
+    projectType: detectedType,
     status: 'planning',
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -871,13 +875,7 @@ app.post('/api/builds', requireAuth, async (req, res) => {
     costLimit: costLimit || user.costLimitPerBuild || 5.0,
     maxDurationSeconds: maxDurationSeconds || 300,
     patchesAppliedCount: 0,
-    techStack: techStack || {
-      frontend: 'React 19 + TypeScript + Tailwind CSS',
-      backend: 'Node.js Express + TypeScript Server API',
-      database: 'In-Memory Key-Value & Document Store',
-      testing: 'Node.js Native Test Runner (node:test + assert)',
-      security: 'OWASP Defensive Validation, Rate Limiter & AES-256'
-    }
+    techStack: techStack || SwarmOrchestrator.selectOptimalTechStack(detectedType)
   });
 
   setImmediate(() => {
@@ -995,6 +993,76 @@ app.post('/api/builds/:id/retry-failed', requireAuth, (req, res) => {
     }
   }
   res.json({ success: true });
+});
+
+// Natural Language Project Revision endpoint (Scoped to project owner)
+app.post('/api/builds/:id/revisions', requireAuth, async (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const { prompt } = req.body;
+  if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+    return res.status(400).json({ error: 'Revision prompt is required' });
+  }
+
+  const result = await SwarmOrchestrator.applyRevision(build.id, prompt.trim());
+  if (!result.success) {
+    return res.status(400).json({ error: result.error || 'Failed to queue revision' });
+  }
+
+  res.json({ 
+    success: true, 
+    revisionId: result.revisionId, 
+    build: db.getBuild(build.id) 
+  });
+});
+
+// Interactive Live Preview Document endpoint (Returns self-contained HTML for sandboxed iframe)
+app.get('/api/builds/:id/preview', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const files = db.getAllFiles(build.id);
+  const preview = PreviewGenerator.generateInteractivePreview(
+    build.idea, 
+    files, 
+    build.projectType || 'fullstack'
+  );
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(preview.html);
+});
+
+// Structured Preview Bundle API endpoint
+app.get('/api/builds/:id/preview-bundle', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const files = db.getAllFiles(build.id);
+  const preview = PreviewGenerator.generateInteractivePreview(
+    build.idea, 
+    files, 
+    build.projectType || 'fullstack'
+  );
+
+  res.json({
+    success: true,
+    preview: {
+      html: preview.html,
+      title: preview.title,
+      fileCount: preview.fileCount,
+      generatedAt: preview.generatedAt
+    }
+  });
 });
 
 // Real-Time Server-Sent Events (SSE) Stream

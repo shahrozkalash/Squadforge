@@ -264,7 +264,12 @@ export class PersistentDatabase {
         budgetWarningEmitted: Boolean(b.budget_warning_emitted),
         githubRepoUrl: b.github_repo || undefined,
         gitBranch: b.github_branch || undefined,
-        pullRequestUrl: b.github_pr_url || undefined
+        pullRequestUrl: b.github_pr_url || undefined,
+        projectType: b.project_type || 'fullstack',
+        architectureDecisions: b.architecture_decisions ? JSON.parse(b.architecture_decisions) : undefined,
+        requirementsChecklist: b.requirements_checklist ? JSON.parse(b.requirements_checklist) : undefined,
+        revisions: b.revisions ? JSON.parse(b.revisions) : undefined,
+        livePreviewHtml: b.live_preview_html || undefined
       };
       this.builds.set(build.id, build);
     }
@@ -1172,8 +1177,9 @@ export class PersistentDatabase {
           token_budget, max_duration_seconds, patches_applied_count, error, failure_reason,
           tech_stack, milestones, test_report, security_audit, verification_report,
           verification_feedback, verification_attempts, max_verification_attempts,
-          budget_warning_emitted, github_repo, github_branch, github_pr_url
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          budget_warning_emitted, github_repo, github_branch, github_pr_url,
+          project_type, architecture_decisions, requirements_checklist, revisions, live_preview_html
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         build.id, build.userId, build.idea, build.status, build.createdAt, build.updatedAt,
         build.completedAt || null, JSON.stringify(build.selectedModels || []),
@@ -1187,7 +1193,12 @@ export class PersistentDatabase {
         build.verificationReport ? JSON.stringify(build.verificationReport) : null,
         build.verificationFeedback || null, build.verificationAttempts || 0,
         build.maxVerificationAttempts || 3, build.budgetWarningEmitted ? 1 : 0,
-        build.githubRepoUrl || null, build.gitBranch || null, build.pullRequestUrl || null
+        build.githubRepoUrl || null, build.gitBranch || null, build.pullRequestUrl || null,
+        build.projectType || 'fullstack',
+        build.architectureDecisions ? JSON.stringify(build.architectureDecisions) : null,
+        build.requirementsChecklist ? JSON.stringify(build.requirementsChecklist) : null,
+        build.revisions ? JSON.stringify(build.revisions) : null,
+        build.livePreviewHtml || null
       );
     } catch (err: any) {
       this.handleDatabaseWriteError('saveBuild', err);
@@ -1669,3 +1680,4 @@ export class PersistentDatabase {
 }
 
 export const db = new PersistentDatabase();
+export const store = db;

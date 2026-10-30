@@ -84,8 +84,9 @@ export class DatabaseManager {
       );
     `);
 
-    const appliedRows = this.db.prepare('SELECT name FROM _migrations').all() as Array<{ name: string }>;
+    const appliedRows = this.db.prepare('SELECT id, name FROM _migrations').all() as Array<{ id: number; name: string }>;
     const appliedNames = new Set(appliedRows.map(r => r.name));
+    const appliedIds = new Set(appliedRows.map(r => r.id));
 
     const migrations: Migration[] = [
       {
@@ -389,13 +390,37 @@ export class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_oauth_states_consumed ON oauth_states(consumed);
           `);
         }
+      },
+      {
+        id: 2,
+        name: '002_project_intelligence_memory',
+        up: (db: DatabaseSync) => {
+          const tableInfo = db.prepare('PRAGMA table_info(builds)').all() as Array<{ name: string }>;
+          const existingCols = new Set(tableInfo.map(c => c.name));
+
+          if (!existingCols.has('project_type')) {
+            db.exec("ALTER TABLE builds ADD COLUMN project_type TEXT DEFAULT 'fullstack';");
+          }
+          if (!existingCols.has('architecture_decisions')) {
+            db.exec('ALTER TABLE builds ADD COLUMN architecture_decisions TEXT;');
+          }
+          if (!existingCols.has('requirements_checklist')) {
+            db.exec('ALTER TABLE builds ADD COLUMN requirements_checklist TEXT;');
+          }
+          if (!existingCols.has('revisions')) {
+            db.exec('ALTER TABLE builds ADD COLUMN revisions TEXT;');
+          }
+          if (!existingCols.has('live_preview_html')) {
+            db.exec('ALTER TABLE builds ADD COLUMN live_preview_html TEXT;');
+          }
+        }
       }
     ];
 
     for (const m of migrations) {
-      if (!appliedNames.has(m.name)) {
+      if (!appliedNames.has(m.name) && !appliedIds.has(m.id)) {
         m.up(this.db);
-        const stmt = this.db.prepare('INSERT INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)');
+        const stmt = this.db.prepare('INSERT OR REPLACE INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)');
         stmt.run(m.id, m.name, Date.now());
       }
     }

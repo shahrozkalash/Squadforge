@@ -17,13 +17,97 @@ import {
   TestTube,
   Shield,
   KeyRound,
-  ArrowRight
+  ArrowRight,
+  Layout,
+  BarChart3,
+  ShoppingBag,
+  User,
+  BookOpen,
+  Terminal,
+  Wrench,
+  Globe
 } from 'lucide-react';
-import { TechStackConfig } from '../types/index.js';
+import { TechStackConfig, ProjectType } from '../types/index.js';
 
 interface MainIdeaViewProps {
   onSwarmStarted: () => void;
 }
+
+interface ProjectTypeOption {
+  type: ProjectType;
+  label: string;
+  badge: string;
+  desc: string;
+  icon: React.ComponentType<{ className?: string }>;
+  defaultPrompt: string;
+}
+
+const PROJECT_TYPE_OPTIONS: ProjectTypeOption[] = [
+  {
+    type: 'saas_dashboard',
+    label: 'SaaS Dashboard',
+    badge: 'Enterprise',
+    desc: 'Analytics, data tables, metrics cards, user management, and filter controls',
+    icon: BarChart3,
+    defaultPrompt: 'Build a modern SaaS Analytics & Team Workspace Dashboard with real-time metric cards, interactive revenue trend charts, sortable user tables, role filters, and billing management in React & Tailwind.'
+  },
+  {
+    type: 'landing_page',
+    label: 'Landing Page',
+    badge: 'Marketing',
+    desc: 'Hero section, feature grids, social proof, pricing tiers, and lead capture',
+    icon: Globe,
+    defaultPrompt: 'Create a high-converting Developer Tool landing page with an animated hero section, interactive code feature showcase, ROI calculator, pricing tiers with monthly/yearly toggle, and email signup.'
+  },
+  {
+    type: 'ecommerce',
+    label: 'E-Commerce Store',
+    badge: 'Storefront',
+    desc: 'Product catalog, category filters, interactive cart drawer, and checkout flow',
+    icon: ShoppingBag,
+    defaultPrompt: 'Build a modern E-Commerce Storefront for artisanal products featuring product grid with filtering, responsive slide-over cart drawer, quantity adjusters, promo code validation, and mock checkout.'
+  },
+  {
+    type: 'fullstack_app',
+    label: 'Full-Stack App',
+    badge: 'Full Stack',
+    desc: 'End-to-end client with Express API backend, data persistence, and auth',
+    icon: Layers,
+    defaultPrompt: 'Build a collaborative project management workspace with kanban boards, task assignment, real-time activity log, REST API backend, and local storage persistence.'
+  },
+  {
+    type: 'portfolio',
+    label: 'Portfolio Showcase',
+    badge: 'Creative',
+    desc: 'Interactive project gallery, case studies, skill badges, and contact form',
+    icon: User,
+    defaultPrompt: 'Design a sleek engineering portfolio featuring an interactive project gallery with live demo links, case study modal walkthroughs, technical skill matrix, and interactive contact form.'
+  },
+  {
+    type: 'blog_publication',
+    label: 'Blog Publication',
+    badge: 'Content',
+    desc: 'Article feed, reading time calculator, tag filtering, and rich text layout',
+    icon: BookOpen,
+    defaultPrompt: 'Build a clean tech blog publication featuring featured stories, category tag filters, search bar, reading progress indicator, dark mode toggle, and newsletter subscription form.'
+  },
+  {
+    type: 'api_service',
+    label: 'API Microservice',
+    badge: 'Backend',
+    desc: 'REST API endpoints, validation schemas, token authentication, and health checks',
+    icon: Terminal,
+    defaultPrompt: 'Build a secure API Microservice with structured REST endpoints, Bearer token authentication, rate limiting, request validation schemas, health probes, and automated test suite.'
+  },
+  {
+    type: 'internal_tool',
+    label: 'Internal Tool',
+    badge: 'Operations',
+    desc: 'Admin console, batch operations, audit log viewer, and system status widgets',
+    icon: Wrench,
+    defaultPrompt: 'Build an internal Customer Support & Operations Console with user lookup, account status toggle, refund processing simulation, activity audit trails, and live system health diagnostics.'
+  }
+];
 
 const PRESET_IDEAS = [
   {
@@ -49,6 +133,7 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
   const { user } = useAuth();
 
   const [idea, setIdea] = useState('');
+  const [selectedProjectType, setSelectedProjectType] = useState<ProjectType>('saas_dashboard');
   const [selectedModelIds, setSelectedModelIds] = useState<string[]>(
     allModels.map(m => m.id)
   );
@@ -86,12 +171,19 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
     setSelectedModelIds(allModels.map(m => m.id));
   };
 
+  const handleSelectProjectType = (option: ProjectTypeOption) => {
+    setSelectedProjectType(option.type);
+    if (!idea.trim() || PROJECT_TYPE_OPTIONS.some(opt => opt.defaultPrompt === idea.trim())) {
+      setIdea(option.defaultPrompt);
+    }
+  };
+
   const handleLaunch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!idea.trim() || isLaunching) return;
 
     setIsLaunching(true);
-    const buildId = await startBuild(idea.trim(), selectedModelIds, autoPush, costLimit, techStack);
+    const buildId = await startBuild(idea.trim(), selectedModelIds, autoPush, costLimit, techStack, selectedProjectType);
     setIsLaunching(false);
     if (buildId) {
       onSwarmStarted();
@@ -156,14 +248,57 @@ export const MainIdeaView: React.FC<MainIdeaViewProps> = ({ onSwarmStarted }) =>
               <span>Project Requirements & Specification</span>
             </label>
             <span className="text-xs text-neutral-400 font-mono">
-              Natural language prompt &rarr; 4-milestone task breakdown
+              Select blueprint &rarr; 4-milestone plan & auto live preview
             </span>
+          </div>
+
+          {/* Project Type Selector Grid */}
+          <div className="space-y-2">
+            <span className="text-xs font-mono text-neutral-400 uppercase tracking-wider flex items-center justify-between">
+              <span>Target Project Architecture</span>
+              <span className="text-amber-400 font-normal">Active: {PROJECT_TYPE_OPTIONS.find(o => o.type === selectedProjectType)?.label}</span>
+            </span>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              {PROJECT_TYPE_OPTIONS.map((opt) => {
+                const Icon = opt.icon;
+                const isSelected = selectedProjectType === opt.type;
+                return (
+                  <button
+                    key={opt.type}
+                    type="button"
+                    onClick={() => handleSelectProjectType(opt)}
+                    className={`text-left p-3 rounded-lg border transition-all relative overflow-hidden group ${
+                      isSelected
+                        ? 'bg-amber-500/10 border-amber-400 text-white shadow-md shadow-amber-500/5'
+                        : 'bg-neutral-950/80 border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:bg-neutral-800/40'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className={`p-1.5 rounded-md ${isSelected ? 'bg-amber-400 text-neutral-950' : 'bg-neutral-900 text-neutral-400 group-hover:text-amber-300'}`}>
+                        <Icon className="w-3.5 h-3.5" />
+                      </div>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                        isSelected ? 'bg-amber-400/20 text-amber-300' : 'bg-neutral-900 text-neutral-400'
+                      }`}>
+                        {opt.badge}
+                      </span>
+                    </div>
+                    <div className="text-xs font-semibold truncate">
+                      {opt.label}
+                    </div>
+                    <div className="text-[11px] text-neutral-400 line-clamp-2 mt-0.5 leading-snug">
+                      {opt.desc}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <textarea
             value={idea}
             onChange={(e) => setIdea(e.target.value)}
-            placeholder="Describe the software you want built in detail (e.g. 'A high-performance in-memory key-value cache engine supporting TTL expiration, LRU eviction, atomic transactions, snapshot persistence, and benchmark harness')..."
+            placeholder="Describe the software you want built in detail (e.g. 'A modern SaaS Analytics & Team Workspace Dashboard with real-time metric cards, interactive revenue trend charts, sortable user tables, role filters, and billing management in React & Tailwind')..."
             rows={4}
             className="w-full p-4 text-sm bg-neutral-950 border border-neutral-800 rounded-lg text-white placeholder-neutral-500 focus:outline-none focus:border-amber-400 font-sans leading-relaxed resize-none"
             required

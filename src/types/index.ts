@@ -273,6 +273,64 @@ export interface Build {
     findings: Array<{ severity: 'low' | 'medium' | 'high'; message: string }>;
   };
   verificationReport?: VerificationReport;
+  projectType?: ProjectType;
+  architectureDecisions?: ArchitectureDecision[];
+  requirementsChecklist?: RequirementItem[];
+  revisions?: ProjectRevision[];
+  livePreviewHtml?: string;
+}
+
+export type ProjectType = 
+  | 'landing_page' 
+  | 'saas_dashboard' 
+  | 'ecommerce' 
+  | 'portfolio' 
+  | 'blog_content'
+  | 'blog_publication'
+  | 'fullstack' 
+  | 'fullstack_app'
+  | 'api_service' 
+  | 'internal_tool';
+
+export interface ArchitectureDecision {
+  id: string;
+  title: string;
+  status: 'proposed' | 'accepted' | 'superseded';
+  context: string;
+  decision: string;
+  rationale?: string;
+  consequences?: string;
+  timestamp: number;
+}
+
+export interface RequirementItem {
+  id: string;
+  title?: string;
+  category?: string;
+  description: string;
+  priority: 'must_have' | 'should_have' | 'nice_to_have';
+  satisfied: boolean;
+  status?: 'satisfied' | 'pending';
+  satisfiedByFiles?: string[];
+  verificationNotes?: string;
+}
+
+export interface ProjectRevision {
+  id: string;
+  prompt: string;
+  createdAt: number;
+  status: 'pending' | 'in_progress' | 'executing' | 'completed' | 'failed';
+  revisionNumber?: number;
+  tasksGenerated?: string[];
+  affectedFiles?: string[];
+  summary?: string;
+}
+
+export interface LivePreviewBundle {
+  html: string;
+  title: string;
+  generatedAt: number;
+  viewport?: 'desktop' | 'tablet' | 'mobile';
 }
 
 export type VerificationVerdict = 'in_progress' | 'blocked' | 'failed' | 'partially_verified' | 'verified';
