@@ -1,6 +1,7 @@
 import { db } from './store.js';
 import { ExecutionAdapter } from './swarm/executionAdapter.js';
 import { ProjectMemoryService } from './swarm/projectMemory.js';
+import { PreviewGenerator } from './swarm/previewGenerator.js';
 import { 
   Build, 
   VerificationReport, 
@@ -176,7 +177,32 @@ export class HonestVerificationService {
       unresolvedCriteria.push(`${inProgressTasks} tasks are still in progress or pending.`);
     }
 
-    // 5. Determine Honest Verdict based on real evidence
+    // 5. Application Live Preview & Runtime Execution Check
+    let previewResult;
+    try {
+      previewResult = PreviewGenerator.generateInteractivePreview(build.idea, files, build.projectType || 'fullstack');
+    } catch (err: any) {
+      previewResult = {
+        mode: 'fallback_preview' as const,
+        diagnosticInfo: err.message || 'Preview generation failed'
+      };
+    }
+
+    const previewPassed = previewResult.mode === 'real_application' || previewResult.mode === 'static_html';
+    checks.push({
+      category: 'preview',
+      name: 'Application Live Preview Execution',
+      status: previewPassed ? 'passed' : hasFiles ? 'failed' : 'blocked',
+      evidence: previewPassed
+        ? `Live execution verified: ${previewResult.mode === 'real_application' ? 'Real React application compiled and mounted in DOM' : 'Static project asset rendered'}.`
+        : `Preview running in fallback demonstration mode (${previewResult.diagnosticInfo || 'No runnable entry point'}).`
+    });
+
+    if (previewResult.mode === 'fallback_preview' && hasFiles) {
+      unresolvedRisks.push('Project preview is running in fallback demonstration mode and cannot be verified as running code.');
+    }
+
+    // 6. Determine Honest Verdict based on real evidence
     let verdict: VerificationVerdict;
 
     if (build.status === 'stopped' || build.status === 'failed') {
@@ -186,7 +212,8 @@ export class HonestVerificationService {
     } else if (!hasFiles || !syntaxPassed || failedTasks > 0 || testReport.failed > 0 || !secPassed) {
       verdict = 'failed';
     } else if (requirementsCoveragePercent >= 90 && syntaxPassed && secPassed && (testReport.status === 'passed' || testReport.total === 0)) {
-      if (testReport.status === 'skipped' || buildReport.status === 'skipped') {
+      // Must not be marked 'verified' if running in fallback preview mode or build/tests skipped
+      if (testReport.status === 'skipped' || buildReport.status === 'skipped' || previewResult.mode === 'fallback_preview') {
         verdict = 'partially_verified';
       } else {
         verdict = 'verified';
@@ -202,6 +229,8 @@ export class HonestVerificationService {
       requirementsCoveragePercent,
       syntaxChecksPassed: syntaxPassed,
       typeChecksPassed: typePassed,
+      previewMode: previewResult.mode,
+      previewPassed,
       testExecution: {
         total: testReport.total,
         passed: testReport.passed,
@@ -217,7 +246,7 @@ export class HonestVerificationService {
       missingEnvironmentVars: Array.from(missingEnvVars),
       unresolvedCriteria,
       unresolvedRisks,
-      evidenceSummary: `Honest Evaluation Verdict: [${verdict.toUpperCase()}]. Requirements coverage: ${requirementsCoveragePercent}%. Syntax valid: ${syntaxPassed}. Tests: ${testReport.passed}/${testReport.total} passed. Security score: ${execResult.securityAudit.score}/100.`
+      evidenceSummary: `Honest Evaluation Verdict: [${verdict.toUpperCase()}]. Requirements coverage: ${requirementsCoveragePercent}%. Syntax valid: ${syntaxPassed}. Tests: ${testReport.passed}/${testReport.total} passed. Preview mode: ${previewResult.mode}. Security score: ${execResult.securityAudit.score}/100.`
     };
 
     // Save report onto build in store

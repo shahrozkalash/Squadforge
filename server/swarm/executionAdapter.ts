@@ -555,63 +555,37 @@ export class ExecutionAdapter {
       };
     }
 
-    // Virtual build using esbuild with plugin resolving from memory files
-    const fileMap = new Map<string, string>();
-    for (const f of files) {
-      fileMap.set(f.path, f.content);
-    }
+    // Build validation using isolated sandbox disk compilation
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `squadforge_build_${buildId}_`));
 
     try {
-      const memoryPlugin: esbuild.Plugin = {
-        name: 'memory-virtual-fs',
-        setup(build) {
-          build.onResolve({ filter: /.*/ }, args => {
-            if (args.kind === 'entry-point') {
-              return { path: args.path, namespace: 'mem-fs' };
-            }
-            // Resolve relative imports
-            let resolved = path.join(path.dirname(args.importer), args.path).replace(/\\/g, '/');
-            if (!resolved.startsWith('src/') && !resolved.startsWith('tests/')) {
-              resolved = resolved.replace(/^\.?\/?/, '');
-            }
+      for (const file of files) {
+        const { valid, cleanPath } = this.sanitizeFilePath(file.path);
+        if (!valid) continue;
+        const target = path.join(tempDir, cleanPath);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, file.content, 'utf-8');
+      }
 
-            const candidates = [
-              resolved,
-              `${resolved}.ts`,
-              `${resolved}.tsx`,
-              `${resolved}.js`,
-              `${resolved}/index.ts`,
-              `${resolved}/index.tsx`
-            ];
-
-            for (const cand of candidates) {
-              if (fileMap.has(cand)) {
-                return { path: cand, namespace: 'mem-fs' };
-              }
-            }
-
-            // Treat external packages as external
-            return { path: args.path, external: true };
-          });
-
-          build.onLoad({ filter: /.*/, namespace: 'mem-fs' }, args => {
-            const content = fileMap.get(args.path);
-            if (content !== undefined) {
-              const ext = path.extname(args.path).slice(1);
-              const loader = (ext === 'tsx' || ext === 'jsx' || ext === 'ts' || ext === 'js') ? ext : 'ts';
-              return { contents: content, loader };
-            }
-            return { errors: [{ text: `File not found in project workspace: ${args.path}` }] };
-          });
-        }
-      };
-
+      const entryDiskPath = path.join(tempDir, entryFile.path);
       const result = esbuild.buildSync({
-        entryPoints: [entryFile.path],
-        plugins: [memoryPlugin],
+        entryPoints: [entryDiskPath],
         bundle: true,
         write: false,
-        target: 'es2022'
+        format: 'esm',
+        target: 'es2022',
+        external: [
+          'react', 
+          'react-dom', 
+          'react-dom/*', 
+          'react/*', 
+          'lucide-react', 
+          'express', 
+          'node:*',
+          'cors',
+          'dotenv',
+          'cookie-parser'
+        ]
       });
 
       const passed = result.errors.length === 0;
@@ -629,6 +603,12 @@ export class ExecutionAdapter {
         errors,
         output: errors.join('\n')
       };
+    } finally {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // Ignored
+      }
     }
   }
 

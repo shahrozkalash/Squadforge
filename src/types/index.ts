@@ -278,6 +278,9 @@ export interface Build {
   requirementsChecklist?: RequirementItem[];
   revisions?: ProjectRevision[];
   livePreviewHtml?: string;
+  previewMode?: 'real_application' | 'static_html' | 'fallback_preview';
+  previewDiagnostic?: string;
+  previewRuntimeErrors?: string[];
 }
 
 export type ProjectType = 
@@ -331,12 +334,23 @@ export interface LivePreviewBundle {
   title: string;
   generatedAt: number;
   viewport?: 'desktop' | 'tablet' | 'mobile';
+  mode?: 'real_application' | 'static_html' | 'fallback_preview';
+  diagnosticInfo?: string;
+  runtimeErrors?: string[];
 }
 
-export type VerificationVerdict = 'in_progress' | 'blocked' | 'failed' | 'partially_verified' | 'verified';
+export type VerificationVerdict = 
+  | 'pending'
+  | 'running'
+  | 'in_progress' 
+  | 'blocked' 
+  | 'failed' 
+  | 'partially_verified' 
+  | 'passed'
+  | 'verified';
 
 export interface VerificationCheckItem {
-  category: 'requirements' | 'files' | 'syntax' | 'types' | 'tests' | 'build' | 'security' | 'config';
+  category: 'requirements' | 'files' | 'syntax' | 'types' | 'tests' | 'build' | 'security' | 'config' | 'preview';
   name: string;
   status: 'passed' | 'failed' | 'skipped' | 'blocked';
   evidence?: string;
@@ -350,6 +364,8 @@ export interface VerificationReport {
   requirementsCoveragePercent: number;
   syntaxChecksPassed: boolean;
   typeChecksPassed: boolean;
+  previewMode?: 'real_application' | 'static_html' | 'fallback_preview';
+  previewPassed?: boolean;
   testExecution: {
     total: number;
     passed: number;

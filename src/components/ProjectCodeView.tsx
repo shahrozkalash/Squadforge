@@ -53,6 +53,7 @@ export const ProjectCodeView: React.FC = () => {
   // Preview viewport device
   const [previewDevice, setPreviewDevice] = useState<'desktop' | 'tablet' | 'mobile'>('desktop');
   const [previewKey, setPreviewKey] = useState(0);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
 
   // Natural language revision state
   const [revisionPrompt, setRevisionPrompt] = useState('');
@@ -528,62 +529,124 @@ export const ProjectCodeView: React.FC = () => {
       {primaryMode === 'preview' && (
         <div className="p-4 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4">
           {/* Viewport & Controls Bar */}
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-neutral-950 border border-neutral-800 rounded-lg">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-mono text-neutral-400 mr-2">Viewport Device:</span>
-              <div className="flex bg-neutral-900 p-0.5 rounded-lg border border-neutral-800 text-xs">
+          <div className="flex flex-col gap-3 p-3 bg-neutral-950 border border-neutral-800 rounded-lg">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs font-mono text-neutral-400 mr-1">Viewport:</span>
+                <div className="flex bg-neutral-900 p-0.5 rounded-lg border border-neutral-800 text-xs">
+                  <button
+                    onClick={() => setPreviewDevice('desktop')}
+                    className={`flex items-center gap-1.5 px-3 py-1 rounded font-medium transition-colors ${
+                      previewDevice === 'desktop' ? 'bg-neutral-800 text-amber-300' : 'text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    <Monitor className="w-3.5 h-3.5" />
+                    <span>Desktop (100%)</span>
+                  </button>
+                  <button
+                    onClick={() => setPreviewDevice('tablet')}
+                    className={`flex items-center gap-1.5 px-3 py-1 rounded font-medium transition-colors ${
+                      previewDevice === 'tablet' ? 'bg-neutral-800 text-amber-300' : 'text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    <Tablet className="w-3.5 h-3.5" />
+                    <span>Tablet (768px)</span>
+                  </button>
+                  <button
+                    onClick={() => setPreviewDevice('mobile')}
+                    className={`flex items-center gap-1.5 px-3 py-1 rounded font-medium transition-colors ${
+                      previewDevice === 'mobile' ? 'bg-neutral-800 text-amber-300' : 'text-neutral-400 hover:text-white'
+                    }`}
+                  >
+                    <Smartphone className="w-3.5 h-3.5" />
+                    <span>Mobile (375px)</span>
+                  </button>
+                </div>
+
+                {/* Preview Mode Indicator Pill */}
+                {activeBuild?.previewMode === 'real_application' && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.15)]">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span>Real Application (Vite/ESM)</span>
+                  </span>
+                )}
+                {activeBuild?.previewMode === 'static_html' && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-sky-500/10 text-sky-400 border border-sky-500/30">
+                    <span className="w-1.5 h-1.5 rounded-full bg-sky-400"></span>
+                    <span>Static HTML Render</span>
+                  </span>
+                )}
+                {activeBuild?.previewMode === 'fallback_preview' && (
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                    <AlertCircle className="w-3 h-3 text-amber-400 shrink-0" />
+                    <span>Fallback Demonstration · Unverified</span>
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {(activeBuild?.previewDiagnostic || (activeBuild?.previewRuntimeErrors && activeBuild.previewRuntimeErrors.length > 0)) && (
+                  <button
+                    onClick={() => setShowDiagnostics(d => !d)}
+                    className={`flex items-center gap-1 px-2.5 py-1 text-xs font-mono rounded border transition-colors ${
+                      showDiagnostics
+                        ? 'bg-neutral-800 text-amber-300 border-amber-500/40'
+                        : 'text-neutral-400 hover:text-neutral-200 bg-neutral-900 border-neutral-800'
+                    }`}
+                    title="Toggle Preview Diagnostics"
+                  >
+                    <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Diagnostics</span>
+                  </button>
+                )}
+
                 <button
-                  onClick={() => setPreviewDevice('desktop')}
-                  className={`flex items-center gap-1.5 px-3 py-1 rounded font-medium transition-colors ${
-                    previewDevice === 'desktop' ? 'bg-neutral-800 text-amber-300' : 'text-neutral-400 hover:text-white'
-                  }`}
+                  onClick={() => setPreviewKey(k => k + 1)}
+                  className="flex items-center gap-1 px-3 py-1 text-xs font-mono text-neutral-300 hover:text-white bg-neutral-900 hover:bg-neutral-850 border border-neutral-800 rounded transition-colors"
+                  title="Reload preview iframe"
                 >
-                  <Monitor className="w-3.5 h-3.5" />
-                  <span>Desktop (100%)</span>
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Reload</span>
                 </button>
-                <button
-                  onClick={() => setPreviewDevice('tablet')}
-                  className={`flex items-center gap-1.5 px-3 py-1 rounded font-medium transition-colors ${
-                    previewDevice === 'tablet' ? 'bg-neutral-800 text-amber-300' : 'text-neutral-400 hover:text-white'
-                  }`}
-                >
-                  <Tablet className="w-3.5 h-3.5" />
-                  <span>Tablet (768px)</span>
-                </button>
-                <button
-                  onClick={() => setPreviewDevice('mobile')}
-                  className={`flex items-center gap-1.5 px-3 py-1 rounded font-medium transition-colors ${
-                    previewDevice === 'mobile' ? 'bg-neutral-800 text-amber-300' : 'text-neutral-400 hover:text-white'
-                  }`}
-                >
-                  <Smartphone className="w-3.5 h-3.5" />
-                  <span>Mobile (375px)</span>
-                </button>
+
+                {activeBuild && (
+                  <a
+                    href={`/api/builds/${activeBuild.id}/preview`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1 px-3 py-1 text-xs font-mono text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded transition-colors"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Open Raw Tab</span>
+                  </a>
+                )}
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setPreviewKey(k => k + 1)}
-                className="flex items-center gap-1 px-3 py-1 text-xs font-mono text-neutral-300 hover:text-white bg-neutral-900 hover:bg-neutral-850 border border-neutral-800 rounded transition-colors"
-                title="Reload preview iframe"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Reload</span>
-              </button>
-
-              {activeBuild && (
-                <a
-                  href={`/api/builds/${activeBuild.id}/preview`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1 px-3 py-1 text-xs font-mono text-amber-400 hover:text-amber-300 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded transition-colors"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Open Raw Tab</span>
-                </a>
-              )}
-            </div>
+            {/* Expandable Diagnostics Drawer */}
+            {showDiagnostics && (
+              <div className="p-3 bg-neutral-900 border border-neutral-800 rounded-lg space-y-2 text-xs font-mono">
+                <div className="flex items-center justify-between text-neutral-400 pb-1 border-b border-neutral-800">
+                  <span className="font-semibold text-neutral-300">Preview Execution Diagnostics</span>
+                  <span className="text-[10px] uppercase text-neutral-500">Mode: {activeBuild?.previewMode || 'unknown'}</span>
+                </div>
+                {activeBuild?.previewDiagnostic && (
+                  <div className="text-neutral-300 leading-relaxed whitespace-pre-wrap">
+                    {activeBuild.previewDiagnostic}
+                  </div>
+                )}
+                {activeBuild?.previewRuntimeErrors && activeBuild.previewRuntimeErrors.length > 0 && (
+                  <div className="p-2 bg-red-950/40 border border-red-900/50 rounded text-red-300 space-y-1">
+                    <div className="font-semibold text-red-400">Captured Runtime Exceptions:</div>
+                    {activeBuild.previewRuntimeErrors.map((err, idx) => (
+                      <div key={idx} className="text-[11px] font-mono whitespace-pre-wrap">
+                        {err}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Sandboxed iframe container */}

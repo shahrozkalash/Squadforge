@@ -112,10 +112,14 @@ export class TaskManager {
       chosenTask = bestMatchingTask || eligibleTasks[0];
     }
 
-    // 3. If no pending tasks, look for a code review / verification opportunity
+    // 3. If no pending tasks, look for an unreviewed file (strictly preventing duplicate review tasks)
     if (!chosenTask) {
       const allFiles = db.getAllFiles(buildId);
-      const candidateFile = allFiles.find(f => f.ownerModel !== modelId && f.history.length < 4);
+      const candidateFile = allFiles.find(f => 
+        f.ownerModel !== modelId && 
+        f.history.length < 4 &&
+        !tasks.some(t => t.title.includes(f.path))
+      );
       if (candidateFile) {
         const reviewTaskId = `tsk_rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
         chosenTask = {

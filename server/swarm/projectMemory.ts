@@ -29,6 +29,10 @@ export interface ProjectDefect {
   resolved: boolean;
   discoveredAt: number;
   resolvedAt?: number;
+  repairAttempts?: number;
+  expectedCorrection?: string;
+  failedRepairs?: string[];
+  regressionTests?: string[];
 }
 
 export interface ModuleRelationship {
@@ -349,6 +353,35 @@ export class ProjectMemoryService {
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);
     return true;
+  }
+
+  /**
+   * Tracks a repair attempt on a defect. Bounded to max 3 attempts to prevent infinite repair loops.
+   */
+  static recordRepairAttempt(
+    buildId: string,
+    userId: string,
+    defectId: string,
+    attemptNote?: string,
+    failed?: boolean
+  ): { allowed: boolean; attempts: number } {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return { allowed: false, attempts: 0 };
+
+    const defect = memory.knownDefects.find(d => d.id === defectId);
+    if (!defect) return { allowed: false, attempts: 0 };
+
+    defect.repairAttempts = (defect.repairAttempts || 0) + 1;
+    if (failed && attemptNote) {
+      if (!defect.failedRepairs) defect.failedRepairs = [];
+      defect.failedRepairs.push(attemptNote);
+    }
+
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
+    const allowed = defect.repairAttempts < 3;
+    return { allowed, attempts: defect.repairAttempts };
   }
 
   /**

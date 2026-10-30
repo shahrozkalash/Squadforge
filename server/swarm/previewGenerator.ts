@@ -1,3 +1,7 @@
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
+import * as esbuild from 'esbuild';
 import { ProjectFile } from '../types.js';
 
 export interface GeneratedPreview {
@@ -6,12 +10,20 @@ export interface GeneratedPreview {
   fileCount: number;
   hasInteractiveState: boolean;
   generatedAt: number;
+  mode: 'real_application' | 'static_html' | 'fallback_preview';
+  diagnosticInfo?: string;
+  runtimeErrors?: string[];
+  entryPoint?: string;
+  supportedDevices?: string[];
 }
 
 export class PreviewGenerator {
   /**
-   * Generates a self-contained, responsive, interactive HTML bundle for live preview in an iframe.
-   * Completely isolated; runs with standard modern Tailwind CSS, Lucide icons, and zero external backend reliance.
+   * Generates a self-contained, responsive HTML bundle for live preview in an iframe.
+   * Priority:
+   * A. Real Application Preview (Bundles and executes real React / TypeScript components)
+   * B. Static HTML Preview (Renders actual index.html if no React entry point)
+   * C. Fallback Preview (Clearly labeled fallback demonstration when real compilation is unavailable)
    */
   static generateLivePreview(
     projectTypeOrIdea: string,
@@ -31,19 +43,14 @@ export class PreviewGenerator {
     files: ProjectFile[],
     projectType: string = 'fullstack'
   ): GeneratedPreview {
-    // Check if an index.html or public/index.html is directly in the project files
-    const htmlFile = files.find(f => 
-      f.path.toLowerCase() === 'index.html' || 
-      f.path.toLowerCase() === 'public/index.html' ||
-      f.path.toLowerCase().endsWith('.html')
-    );
+    const title = (idea || 'SquadForge Application').slice(0, 45).trim();
 
     // Collect all source code files
     const tsxFiles = files.filter(f => f.path.endsWith('.tsx') || f.path.endsWith('.jsx'));
     const tsFiles = files.filter(f => f.path.endsWith('.ts') && !f.path.endsWith('.d.ts'));
     const cssFiles = files.filter(f => f.path.endsWith('.css'));
 
-    // Extract component names and clean contents
+    // Component snippets for inventory/hierarchy
     const componentSnippets: Array<{ name: string; path: string; content: string }> = [];
     for (const file of tsxFiles) {
       const baseName = file.path.split('/').pop()?.replace(/\.(tsx|jsx)$/, '') || 'Component';
@@ -54,12 +61,26 @@ export class PreviewGenerator {
       });
     }
 
-    const title = idea.slice(0, 40) || 'SquadForge Preview';
+    // 1. ATTEMPT REAL APPLICATION PREVIEW
+    // If TSX / JSX files exist, bundle and execute the actual React application
+    if (tsxFiles.length > 0 || tsFiles.length > 0) {
+      const realResult = this.attemptRealApplicationBundle(idea, projectType, files, tsxFiles, tsFiles);
+      if (realResult) {
+        return realResult;
+      }
+    }
 
-    // If an existing HTML file is available, enrich it with preview wrapper
+    // 2. ATTEMPT STATIC HTML PREVIEW
+    // If index.html exists and no real React app was bundled, render static HTML
+    const htmlFile = files.find(f => 
+      f.path.toLowerCase() === 'index.html' || 
+      f.path.toLowerCase() === 'public/index.html' ||
+      f.path.toLowerCase().endsWith('.html')
+    );
+
     if (htmlFile && htmlFile.content.includes('<html')) {
       let content = htmlFile.content;
-      // Ensure Tailwind and modern fonts are included if missing
+      // Inject modern Tailwind and fonts if missing
       if (!content.includes('tailwindcss')) {
         content = content.replace(
           '</head>',
@@ -71,20 +92,318 @@ export class PreviewGenerator {
         title,
         fileCount: files.length,
         hasInteractiveState: true,
-        generatedAt: Date.now()
+        generatedAt: Date.now(),
+        mode: 'static_html',
+        entryPoint: 'index.html',
+        supportedDevices: ['desktop', 'tablet', 'mobile']
       };
     }
 
-    // Otherwise, generate a cohesive responsive interactive preview based on the generated components and project type
-    const renderedHtml = this.buildThematicPreview(idea, projectType, files, componentSnippets, cssFiles);
+    // 3. FALLBACK DEMONSTRATION PREVIEW
+    // Used when no runnable application could be compiled; clearly labeled as a fallback demonstration
+    const fallbackDiagnostic = files.length === 0
+      ? 'No files generated yet'
+      : 'No executable frontend entry point or bundle compilation failed';
+
+    const renderedHtml = this.buildThematicPreview(idea, projectType, files, componentSnippets, cssFiles, {
+      isFallback: true,
+      diagnostic: fallbackDiagnostic
+    });
 
     return {
       html: renderedHtml,
       title,
       fileCount: files.length,
       hasInteractiveState: true,
-      generatedAt: Date.now()
+      generatedAt: Date.now(),
+      mode: 'fallback_preview',
+      diagnosticInfo: fallbackDiagnostic,
+      entryPoint: 'preview.html',
+      supportedDevices: ['desktop', 'tablet', 'mobile']
     };
+  }
+
+  /**
+   * Attempts to bundle real project files into executable browser JavaScript using esbuild
+   */
+  private static attemptRealApplicationBundle(
+    idea: string,
+    projectType: string,
+    allFiles: ProjectFile[],
+    tsxFiles: ProjectFile[],
+    tsFiles: ProjectFile[]
+  ): GeneratedPreview | null {
+    const title = (idea || 'SquadForge Application').slice(0, 45).trim();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `squadforge_prev_${Date.now()}_`));
+
+    try {
+      // Write all project files to isolated temp workspace
+      for (const f of allFiles) {
+        const clean = f.path.replace(/^([a-zA-Z]:)?[\\/]+/, '').replace(/\\/g, '/');
+        if (clean.includes('..') || clean.includes('\0')) continue;
+        const target = path.join(tempDir, clean);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, f.content, 'utf-8');
+      }
+
+      // Identify or synthesize entry point
+      let entryRelPath = '';
+      if (allFiles.some(f => f.path === 'src/main.tsx' || f.path === 'src/index.tsx')) {
+        entryRelPath = allFiles.find(f => f.path === 'src/main.tsx')?.path || 'src/index.tsx';
+      } else {
+        // Find best primary component
+        const mainComp = 
+          allFiles.find(f => f.path === 'src/App.tsx') ||
+          allFiles.find(f => f.path === 'src/components/MainView.tsx') ||
+          allFiles.find(f => f.path.includes('Dashboard') || f.path.includes('Store') || f.path.includes('Hero')) ||
+          tsxFiles[0];
+
+        if (!mainComp) {
+          return null;
+        }
+
+        const compBaseName = mainComp.path.split('/').pop()?.replace(/\.(tsx|jsx)$/, '') || 'App';
+        const importRelative = './' + path.relative('src', mainComp.path).replace(/\\/g, '/').replace(/\.(tsx|jsx|ts|js)$/, '');
+
+        // Synthesize virtual mounting entry point with React Error Boundary
+        const syntheticEntry = `
+import React, { Component, ReactNode, ErrorInfo } from 'react';
+import { createRoot } from 'react-dom/client';
+import * as ImportedModule from '${importRelative}';
+
+const TargetComponent = (ImportedModule as any).default || 
+                        (ImportedModule as any)[Object.keys(ImportedModule).find(k => k !== 'default') || ''] || 
+                        (() => React.createElement('div', { className: 'p-8 text-neutral-300 font-mono text-sm' }, 'Empty component export'));
+
+class PreviewBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: Error | null }> {
+  constructor(props: any) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.warn('[PREVIEW RUNTIME NOTICE]', error?.message);
+    const errBox = document.getElementById('runtimeErrorOverlay');
+    const errMsg = document.getElementById('runtimeErrorMessage');
+    if (errBox && errMsg) {
+      errBox.classList.remove('hidden');
+      errMsg.textContent = error?.message || 'Component execution error';
+    }
+  }
+  render() {
+    if (this.state.hasError) {
+      return React.createElement(
+        'div',
+        { className: 'p-6 max-w-xl mx-auto my-12 bg-neutral-900 border border-amber-500/30 rounded-xl text-neutral-200 shadow-2xl font-sans' },
+        React.createElement('div', { className: 'flex items-center gap-2 mb-2 text-amber-400 font-bold text-sm' }, '⚠️ Interactive Preview Error Boundary'),
+        React.createElement('p', { className: 'text-xs text-neutral-400 mb-3' }, 'The component encountered an exception during rendering:'),
+        React.createElement('pre', { className: 'p-3 bg-neutral-950 rounded border border-neutral-800 text-xs font-mono text-red-400 overflow-x-auto whitespace-pre-wrap' }, this.state.error?.message || 'Unknown runtime error')
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const mountTarget = document.getElementById('root');
+if (mountTarget) {
+  try {
+    const root = createRoot(mountTarget);
+    root.render(React.createElement(PreviewBoundary, null, React.createElement(TargetComponent)));
+  } catch (mountErr: any) {
+    console.warn('[PREVIEW RUNTIME NOTICE]', mountErr?.message);
+  }
+}
+`;
+        fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+        fs.writeFileSync(path.join(tempDir, 'src/__preview_root.tsx'), syntheticEntry, 'utf-8');
+        entryRelPath = 'src/__preview_root.tsx';
+      }
+
+      // Bundle with esbuild to browser-ready ESM
+      const buildResult = esbuild.buildSync({
+        entryPoints: [path.join(tempDir, entryRelPath)],
+        bundle: true,
+        write: false,
+        format: 'esm',
+        target: 'es2022',
+        logLevel: 'silent',
+        external: [
+          'react',
+          'react-dom',
+          'react-dom/client',
+          'react/jsx-runtime',
+          'lucide-react'
+        ]
+      });
+
+      if (buildResult.errors.length > 0) {
+        return null;
+      }
+
+      const bundledJs = buildResult.outputFiles[0].text;
+      const safeTitle = this.escapeHtml(idea);
+      const filesList = allFiles.map(f => `<span class="px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 font-mono text-xs border border-neutral-700">${this.escapeHtml(f.path)}</span>`).join(' ');
+
+      const html = `<!DOCTYPE html>
+<html lang="en" class="h-full dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${safeTitle} - Live Real Application Preview</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "react": "https://esm.sh/react@19?dev",
+      "react-dom": "https://esm.sh/react-dom@19?dev",
+      "react-dom/client": "https://esm.sh/react-dom@19/client?dev",
+      "react/jsx-runtime": "https://esm.sh/react@19/jsx-runtime?dev",
+      "lucide-react": "https://esm.sh/lucide-react@0.475.0?dev"
+    }
+  }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Plus Jakarta Sans', system-ui, sans-serif; }
+    pre, code { font-family: 'JetBrains Mono', monospace; }
+  </style>
+</head>
+<body class="bg-neutral-950 text-neutral-100 min-h-screen flex flex-col selection:bg-amber-500/20 selection:text-amber-200">
+
+  <!-- Real Application Navigation Top Bar -->
+  <header class="sticky top-0 z-50 bg-neutral-900/90 backdrop-blur-md border-b border-neutral-800 px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold text-sm">
+        SF
+      </div>
+      <div>
+        <h1 class="text-sm font-bold text-white tracking-tight">${safeTitle}</h1>
+        <p class="text-[10px] text-neutral-400 font-mono capitalize">Real Application Execution · React 19 · ${projectType.replace(/_/g, ' ')}</p>
+      </div>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+        Real Application Preview
+      </span>
+      <button onclick="toggleInspectionDrawer()" class="px-3 py-1.5 rounded-md text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition">
+        Files (${allFiles.length})
+      </button>
+    </div>
+  </header>
+
+  <!-- Runtime Error Notification Banner -->
+  <div id="runtimeErrorOverlay" class="hidden p-4 m-4 bg-red-950/80 border border-red-500/50 rounded-xl text-red-200 text-xs font-mono shadow-xl">
+    <div class="font-bold text-red-300 mb-1 flex items-center gap-2">
+      <span>⚠️ Component Runtime Error:</span>
+    </div>
+    <div id="runtimeErrorMessage" class="whitespace-pre-wrap"></div>
+  </div>
+
+  <!-- Real Application Mount Container -->
+  <main id="root" class="flex-1 flex flex-col min-h-[500px]">
+    <div class="flex-1 flex items-center justify-center p-12 text-neutral-500 font-mono text-xs">
+      Loading real interactive application bundle...
+    </div>
+  </main>
+
+  <!-- Bottom Workspace File Bar -->
+  <div class="border-t border-neutral-800 bg-neutral-900/60 p-3 px-6 text-xs text-neutral-400 flex flex-wrap items-center gap-2">
+    <span class="font-semibold text-neutral-300">Application Source Files:</span>
+    ${filesList}
+  </div>
+
+  <!-- Component Hierarchy Drawer -->
+  <div id="inspectionDrawer" class="hidden fixed inset-y-0 right-0 w-96 bg-neutral-900 border-l border-neutral-800 shadow-2xl z-50 p-6 flex flex-col overflow-y-auto">
+    <div class="flex items-center justify-between pb-4 border-b border-neutral-800 mb-4">
+      <h3 class="text-sm font-bold text-white">Project Modules</h3>
+      <button onclick="toggleInspectionDrawer()" class="text-neutral-400 hover:text-white text-sm font-bold">&times;</button>
+    </div>
+    <div class="space-y-4 flex-1">
+      ${tsxFiles.map(c => `
+        <div class="p-3 bg-neutral-950 border border-neutral-800 rounded-lg">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-bold text-emerald-400 text-xs font-mono">${this.escapeHtml(c.path.split('/').pop() || '')}</span>
+            <span class="text-[10px] text-neutral-500 font-mono">${c.content.split('\n').length} lines</span>
+          </div>
+          <p class="text-[11px] text-neutral-400 font-mono truncate">${this.escapeHtml(c.path)}</p>
+        </div>
+      `).join('')}
+    </div>
+  </div>
+
+  <!-- Offline Lucide SVG Fallback Map -->
+  <script>
+    const SVGMAP = {
+      'zap': '<svg class="w-5 h-5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>',
+      'shield-check': '<svg class="w-5 h-5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>',
+      'smartphone': '<svg class="w-5 h-5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect width="14" height="20" x="5" y="2" rx="2" ry="2" stroke-width="2"/><path stroke-linecap="round" stroke-width="2" d="M12 18h.01"/></svg>',
+      'layout-dashboard': '<svg class="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/></svg>',
+      'line-chart': '<svg class="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3v18h18M18 9l-5 5-4-4-6 6"/></svg>',
+      'settings': '<svg class="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" stroke-width="2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
+      'check': '<svg class="w-4 h-4 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>'
+    };
+
+    function toggleInspectionDrawer() {
+      const drawer = document.getElementById('inspectionDrawer');
+      if (drawer) drawer.classList.toggle('hidden');
+    }
+
+    // Capture and display runtime failures clearly
+    window.addEventListener('error', function(e) {
+      console.warn('[PREVIEW RUNTIME NOTICE]', e?.message);
+      const errBox = document.getElementById('runtimeErrorOverlay');
+      const errMsg = document.getElementById('runtimeErrorMessage');
+      if (errBox && errMsg) {
+        errBox.classList.remove('hidden');
+        errMsg.textContent = e?.message || 'Uncaught script error in preview';
+      }
+    });
+
+    window.addEventListener('unhandledrejection', function(e) {
+      console.warn('[PREVIEW RUNTIME NOTICE]', e?.reason);
+    });
+
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      try { window.lucide.createIcons(); } catch (err) {}
+    } else {
+      document.querySelectorAll('i[data-lucide]').forEach(function(el) {
+        const iconName = el.getAttribute('data-lucide');
+        if (SVGMAP[iconName]) el.innerHTML = SVGMAP[iconName];
+      });
+    }
+  </script>
+
+  <!-- Real Application Code Executable Script -->
+  <script type="module">
+${bundledJs}
+  </script>
+</body>
+</html>`;
+
+      return {
+        html,
+        title,
+        fileCount: allFiles.length,
+        hasInteractiveState: true,
+        generatedAt: Date.now(),
+        mode: 'real_application',
+        entryPoint: entryRelPath,
+        supportedDevices: ['desktop', 'tablet', 'mobile']
+      };
+    } catch (err: any) {
+      console.warn('[PREVIEW BUNDLE NOTICE] Could not bundle real application, falling back:', err.message);
+      return null;
+    } finally {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {}
+    }
   }
 
   private static buildThematicPreview(
@@ -92,12 +411,14 @@ export class PreviewGenerator {
     projectType: string,
     files: ProjectFile[],
     components: Array<{ name: string; path: string; content: string }>,
-    _cssFiles: ProjectFile[]
+    _cssFiles: ProjectFile[],
+    options?: { isFallback?: boolean; diagnostic?: string }
   ): string {
     const safeTitle = this.escapeHtml(idea);
     const filesList = files.map(f => `<span class="px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 font-mono text-xs border border-neutral-700">${this.escapeHtml(f.path)}</span>`).join(' ');
+    const isFallback = options?.isFallback ?? false;
+    const diagnostic = options?.diagnostic || 'Simulated demonstration preview';
 
-    // Extract key text features or create dynamic interactive preview
     return `<!DOCTYPE html>
 <html lang="en" class="h-full dark">
 <head>
@@ -137,6 +458,17 @@ export class PreviewGenerator {
 </head>
 <body class="bg-neutral-950 text-neutral-100 min-h-screen flex flex-col selection:bg-amber-500/20 selection:text-amber-200">
 
+  ${isFallback ? `
+  <!-- Honest Fallback Demonstration Banner (Never claim it is real running code) -->
+  <div class="bg-amber-500/10 border-b border-amber-500/30 px-6 py-2 text-xs text-amber-300 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 font-mono text-[10px] font-bold uppercase">Fallback Demonstration</span>
+      <span>${this.escapeHtml(diagnostic)}. This is a specification demonstration preview, NOT the actual running code.</span>
+    </div>
+    <span class="text-[11px] font-mono text-amber-400">Unverified Execution</span>
+  </div>
+  ` : ''}
+
   <!-- Interactive Top App Navigation -->
   <header class="sticky top-0 z-50 bg-neutral-900/90 backdrop-blur-md border-b border-neutral-800 px-6 py-3.5 flex items-center justify-between">
     <div class="flex items-center gap-3">
@@ -145,13 +477,15 @@ export class PreviewGenerator {
       </div>
       <div>
         <h1 class="text-sm font-bold text-white tracking-tight">${safeTitle}</h1>
-        <p class="text-[10px] text-neutral-400 font-mono capitalize">SquadForge Interactive Preview · ${projectType.replace(/_/g, ' ')}</p>
+        <p class="text-[10px] text-neutral-400 font-mono capitalize">
+          ${isFallback ? 'Fallback Demonstration Preview' : 'Interactive Live Preview'} · ${projectType.replace(/_/g, ' ')}
+        </p>
       </div>
     </div>
     <div class="flex items-center gap-2">
-      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-        <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-        Interactive Live Preview
+      <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${isFallback ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'}">
+        <span class="w-1.5 h-1.5 rounded-full ${isFallback ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}"></span>
+        ${isFallback ? 'Fallback Demonstration Preview' : 'Interactive Live Preview'}
       </span>
       <button onclick="toggleInspectionDrawer()" class="px-3 py-1.5 rounded-md text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition">
         Components (${components.length})

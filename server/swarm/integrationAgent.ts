@@ -1,6 +1,7 @@
 import { ProjectFile } from '../types.js';
 import { db } from '../store.js';
 import { TaskManager } from './taskManager.js';
+import { ProjectMemoryService } from './projectMemory.js';
 
 export interface IntegrationIssue {
   type: 'missing_imported_file' | 'unexported_identifier' | 'missing_env_doc' | 'api_route_mismatch';
@@ -197,12 +198,32 @@ export class IntegrationAgent {
   static spawnIntegrationFixTasks(buildId: string, issues: IntegrationIssue[]): void {
     const errorIssues = issues.filter(i => i.severity === 'error');
     const existingTasks = db.getTasks(buildId);
+    const build = db.getBuild(buildId);
 
     for (const issue of errorIssues.slice(0, 3)) {
       const taskTitle = `[Integration Fix] Resolve broken import: ${issue.identifier || issue.targetFile || 'cross-module contract'}`;
       // Prevent duplicate fix tasks
       if (existingTasks.some(t => t.title === taskTitle && t.status !== 'failed')) {
         continue;
+      }
+
+      // Check bounded repair limits in ProjectMemoryService
+      if (build) {
+        const defectId = ProjectMemoryService.recordDefect(buildId, build.userId, {
+          description: issue.message,
+          filePaths: [issue.sourceFile, issue.targetFile || ''].filter(Boolean),
+          severity: 'high'
+        });
+
+        if (defectId) {
+          const memory = ProjectMemoryService.getOrInitializeMemory(buildId, build.userId);
+          const defect = memory?.knownDefects.find(d => d.id === defectId);
+          if (defect && (defect.repairAttempts || 0) >= 3) {
+            // Reached maximum bounded self-repair attempts (3 max)
+            continue;
+          }
+          ProjectMemoryService.recordRepairAttempt(buildId, build.userId, defectId, 'Spawned integration fix task');
+        }
       }
 
       TaskManager.createNewTask(buildId, {

@@ -540,6 +540,17 @@ Output ONLY JSON matching this structure:
         milestone: m2
       });
 
+      const taskEntry = TaskManager.createNewTask(build.id, {
+        title: 'Integrate Landing Application Entry Point & Responsive Layout',
+        description: 'Unify Hero, Features, Pricing, and Contact form into runnable root src/App.tsx with responsive navigation',
+        filePaths: ['src/App.tsx'],
+        priority: 2,
+        dependencies: [task2.id, task3.id, task4.id],
+        maxRetries: this.MAX_TASK_RETRIES,
+        assignedRole: 'frontend_developer',
+        milestone: m2
+      });
+
       const task5 = TaskManager.createNewTask(build.id, {
         title: 'Automated Responsive Test Suite & Accessibility Verification',
         description: 'Verify accessibility attributes, component props, and responsive viewport sizing',
@@ -575,7 +586,7 @@ Output ONLY JSON matching this structure:
 
       if (build.milestones) {
         build.milestones[0].taskIds.push(task1.id);
-        build.milestones[1].taskIds.push(task2.id, task3.id, task4.id);
+        build.milestones[1].taskIds.push(task2.id, task3.id, task4.id, taskEntry.id);
         build.milestones[2].taskIds.push(task5.id, task6.id);
       }
       return;
@@ -625,6 +636,17 @@ Output ONLY JSON matching this structure:
       milestone: m2
     });
 
+    const taskEntry = TaskManager.createNewTask(build.id, {
+      title: 'Integrate Fullstack Application Entry Point & Interactive View State',
+      description: `Unify backend engine, client state store, and UI components into interactive runnable root src/App.tsx for: ${build.idea}`,
+      filePaths: ['src/App.tsx'],
+      priority: 2,
+      dependencies: [task1.id, task4.id],
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'frontend_developer',
+      milestone: m2
+    });
+
     const task5 = TaskManager.createNewTask(build.id, {
       title: 'Create Automated Test Suite & Assertions',
       description: 'Write unit tests validating core functionality, edge cases, and error boundaries',
@@ -660,7 +682,7 @@ Output ONLY JSON matching this structure:
 
     if (build.milestones) {
       build.milestones[0].taskIds.push(task1.id);
-      build.milestones[1].taskIds.push(task2.id, task3.id, task4.id);
+      build.milestones[1].taskIds.push(task2.id, task3.id, task4.id, taskEntry.id);
       build.milestones[2].taskIds.push(task5.id, task6.id);
     }
   }
