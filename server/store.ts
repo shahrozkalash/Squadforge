@@ -923,6 +923,19 @@ export class PersistentDatabase {
   // --- GitHub Credentials ---
 
   setGithubToken(userId: string, plainToken: string, username?: string): void {
+    if (userId && !this.users.has(userId)) {
+      this.saveUser({
+        id: userId,
+        email: `${userId}@squadforge.internal`,
+        name: userId,
+        githubConnected: true,
+        githubUsername: username,
+        costLimitPerBuild: 5.0,
+        enabledModelIds: [],
+        createdAt: this.getTime()
+      });
+    }
+
     const encrypted = encryptToken(plainToken);
     this.encryptedGithubTokens.set(userId, encrypted);
 
@@ -1461,6 +1474,18 @@ export class PersistentDatabase {
       this.usageLogs = this.usageLogs.slice(-4000);
     }
     this.broadcast(entry.buildId, 'usage_logged', entry);
+
+    if (entry.userId && !this.users.has(entry.userId)) {
+      this.saveUser({
+        id: entry.userId,
+        email: `${entry.userId}@squadforge.internal`,
+        name: entry.userId,
+        githubConnected: false,
+        costLimitPerBuild: 5.0,
+        enabledModelIds: [],
+        createdAt: this.getTime()
+      });
+    }
 
     try {
       this.dbManager.db.prepare(`

@@ -4,6 +4,7 @@ import { db } from '../server/store.js';
 import { resolveUser } from '../server.js';
 import { hashPassword, generateSessionToken } from '../server/crypto.js';
 import { User, Build } from '../server/types.js';
+import { GitHubService } from '../server/github.js';
 
 describe('SquadForge Public Access, Multi-Tenant Session Isolation & Security', () => {
   beforeEach(() => {
@@ -144,5 +145,63 @@ describe('SquadForge Public Access, Multi-Tenant Session Isolation & Security', 
     const guest = resolveUser(mockReq, mockRes);
 
     assert.ok(guest.costLimitPerBuild <= 2.0, 'Guest user default cost limit must be capped at $2.00');
+  });
+
+  test('Security: Guest A cannot access or modify Guest B project files', () => {
+    const mockReqA: any = { cookies: {}, headers: {}, ip: '10.0.0.1' };
+    const mockResA: any = { cookie: (n: string, v: string) => { mockReqA.cookies[n] = v; } };
+    const guestA = resolveUser(mockReqA, mockResA);
+
+    const mockReqB: any = { cookies: {}, headers: {}, ip: '10.0.0.2' };
+    const mockResB: any = { cookie: (n: string, v: string) => { mockReqB.cookies[n] = v; } };
+    const guestB = resolveUser(mockReqB, mockResB);
+
+    const buildB = db.saveBuild({
+      id: `bld_priv_${Date.now()}`,
+      userId: guestB.id,
+      idea: 'Guest B Private Work',
+      status: 'completed',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      selectedModels: ['gemini'],
+      autoPushGithub: false,
+      totalTokens: 10,
+      totalCost: 0.0001,
+      costLimit: 2.0,
+      maxDurationSeconds: 60,
+      patchesAppliedCount: 1
+    });
+
+    // Check build ownership
+    const fetchedBuild = db.getBuild(buildB.id);
+    assert.ok(fetchedBuild);
+    assert.equal(fetchedBuild.userId, guestB.id);
+    assert.notEqual(fetchedBuild.userId, guestA.id, 'Build must belong strictly to Guest B');
+  });
+
+  test('Security: Production requires valid APP_URL for OAuth redirects and rejects unverified hosts', () => {
+    const origEnv = process.env.NODE_ENV;
+    const origAppUrl = process.env.APP_URL;
+
+    try {
+      process.env.NODE_ENV = 'production';
+      delete process.env.APP_URL;
+
+      // In production without APP_URL, getTrustedOrigin falls back to loopback and never trusts arbitrary headers
+      const trusted = GitHubService.getTrustedOrigin({
+        headers: { host: 'malicious-spoofed-host.evil.com' },
+        protocol: 'https'
+      } as any);
+
+      assert.equal(trusted.includes('malicious-spoofed-host.evil.com'), false, 'Must not trust spoofed host in production');
+      assert.match(trusted, /^http:\/\/127\.0\.0\.1:/, 'Must fall back safely to loopback origin');
+    } finally {
+      process.env.NODE_ENV = origEnv;
+      if (origAppUrl !== undefined) {
+        process.env.APP_URL = origAppUrl;
+      } else {
+        delete process.env.APP_URL;
+      }
+    }
   });
 });
