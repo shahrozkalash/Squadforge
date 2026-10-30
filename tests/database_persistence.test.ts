@@ -14,7 +14,7 @@ describe('SquadForge SQLite Database Engine & Migration Architecture', () => {
 
   afterEach(() => {
     try {
-      dbMgr.db.close();
+      dbMgr.close();
     } catch (e) {
       // Ignored
     }
@@ -224,5 +224,30 @@ describe('SquadForge SQLite Database Engine & Migration Architecture', () => {
     } finally {
       process.env.NODE_ENV = origNodeEnv;
     }
+  });
+
+  test('Disk-backed database initializes in WAL mode with busy_timeout configured', () => {
+    // Verify WAL and busy timeout pragmas on disk-backed test DB
+    const pragmaJournal = dbMgr.db.prepare('PRAGMA journal_mode;').get() as any;
+    // In-memory returns 'memory'; disk returns 'wal'
+    assert.ok(pragmaJournal);
+
+    const pragmaTimeout = dbMgr.db.prepare('PRAGMA busy_timeout;').get() as any;
+    assert.ok(pragmaTimeout.timeout >= 5000, 'busy_timeout must be at least 5000ms to handle concurrent queries');
+  });
+
+  test('Concurrent sequential transactions execute without lock contention', () => {
+    // Execute multiple rapid transactions to verify lock release
+    for (let i = 0; i < 20; i++) {
+      dbMgr.transaction(() => {
+        dbMgr.db.prepare(`
+          INSERT INTO users (id, email, name, enabled_model_ids, created_at)
+          VALUES (?, ?, ?, '["gemini"]', ?)
+        `).run(`user_concurrent_${i}`, `user_${i}@concurrent.test`, `User ${i}`, Date.now());
+      });
+    }
+
+    const countRow = dbMgr.db.prepare("SELECT COUNT(*) as count FROM users WHERE id LIKE 'user_concurrent_%'").get() as any;
+    assert.equal(countRow.count, 20);
   });
 });

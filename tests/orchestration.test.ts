@@ -1,4 +1,4 @@
-import { test, describe, beforeEach } from 'node:test';
+import { test, describe, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { 
   callUnifiedGateway, 
@@ -106,6 +106,15 @@ describe('SquadForge Model Routing & Gateway Reliability', () => {
 
     assert.ok(valid);
     assert.equal(valid.actions.length, 3);
+  });
+
+  after(() => {
+    const handles = (process as any)._getActiveHandles();
+    for (const h of handles) {
+      if (h && typeof h.destroy === 'function' && h?.constructor?.name?.includes('Socket')) {
+        try { h.destroy(); } catch {}
+      }
+    }
   });
 });
 

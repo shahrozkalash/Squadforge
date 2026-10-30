@@ -48,6 +48,7 @@ export class LocalLLMService {
     const endpoint = this.config.endpointUrl.replace(/\/+$/, '');
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), Math.min(this.config.timeoutMs, 5000));
+    timeoutId.unref?.();
 
     try {
       // 1. Try OpenAI-compatible /models endpoint
@@ -142,6 +143,7 @@ export class LocalLLMService {
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    timeoutId.unref?.();
 
     try {
       const response = await fetch(`${endpoint}/chat/completions`, {
@@ -161,8 +163,6 @@ export class LocalLLMService {
         }),
         signal: controller.signal
       });
-
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
         return {
@@ -225,6 +225,8 @@ export class LocalLLMService {
         error: errMsg,
         errorCode: 'LOCAL_LLM_OFFLINE'
       };
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 }

@@ -248,6 +248,57 @@ export class ProjectMemoryService {
   }
 
   /**
+   * Records a user-approved natural language revision, updates memory provenance,
+   * and marks outdated or contradictory assumptions as superseded.
+   */
+  static recordRevision(
+    buildId: string,
+    userId: string,
+    revision: ProjectRevision
+  ): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    if (!memory.revisions) memory.revisions = [];
+    const existingIndex = memory.revisions.findIndex(r => r.id === revision.id);
+    if (existingIndex >= 0) {
+      memory.revisions[existingIndex] = revision;
+    } else {
+      memory.revisions.push(revision);
+    }
+
+    // Record as confirmed requirement fact with explicit user_revision provenance
+    const newFact: ProjectFact = {
+      id: `fact_rev_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      category: 'requirement',
+      statement: `User revision #${revision.revisionNumber}: "${revision.prompt}"`,
+      confidence: 'confirmed',
+      source: 'user_revision',
+      timestamp: Date.now()
+    };
+    memory.facts.unshift(newFact);
+
+    // Scan previous assumptions to mark superseded if relevant keywords overlap
+    const keywords = revision.prompt.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+    for (const f of memory.facts) {
+      if (f.id !== newFact.id && f.confidence === 'assumption') {
+        const matches = keywords.some(k => f.statement.toLowerCase().includes(k));
+        if (matches && !f.statement.startsWith('[SUPERSEDED')) {
+          f.statement = `[SUPERSEDED by Rev #${revision.revisionNumber}] ${f.statement}`;
+        }
+      }
+    }
+
+    if (memory.facts.length > this.MAX_FACTS) {
+      memory.facts = memory.facts.slice(0, this.MAX_FACTS);
+    }
+
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+    return true;
+  }
+
+  /**
    * Logs a known defect identified by the verification service
    */
   static recordDefect(

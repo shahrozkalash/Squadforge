@@ -1307,6 +1307,13 @@ Output ONLY JSON in this exact schema:
 
     revision.tasksGenerated = [revisionTask.id];
 
+    // Synchronize into persistent project memory
+    try {
+      ProjectMemoryService.recordRevision(buildId, build.userId, revision);
+    } catch (err) {
+      console.warn(`Failed to synchronize revision into ProjectMemory:`, err);
+    }
+
     build.status = 'running';
     db.saveBuild(build);
 

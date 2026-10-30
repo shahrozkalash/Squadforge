@@ -130,7 +130,7 @@ export class PersistentDatabase {
    */
   private initializeStorage() {
     try {
-      if (process.env.NODE_ENV === 'production' && this.dbManager.isMemoryStorage()) {
+      if (process.env.NODE_ENV === 'production' && typeof this.dbManager?.isMemoryStorage === 'function' && this.dbManager.isMemoryStorage()) {
         throw new Error('FATAL: SQLite storage cannot run in-memory in production environment.');
       }
 
@@ -1696,7 +1696,25 @@ export class PersistentDatabase {
   }
 
   public getProjectMemory(projectId: string): ProjectMemory | null {
-    return this.projectMemories.get(projectId) || null;
+    const cached = this.projectMemories.get(projectId);
+    if (cached) return cached;
+
+    try {
+      const row = this.dbManager.db.prepare('SELECT memory_data FROM project_memories WHERE project_id = ?').get(projectId) as { memory_data: string } | undefined;
+      if (row && row.memory_data) {
+        try {
+          const parsed = JSON.parse(row.memory_data);
+          this.projectMemories.set(projectId, parsed);
+          return parsed;
+        } catch (parseErr) {
+          console.warn(`[STORAGE] Corrupt project memory data for ${projectId}, recovering cleanly:`, parseErr);
+          return null;
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[STORAGE] Failed to query project memory for ${projectId}:`, err?.message);
+    }
+    return null;
   }
 
   public saveProjectMemory(memory: ProjectMemory): void {

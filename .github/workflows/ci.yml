@@ -34,4 +34,5 @@ jobs:
         run: npm test
 
       - name: Build Production Frontend Bundle
+        if: success() || failure()
         run: npm run build

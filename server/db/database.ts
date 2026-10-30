@@ -1,5 +1,6 @@
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 // @ts-ignore - node:sqlite is built-in in Node.js 22
 import { DatabaseSync } from 'node:sqlite';
 
@@ -13,10 +14,17 @@ export class DatabaseManager {
   private static instance: DatabaseManager | null = null;
   public db: DatabaseSync;
   private isInMemory: boolean = false;
+  private dbPath: string = ':memory:';
 
   private constructor(dbPath?: string) {
     const isProduction = process.env.NODE_ENV === 'production';
-    const requestedPath = dbPath || process.env.SQLITE_DB_PATH;
+    const isTest = process.env.NODE_ENV === 'test' || process.argv.some(arg => arg.includes('test'));
+    let requestedPath = dbPath || process.env.SQLITE_DB_PATH;
+
+    if (!requestedPath && isTest && !isProduction) {
+      const tmpDir = os.tmpdir();
+      requestedPath = path.join(tmpDir, `squadforge-test-${process.pid}.db`);
+    }
 
     if (requestedPath === ':memory:' || dbPath === ':memory:') {
       if (isProduction) {
@@ -24,6 +32,7 @@ export class DatabaseManager {
       }
       this.db = new DatabaseSync(':memory:');
       this.isInMemory = true;
+      this.dbPath = ':memory:';
       console.warn('[STORAGE] Running with in-memory SQLite database (development/test mode only). Data will not persist across restarts.');
     } else {
       const targetPath = requestedPath || path.resolve(process.cwd(), 'squadforge.db');
@@ -32,6 +41,7 @@ export class DatabaseManager {
         fs.mkdirSync(dir, { recursive: true });
       }
       this.db = new DatabaseSync(targetPath);
+      this.dbPath = targetPath;
     }
 
     this.configurePragmas();
@@ -42,8 +52,29 @@ export class DatabaseManager {
     return this.isInMemory;
   }
 
+  public getDbPath(): string {
+    return this.dbPath;
+  }
+
+  public close(): void {
+    try {
+      this.db.close();
+    } catch {
+      // already closed
+    }
+    if (DatabaseManager.instance === this) {
+      DatabaseManager.instance = null;
+    }
+  }
+
   static getInstance(dbPath?: string): DatabaseManager {
     if (!DatabaseManager.instance) {
+      DatabaseManager.instance = new DatabaseManager(dbPath);
+    } else if (dbPath && (
+      (dbPath === ':memory:' && !DatabaseManager.instance.isInMemory) ||
+      (dbPath !== ':memory:' && DatabaseManager.instance.isInMemory)
+    )) {
+      DatabaseManager.instance.close();
       DatabaseManager.instance = new DatabaseManager(dbPath);
     }
     return DatabaseManager.instance;
@@ -66,12 +97,17 @@ export class DatabaseManager {
   }
 
   private configurePragmas(): void {
+    // CRITICAL: Set busy_timeout first so concurrent workers wait rather than throwing SQLITE_BUSY
+    this.db.exec('PRAGMA busy_timeout = 30000;');
+    this.db.exec('PRAGMA foreign_keys = ON;');
     if (!this.isInMemory) {
-      this.db.exec('PRAGMA journal_mode = WAL;');
+      try {
+        this.db.exec('PRAGMA journal_mode = WAL;');
+      } catch (err) {
+        // WAL may already be active or temporarily shared
+      }
       this.db.exec('PRAGMA synchronous = NORMAL;');
     }
-    this.db.exec('PRAGMA foreign_keys = ON;');
-    this.db.exec('PRAGMA busy_timeout = 5000;');
   }
 
   private runMigrations(): void {
@@ -434,9 +470,20 @@ export class DatabaseManager {
 
     for (const m of migrations) {
       if (!appliedNames.has(m.name) && !appliedIds.has(m.id)) {
-        m.up(this.db);
-        const stmt = this.db.prepare('INSERT OR REPLACE INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)');
-        stmt.run(m.id, m.name, Date.now());
+        this.db.exec('BEGIN IMMEDIATE;');
+        try {
+          // Re-check inside transaction in case another connection applied it
+          const row = this.db.prepare('SELECT id FROM _migrations WHERE id = ? OR name = ?').get(m.id, m.name);
+          if (!row) {
+            m.up(this.db);
+            const stmt = this.db.prepare('INSERT OR REPLACE INTO _migrations (id, name, applied_at) VALUES (?, ?, ?)');
+            stmt.run(m.id, m.name, Date.now());
+          }
+          this.db.exec('COMMIT;');
+        } catch (err) {
+          try { this.db.exec('ROLLBACK;'); } catch {}
+          throw err;
+        }
       }
     }
   }

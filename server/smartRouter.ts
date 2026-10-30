@@ -672,11 +672,18 @@ export class SmartModelRouter {
         }
       });
 
-      const timeoutPromise = new Promise<never>((_, reject) => 
-        setTimeout(() => reject(new Error('Gateway timeout (8000ms)')), 8000)
-      );
+      let timer: NodeJS.Timeout | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Gateway timeout (8000ms)')), 8000);
+        timer?.unref?.();
+      });
 
-      const response: any = await Promise.race([genAiCall, timeoutPromise]);
+      let response: any;
+      try {
+        response = await Promise.race([genAiCall, timeoutPromise]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
       const text = response?.text || '';
       const parsed = extractAndParseJson(text);
 

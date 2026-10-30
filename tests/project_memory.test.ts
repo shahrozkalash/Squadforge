@@ -281,4 +281,73 @@ describe('SquadForge Project Intelligence & Persistent Memory Architecture', () 
     assert.equal(loaded.userId, userA);
     assert.ok(loaded.facts.some(f => f.statement.includes('987654')));
   });
+
+  test('9. Revision recording updates memory revisions and supersedes previous assumptions', () => {
+    // Record an assumption first
+    ProjectMemoryService.recordFact(buildId, userA, {
+      category: 'constraint',
+      statement: 'Default chart colors should be monochrome slate',
+      confidence: 'assumption',
+      source: 'architect_agent'
+    });
+
+    // User applies a revision to use neon amber palette
+    const revision = {
+      id: 'rev_test_color_palette',
+      revisionNumber: 1,
+      prompt: 'Change default chart colors to vibrant neon amber palette',
+      createdAt: Date.now(),
+      status: 'in_progress' as const,
+      summary: 'Change chart colors',
+      tasksGenerated: ['tsk_rev_1']
+    };
+
+    const recorded = ProjectMemoryService.recordRevision(buildId, userA, revision);
+    assert.equal(recorded, true);
+
+    const memory = ProjectMemoryService.getOrInitializeMemory(buildId, userA)!;
+    assert.ok(memory.revisions.some(r => r.id === 'rev_test_color_palette'));
+
+    // Check revision confirmed fact exists
+    const revFact = memory.facts.find(f => f.source === 'user_revision');
+    assert.ok(revFact);
+    assert.equal(revFact.confidence, 'confirmed');
+
+    // Check old assumption statement is superseded
+    const oldFact = memory.facts.find(f => f.statement.includes('monochrome slate'));
+    assert.ok(oldFact);
+    assert.ok(oldFact.statement.startsWith('[SUPERSEDED by Rev #1]'));
+  });
+
+  test('10. Corrupted or unparseable project memory record is handled gracefully without crashing', () => {
+    const corruptBuildId = 'bld_corrupt_memory_test';
+    db.saveBuild({
+      id: corruptBuildId,
+      userId: userA,
+      idea: 'Corrupt Memory Recovery Test',
+      status: 'planning',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      selectedModels: ['gemini'],
+      autoPushGithub: false,
+      totalTokens: 0,
+      totalCost: 0,
+      costLimit: 5,
+      maxDurationSeconds: 100,
+      patchesAppliedCount: 0
+    });
+
+    // Directly insert corrupt JSON in project_memories table
+    db.dbManager.db.prepare(`
+      INSERT OR REPLACE INTO project_memories (project_id, user_id, memory_data, updated_at)
+      VALUES (?, ?, ?, ?)
+    `).run(corruptBuildId, userA, '{invalid:json:data', Date.now());
+
+    // Service must safely handle and re-initialize rather than throw syntax error
+    const recovered = ProjectMemoryService.getOrInitializeMemory(corruptBuildId, userA);
+    assert.ok(recovered);
+    assert.equal(recovered.projectId, corruptBuildId);
+    assert.equal(recovered.userId, userA);
+    assert.ok(recovered.facts.length > 0);
+  });
 });

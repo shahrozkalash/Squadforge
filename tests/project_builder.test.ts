@@ -247,6 +247,18 @@ describe('Project Builder Intelligence & Autonomous Architecture Tests', () => {
       assert.ok(preview.html.includes('Cloud Orchestration'));
       assert.ok(preview.html.length > 500);
     });
+
+    it('includes Lucide offline SVG fallback map and runtime error guard in generated bundle', () => {
+      const preview = PreviewGenerator.generateLivePreview(
+        'saas_dashboard',
+        'FinTech Analytics Dashboard',
+        []
+      );
+
+      assert.ok(preview.html.includes('SVGMAP'), 'Must include inline SVG icon fallback map');
+      assert.ok(preview.html.includes('PREVIEW RUNTIME NOTICE') || preview.html.includes('addEventListener'), 'Must include error handler');
+      assert.ok(preview.html.includes('layout-dashboard'));
+    });
   });
 
   describe('Natural Language Revisions Dispatch & Execution', () => {
