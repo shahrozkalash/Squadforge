@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
@@ -315,29 +316,9 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ success: true, message: 'Logged out successfully.' });
 });
 
-// 4. Session Verification & Current User
+// 4. Session Verification & Current User (Allows immediate public guest access)
 app.get('/api/auth/me', (req, res) => {
-  const token = 
-    req.cookies[SESSION_COOKIE_NAME] || 
-    req.headers.authorization?.replace(/^Bearer\s+/i, '');
-
-  if (!token) {
-    return res.status(401).json({ authenticated: false, user: null });
-  }
-
-  const session = db.getSession(token);
-  if (!session) {
-    res.clearCookie(SESSION_COOKIE_NAME);
-    return res.status(401).json({ authenticated: false, user: null });
-  }
-
-  const user = db.getUser(session.userId);
-  if (!user) {
-    db.deleteSession(token);
-    res.clearCookie(SESSION_COOKIE_NAME);
-    return res.status(401).json({ authenticated: false, user: null });
-  }
-
+  const user = resolveUser(req, res);
   return res.json({
     authenticated: true,
     user: db.toSafeUser(user)
@@ -1459,7 +1440,12 @@ async function startServer() {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer().catch((err) => {
-  console.error('Fatal error starting server:', err);
-  process.exit(1);
-});
+const isTestRun = process.env.NODE_ENV === 'test' || process.argv.some(arg => arg.includes('test'));
+if (!isTestRun) {
+  startServer().catch((err) => {
+    console.error('Fatal error starting server:', err);
+    process.exit(1);
+  });
+}
+
+export { app, resolveUser };

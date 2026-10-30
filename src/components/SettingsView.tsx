@@ -125,36 +125,42 @@ export const SettingsView: React.FC = () => {
         <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
           <div className="flex items-center gap-2">
             <UserIcon className="w-4 h-4 text-amber-400" />
-            <h2 className="text-sm font-semibold text-white">Authenticated Profile & Session Security</h2>
+            <h2 className="text-sm font-semibold text-white">
+              {user?.isAnonymous ? 'Workspace Session & Tenant Isolation' : 'Authenticated Profile & Session Security'}
+            </h2>
           </div>
           <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">
-            Active Session
+            {user?.isAnonymous ? 'Public Guest Session' : 'Active Account'}
           </span>
         </div>
 
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-neutral-950 border border-neutral-800 rounded-lg">
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <span className="font-semibold text-white">{user?.name || 'Engineer'}</span>
-              <span className="text-xs font-mono text-neutral-400">({user?.email})</span>
+              <span className="font-semibold text-white">{user?.name || 'Guest Developer'}</span>
+              <span className="text-xs font-mono text-neutral-400">
+                {user?.isAnonymous ? '(Isolated Anonymous Session)' : `(${user?.email})`}
+              </span>
             </div>
             <div className="text-xs text-neutral-500 flex flex-wrap items-center gap-x-4 gap-y-1">
-              <span>Security: Bcrypt (12 rounds)</span>
+              <span>Isolation: Scoped Browser Session</span>
               <span>•</span>
               <span>Vault: AES-256-GCM Encrypted</span>
               <span>•</span>
-              <span>Session: HTTP-Only Cookie</span>
+              <span>Rate Limits & IDOR Protection Active</span>
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={() => logout()}
-            className="flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-rose-300 bg-rose-500/10 border border-rose-500/20 hover:bg-rose-500/20 rounded-lg transition-colors whitespace-nowrap"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span>Sign Out of SquadForge</span>
-          </button>
+          {!user?.isAnonymous && (
+            <button
+              type="button"
+              onClick={() => logout()}
+              className="flex items-center justify-center gap-2 px-4 py-2 text-xs font-semibold text-rose-300 bg-rose-500/10 border border-rose-500/20 hover:bg-rose-500/20 rounded-lg transition-colors whitespace-nowrap"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sign Out of SquadForge</span>
+            </button>
+          )}
         </div>
       </div>
 

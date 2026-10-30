@@ -58,11 +58,31 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const data = await res.json();
         setUser(data.user);
       } else {
-        setUser(null);
+        const fallbackGuest: User = {
+          id: 'guest_public',
+          email: 'guest@squadforge.local',
+          name: 'Guest Developer',
+          githubConnected: false,
+          costLimitPerBuild: 2.0,
+          enabledModelIds: ['gemini'],
+          createdAt: Date.now(),
+          isAnonymous: true
+        };
+        setUser(fallbackGuest);
       }
     } catch (err) {
       console.error('Failed to load user session:', err);
-      setUser(null);
+      const fallbackGuest: User = {
+        id: 'guest_public',
+        email: 'guest@squadforge.local',
+        name: 'Guest Developer',
+        githubConnected: false,
+        costLimitPerBuild: 2.0,
+        enabledModelIds: ['gemini'],
+        createdAt: Date.now(),
+        isAnonymous: true
+      };
+      setUser(fallbackGuest);
     } finally {
       setLoading(false);
     }

@@ -102,15 +102,10 @@ function AppRoot() {
         <div className="w-14 h-14 rounded-2xl bg-amber-400/10 border border-amber-400/30 flex items-center justify-center text-amber-400 mb-4 animate-pulse">
           <Cpu className="w-7 h-7" />
         </div>
-        <p className="text-sm font-semibold text-neutral-200">Verifying SquadForge secure session...</p>
-        <p className="text-xs text-neutral-500 font-mono mt-1">Zero-Trust Environment Security Gate</p>
+        <p className="text-sm font-semibold text-neutral-200">Loading SquadForge Workspace...</p>
+        <p className="text-xs text-neutral-500 font-mono mt-1">Multi-AI Parallel Swarm Engineering</p>
       </div>
     );
-  }
-
-  // Mandatory Authentication: Unauthenticated visitors must not be able to access the dashboard or features
-  if (!user) {
-    return <AuthPage />;
   }
 
   return (

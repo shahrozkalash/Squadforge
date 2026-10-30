@@ -8,7 +8,7 @@ export type NavTab = 'dashboard' | 'live' | 'code' | 'merge' | 'builds' | 'usage
 interface NavbarProps {
   currentTab: NavTab;
   onSelectTab: (tab: NavTab) => void;
-  onOpenAuth: () => void;
+  onOpenAuth?: () => void;
   onOpenTestModal: () => void;
 }
 
@@ -135,32 +135,35 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         ) : (
           <button
-            onClick={onOpenAuth}
+            onClick={() => onSelectTab('settings')}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-neutral-300 bg-neutral-900 border border-neutral-700 rounded-lg hover:text-white hover:border-neutral-600 transition-colors whitespace-nowrap shrink-0"
+            title="Configure GitHub repository settings"
           >
             <Github className="w-3.5 h-3.5 text-neutral-400" />
-            <span>Connect GitHub</span>
+            <span>GitHub Settings</span>
           </button>
         )}
 
         <div className="flex items-center gap-2 pl-1 border-l border-neutral-800">
           <div className="hidden sm:flex flex-col text-right">
             <span className="text-xs font-semibold text-white leading-tight">
-              {user ? user.name : 'Authenticated'}
+              {user?.name || 'Guest Developer'}
             </span>
-            <span className="text-[10px] font-mono text-neutral-400 leading-tight truncate max-w-[120px]">
-              {user?.email}
+            <span className="text-[10px] font-mono text-neutral-400 leading-tight truncate max-w-[130px]">
+              {user?.isAnonymous ? 'Public Session' : user?.email}
             </span>
           </div>
 
-          <button
-            onClick={() => logout()}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-neutral-400 bg-neutral-900 border border-neutral-800 rounded-lg hover:text-rose-400 hover:border-rose-500/30 hover:bg-rose-500/10 transition-colors whitespace-nowrap shrink-0"
-            title="Log out of SquadForge"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Sign Out</span>
-          </button>
+          {!user?.isAnonymous && user && (
+            <button
+              onClick={() => logout()}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-neutral-400 bg-neutral-900 border border-neutral-800 rounded-lg hover:text-rose-400 hover:border-rose-500/30 hover:bg-rose-500/10 transition-colors whitespace-nowrap shrink-0"
+              title="Log out of SquadForge"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden md:inline">Sign Out</span>
+            </button>
+          )}
         </div>
       </div>
     </header>
