@@ -2,6 +2,7 @@ import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseManager } from '../server/db/database.js';
 import { PersistentDatabase } from '../server/store.js';
+import { getEncryptionKey } from '../server/crypto.js';
 
 describe('SquadForge SQLite Database Engine & Migration Architecture', () => {
   let dbMgr: DatabaseManager;
@@ -145,6 +146,59 @@ describe('SquadForge SQLite Database Engine & Migration Architecture', () => {
       }, /Production database initialization failed/);
     } finally {
       process.env.NODE_ENV = origNodeEnv;
+    }
+  });
+
+  test('In production mode, DatabaseManager rejects :memory: storage with fatal error', () => {
+    const origNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = 'production';
+      assert.throws(() => {
+        DatabaseManager.resetInstance(':memory:');
+      }, /FATAL: In-memory database \(:memory:\) is forbidden in production environment/);
+    } finally {
+      process.env.NODE_ENV = origNodeEnv;
+      // Reset back to in-memory for following tests
+      DatabaseManager.resetInstance(':memory:');
+    }
+  });
+
+  test('In production mode, getEncryptionKey enforces 32+ character non-default ENCRYPTION_SECRET', () => {
+    const origNodeEnv = process.env.NODE_ENV;
+    const origSecret = process.env.ENCRYPTION_SECRET;
+    try {
+      process.env.NODE_ENV = 'production';
+
+      // 1. Missing secret
+      delete process.env.ENCRYPTION_SECRET;
+      assert.throws(() => {
+        getEncryptionKey();
+      }, /ENCRYPTION_SECRET environment variable is missing/);
+
+      // 2. Default placeholder secret
+      process.env.ENCRYPTION_SECRET = 'squadforge-development-master-encryption-key-2026';
+      assert.throws(() => {
+        getEncryptionKey();
+      }, /ENCRYPTION_SECRET is insecure or too short for production/);
+
+      // 3. Short secret (< 32 chars)
+      process.env.ENCRYPTION_SECRET = 'too-short-secret';
+      assert.throws(() => {
+        getEncryptionKey();
+      }, /ENCRYPTION_SECRET is insecure or too short for production/);
+
+      // 4. Valid 32+ character secret passes
+      process.env.ENCRYPTION_SECRET = 'a'.repeat(32);
+      const key = getEncryptionKey();
+      assert.ok(Buffer.isBuffer(key));
+      assert.equal(key.length, 32);
+    } finally {
+      process.env.NODE_ENV = origNodeEnv;
+      if (origSecret !== undefined) {
+        process.env.ENCRYPTION_SECRET = origSecret;
+      } else {
+        delete process.env.ENCRYPTION_SECRET;
+      }
     }
   });
 });

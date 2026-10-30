@@ -78,6 +78,31 @@ export class GitHubService {
   }
 
   /**
+   * Validates if a configured APP_URL is valid, using http/https protocol and a valid hostname
+   */
+  static validateAppUrl(urlStr?: string): { valid: boolean; origin?: string; error?: string } {
+    if (!urlStr || typeof urlStr !== 'string' || !urlStr.trim()) {
+      return { valid: false, error: 'APP_URL is not set or empty' };
+    }
+    try {
+      const parsed = new URL(urlStr.trim());
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return { valid: false, error: `Invalid protocol '${parsed.protocol}'. Must be http: or https:` };
+      }
+      if (!parsed.hostname || parsed.hostname.includes(' ') || parsed.hostname.length === 0) {
+        return { valid: false, error: 'Invalid hostname in APP_URL' };
+      }
+      return { valid: true, origin: `${parsed.protocol}//${parsed.host}` };
+    } catch (err: any) {
+      return { valid: false, error: err?.message || 'Malformed APP_URL' };
+    }
+  }
+
+  static hasValidConfiguredAppUrl(): boolean {
+    return this.validateAppUrl(process.env.APP_URL).valid;
+  }
+
+  /**
    * Validates and resolves a trusted application origin for OAuth redirects and callbacks.
    * In production, strictly requires a validated, explicitly configured APP_URL and rejects
    * relying on incoming request headers or broad host wildcard patterns.
@@ -88,17 +113,11 @@ export class GitHubService {
     const defaultLocalOrigin = `http://127.0.0.1:${fallbackPort}`;
 
     // 1. Prioritize configured application URL if present and valid
-    const configuredAppUrl = process.env.APP_URL?.trim();
-    if (configuredAppUrl) {
-      try {
-        const parsed = new URL(configuredAppUrl);
-        if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-          return `${parsed.protocol}//${parsed.host}`;
-        }
-        console.error(`[SECURITY ERROR] Configured APP_URL '${configuredAppUrl}' has an invalid protocol. Must be http:// or https://.`);
-      } catch (err) {
-        console.error(`[SECURITY ERROR] Invalid APP_URL format '${configuredAppUrl}':`, err);
-      }
+    const appUrlValidation = this.validateAppUrl(process.env.APP_URL);
+    if (appUrlValidation.valid && appUrlValidation.origin) {
+      return appUrlValidation.origin;
+    } else if (process.env.APP_URL) {
+      console.error(`[SECURITY ERROR] Configured APP_URL '${process.env.APP_URL}' is invalid: ${appUrlValidation.error}`);
     }
 
     // 2. Production strict mode: Refuse to trust request headers or broad wildcard host patterns

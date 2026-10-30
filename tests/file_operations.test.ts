@@ -1,6 +1,7 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { MergeManager } from '../server/swarm/mergeManager.js';
+import { ExecutionAdapter } from '../server/swarm/executionAdapter.js';
 import { db } from '../server/store.js';
 
 describe('SquadForge File Workspace CRUD, Limits & Versioning', () => {
@@ -110,5 +111,28 @@ describe('SquadForge File Workspace CRUD, Limits & Versioning', () => {
     assert.ok(newFile);
     assert.equal(newFile.content, 'export const data = 42;');
     assert.equal(newFile.version, 2);
+  });
+
+  test('Sanitization prevents Zip Slip attacks and path traversal sequences in export files', () => {
+    const maliciousPaths = [
+      '../../etc/passwd',
+      '..\\..\\windows\\system32\\cmd.exe',
+      '../../../app/server.ts',
+      '/absolute/path/file.ts',
+      'src/../../escaped.ts',
+      'folder/\0nullbyte.ts'
+    ];
+
+    for (const raw of maliciousPaths) {
+      const { valid, cleanPath } = ExecutionAdapter.sanitizeFilePath(raw);
+      if (valid) {
+        // If considered valid, it MUST NOT contain traversal sequences or leading slashes
+        assert.equal(cleanPath.includes('..'), false, `Sanitized path '${cleanPath}' must not contain '..'`);
+        assert.equal(cleanPath.startsWith('/'), false, `Sanitized path '${cleanPath}' must not start with '/'`);
+        assert.equal(cleanPath.startsWith('\\'), false, `Sanitized path '${cleanPath}' must not start with '\\'`);
+      } else {
+        assert.equal(valid, false, `Malicious path '${raw}' was correctly rejected`);
+      }
+    }
   });
 });

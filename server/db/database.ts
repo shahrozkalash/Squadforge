@@ -15,11 +15,18 @@ export class DatabaseManager {
   private isInMemory: boolean = false;
 
   private constructor(dbPath?: string) {
-    if (dbPath === ':memory:') {
+    const isProduction = process.env.NODE_ENV === 'production';
+    const requestedPath = dbPath || process.env.SQLITE_DB_PATH;
+
+    if (requestedPath === ':memory:' || dbPath === ':memory:') {
+      if (isProduction) {
+        throw new Error('FATAL: In-memory database (:memory:) is forbidden in production environment. A durable persistent storage path must be configured.');
+      }
       this.db = new DatabaseSync(':memory:');
       this.isInMemory = true;
+      console.warn('[STORAGE] Running with in-memory SQLite database (development/test mode only). Data will not persist across restarts.');
     } else {
-      const targetPath = dbPath || process.env.SQLITE_DB_PATH || path.resolve(process.cwd(), 'squadforge.db');
+      const targetPath = requestedPath || path.resolve(process.cwd(), 'squadforge.db');
       const dir = path.dirname(targetPath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -29,6 +36,10 @@ export class DatabaseManager {
 
     this.configurePragmas();
     this.runMigrations();
+  }
+
+  public isMemoryStorage(): boolean {
+    return this.isInMemory;
   }
 
   static getInstance(dbPath?: string): DatabaseManager {

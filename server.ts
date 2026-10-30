@@ -25,6 +25,7 @@ import { emailService } from './server/email.js';
 import { User, SafeUser } from './server/types.js';
 import JSZip from 'jszip';
 import { HonestVerificationService } from './server/verificationService.js';
+import { ExecutionAdapter } from './server/swarm/executionAdapter.js';
 
 dotenv.config();
 
@@ -53,11 +54,7 @@ declare global {
 }
 
 function getOrigin(req: express.Request): string {
-  const forwardedProto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
-  const forwardedHost = req.headers['x-forwarded-host'] || req.headers.host;
-  if (forwardedHost) return `${forwardedProto}://${forwardedHost}`;
-  if (req.headers.origin) return req.headers.origin as string;
-  return process.env.APP_URL || '';
+  return GitHubService.getTrustedOrigin(req);
 }
 
 // Defense-in-depth HTTP security headers
@@ -746,6 +743,11 @@ function renderOAuthErrorHtml(targetOrigin: string, errorText: string): string {
 
 // GitHub OAuth & Connection
 app.get('/api/auth/github/url', requireAuth, (req, res) => {
+  if (process.env.NODE_ENV === 'production' && !GitHubService.hasValidConfiguredAppUrl()) {
+    return res.status(500).json({ 
+      error: 'Production OAuth requires an explicitly configured, trusted APP_URL (e.g. https://squadforge.example.com). Request rejected to prevent host header poisoning.' 
+    });
+  }
   const origin = GitHubService.getTrustedOrigin(req);
   const redirectUri = `${origin}/auth/callback`;
   const state = GitHubService.generateOAuthState(req.user!.id, req.sessionToken!, redirectUri);
@@ -1063,7 +1065,10 @@ app.get('/api/builds/:id/export', requireAuth, async (req, res) => {
   const zip = new JSZip();
 
   for (const f of files) {
-    zip.file(f.path, f.content);
+    const { valid, cleanPath } = ExecutionAdapter.sanitizeFilePath(f.path);
+    if (valid && cleanPath) {
+      zip.file(cleanPath, f.content);
+    }
   }
 
   if (!files.some(f => f.path.toLowerCase() === 'readme.md')) {

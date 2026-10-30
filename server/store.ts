@@ -115,6 +115,10 @@ export class PersistentDatabase {
    */
   private initializeStorage() {
     try {
+      if (process.env.NODE_ENV === 'production' && this.dbManager.isMemoryStorage()) {
+        throw new Error('FATAL: SQLite storage cannot run in-memory in production environment.');
+      }
+
       const sqlite = this.dbManager.db;
 
       // Check if sqlite has users

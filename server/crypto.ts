@@ -2,17 +2,20 @@ import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 
 // Server-side secret key derived or loaded from environment
-const ENCRYPTION_KEY_RAW = (() => {
+export function getEncryptionKey(): Buffer {
   const secret = process.env.ENCRYPTION_SECRET;
   if (!secret) {
     if (process.env.NODE_ENV === 'production') {
-      console.warn('[SECURITY WARNING] ENCRYPTION_SECRET environment variable is missing in production! Please configure a unique, high-entropy 32+ character ENCRYPTION_SECRET.');
+      throw new Error('FATAL: ENCRYPTION_SECRET environment variable is missing in production environment. A unique, high-entropy 32+ character key is required.');
     }
-    return 'squadforge-development-master-encryption-key-2026';
+    return crypto.createHash('sha256').update('squadforge-development-master-encryption-key-2026').digest();
   }
-  return secret;
-})();
-const KEY = crypto.createHash('sha256').update(ENCRYPTION_KEY_RAW).digest();
+  if (process.env.NODE_ENV === 'production' && (secret === 'squadforge-development-master-encryption-key-2026' || secret.length < 32)) {
+    throw new Error('FATAL: ENCRYPTION_SECRET is insecure or too short for production (must be at least 32 characters and not the default key).');
+  }
+  return crypto.createHash('sha256').update(secret).digest();
+}
+
 const ALGORITHM = 'aes-256-gcm';
 
 /**
@@ -20,8 +23,9 @@ const ALGORITHM = 'aes-256-gcm';
  */
 export function encryptToken(plainText: string): string {
   if (!plainText) return '';
+  const key = getEncryptionKey();
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv(ALGORITHM, KEY, iv);
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
   let encrypted = cipher.update(plainText, 'utf8', 'hex');
   encrypted += cipher.final('hex');
   const authTag = cipher.getAuthTag().toString('hex');
@@ -39,7 +43,8 @@ export function decryptToken(cipherPackage: string): string {
     const [ivHex, authTagHex, encryptedHex] = parts;
     const iv = Buffer.from(ivHex, 'hex');
     const authTag = Buffer.from(authTagHex, 'hex');
-    const decipher = crypto.createDecipheriv(ALGORITHM, KEY, iv);
+    const key = getEncryptionKey();
+    const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
     decipher.setAuthTag(authTag);
     let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
@@ -93,7 +98,8 @@ export function generateVerificationCode(): string {
  * Ensures the verification code is never stored in plaintext at rest.
  */
 export function hashVerificationCode(code: string): string {
-  return crypto.createHmac('sha256', KEY).update(code.trim()).digest('hex');
+  const key = getEncryptionKey();
+  return crypto.createHmac('sha256', key).update(code.trim()).digest('hex');
 }
 
 /**

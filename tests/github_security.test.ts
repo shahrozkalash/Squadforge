@@ -229,6 +229,23 @@ describe('SquadForge Critical Security: GitHub OAuth & API Integrity', () => {
       assert.equal(parsed.searchParams.get('state'), 'abcdef123456');
       assert.equal(parsed.searchParams.get('scope'), 'repo,user:email');
     });
+
+    test('13. validateAppUrl strictly validates schemes and hostnames and rejects malformed values', () => {
+      assert.equal(GitHubService.validateAppUrl('').valid, false);
+      assert.equal(GitHubService.validateAppUrl('   ').valid, false);
+      assert.equal(GitHubService.validateAppUrl('not-a-url').valid, false);
+      assert.equal(GitHubService.validateAppUrl('ftp://my-server.com').valid, false);
+      assert.equal(GitHubService.validateAppUrl('javascript:alert(1)').valid, false);
+      assert.equal(GitHubService.validateAppUrl('https://').valid, false);
+
+      const validHttps = GitHubService.validateAppUrl('https://squadforge.dev');
+      assert.equal(validHttps.valid, true);
+      assert.equal(validHttps.origin, 'https://squadforge.dev');
+
+      const validLocal = GitHubService.validateAppUrl('http://localhost:3000');
+      assert.equal(validLocal.valid, true);
+      assert.equal(validLocal.origin, 'http://localhost:3000');
+    });
   });
 
   describe('FIX 2: Removal of Fake GitHub Success & Enforcing Real Operations', () => {
