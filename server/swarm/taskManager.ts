@@ -109,12 +109,34 @@ export class TaskManager {
       candidateTasks.push(...scored.map(s => s.task));
     }
 
-    if (candidateTasks.length === 0) {
+    // Identify files currently claimed/locked by other active models
+    const activeTasks = tasks.filter(t => 
+      (t.status === 'in_progress' || t.status === 'claimed') && 
+      t.claimedBy && 
+      t.claimedBy !== modelId
+    );
+    const lockedFilePaths = new Set<string>();
+    for (const at of activeTasks) {
+      for (const fp of at.filePaths) {
+        lockedFilePaths.add(fp.toLowerCase());
+      }
+    }
+
+    // Prioritize candidate tasks that do not conflict with files currently being modified
+    const conflictFreeCandidates = candidateTasks.filter(task => {
+      if (!task.filePaths || task.filePaths.length === 0) return true;
+      return !task.filePaths.some(fp => lockedFilePaths.has(fp.toLowerCase()));
+    });
+
+    // Only attempt candidate tasks that are free of file conflicts with currently running tasks
+    const candidatesToTry = conflictFreeCandidates;
+
+    if (candidatesToTry.length === 0) {
       return null;
     }
 
     // Try claiming candidates atomically until one succeeds
-    for (const candidate of candidateTasks) {
+    for (const candidate of candidatesToTry) {
       const claimed = db.claimTaskAtomic(
         buildId, 
         candidate.id, 

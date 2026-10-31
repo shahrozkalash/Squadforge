@@ -364,14 +364,20 @@ export class HonestVerificationService {
 
       // Check tests executed that cover this requirement
       const testDetails = execResult?.testReport?.details || [];
-      const relevantTests = testDetails
+      const testResults: Array<{ name: string; passed: boolean; message?: string }> = testDetails
         .filter((t: any) => {
           const testNameLower = t.name.toLowerCase();
           return tokens.some((tok: string) => testNameLower.includes(tok)) || topMatchedFilePaths.some(fp => testNameLower.includes(fp.toLowerCase()));
         })
-        .map((t: any) => t.name);
+        .map((t: any) => ({
+          name: t.name,
+          passed: Boolean(t.passed),
+          message: t.message
+        }));
 
-      const failedTests = testDetails.filter((t: any) => !t.passed && relevantTests.includes(t.name));
+      const relevantTests = testResults.map(t => t.name);
+      const failedTests = testResults.filter(t => !t.passed);
+      const remainingProblems: string[] = [];
 
       // Deterministic check
       let status: import('./types.js').RequirementStatus;
@@ -383,10 +389,14 @@ export class HonestVerificationService {
         status = 'failed';
         evidence = 'No implementation files found in project workspace addressing this requirement.';
         notes = 'Missing implementation evidence.';
+        remainingProblems.push('No implementation files found in project workspace addressing this requirement.');
       } else if (failedTests.length > 0) {
         status = 'failed';
         evidence = `Implementation in ${topMatchedFilePaths.join(', ')}, but automated test(s) failed: ${failedTests.map((t: any) => t.name).join(', ')}.`;
         notes = 'Failing unit test suite.';
+        for (const ft of failedTests) {
+          remainingProblems.push(`Failing test "${ft.name}": ${ft.message || 'Assertion failed'}`);
+        }
       } else {
         // Check syntax errors in matched files
         const syntaxErrorsInFiles = (execResult?.syntaxErrors || []).filter((e: any) => 
@@ -397,6 +407,9 @@ export class HonestVerificationService {
           status = 'failed';
           evidence = `Implementation file ${syntaxErrorsInFiles[0].filePath} has syntax error: ${syntaxErrorsInFiles[0].message}`;
           notes = 'Syntax check failure.';
+          for (const se of syntaxErrorsInFiles) {
+            remainingProblems.push(`Syntax error in ${se.filePath}: ${se.message}`);
+          }
         } else {
           deterministicChecksPassed = true;
           if (relevantTests.length > 0) {
@@ -412,6 +425,7 @@ export class HonestVerificationService {
             status = 'unverified';
             evidence = 'Files found but insufficient structural evidence to confirm implementation.';
             notes = 'Unverified requirement.';
+            remainingProblems.push('Insufficient structural evidence to confirm complete implementation.');
           }
         }
       }
@@ -425,6 +439,8 @@ export class HonestVerificationService {
         status,
         evidence,
         testsExecuted: relevantTests,
+        testResults,
+        remainingProblems,
         deterministicChecksPassed,
         satisfiedByFiles: topMatchedFilePaths,
         verificationNotes: notes

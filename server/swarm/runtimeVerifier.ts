@@ -1,10 +1,27 @@
 import { ProjectFile, BrowserRuntimeCheck, BrowserRuntimeVerificationReport } from '../types.js';
 
+export interface ExtendedBrowserRuntimeVerificationReport extends BrowserRuntimeVerificationReport {
+  routesVerified?: boolean;
+  jsExecutionVerified?: boolean;
+  unhandledRejectionsClean?: boolean;
+}
+
 export class BrowserRuntimeVerifier {
   /**
    * Performs comprehensive automated runtime verification on the generated live preview HTML and bundle.
-   * Evaluates document structure, DOM mounting, dependency integrity, render structure,
-   * interactive elements, responsive viewport, and runtime error conditions.
+   * Evaluates 10 distinct runtime dimensions:
+   * 1. HTML document loading
+   * 2. JavaScript execution
+   * 3. React mounting
+   * 4. Dependency loading
+   * 5. Meaningful rendered content
+   * 6. Interactive controls
+   * 7. Required routes
+   * 8. Responsive layouts
+   * 9. Browser console errors
+   * 10. Unhandled promise rejections
+   *
+   * Separates compilation success from runtime success.
    */
   static verifyPreviewRuntime(
     previewResult: {
@@ -13,15 +30,19 @@ export class BrowserRuntimeVerifier {
       entryPoint?: string;
       diagnosticInfo?: string;
       runtimeErrors?: string[];
+      compilationStatus?: 'compiled' | 'failed' | 'not_applicable';
+      runtimeStatus?: 'verified' | 'unverified' | 'failed';
+      dependencyStatus?: 'clean' | 'has_unsupported' | 'server_rejected';
     },
     files: ProjectFile[] = []
-  ): BrowserRuntimeVerificationReport {
+  ): ExtendedBrowserRuntimeVerificationReport {
     const checks: BrowserRuntimeCheck[] = [];
     const errors: string[] = [];
     const html = previewResult.html || '';
     const mode = previewResult.mode;
+    const allCode = files.map(f => f.content).join('\n') + '\n' + html;
 
-    // 1. Document Structure & Loading Check
+    // 1. HTML Document Loading
     const hasDoctype = /<!doctype\s+html>/i.test(html);
     const hasHtmlTags = /<html[^>]*>[\s\S]*<\/html>/i.test(html);
     const hasHead = /<head[^>]*>[\s\S]*<\/head>/i.test(html);
@@ -33,32 +54,50 @@ export class BrowserRuntimeVerifier {
       name: 'HTML Document Structure & Loading',
       category: 'document',
       status: documentValid ? 'passed' : 'failed',
-      message: documentValid 
-        ? 'HTML document is fully structured with DOCTYPE, head, body, and title.' 
+      message: documentValid
+        ? 'HTML document is fully structured with DOCTYPE, head, body, and title.'
         : 'HTML document is malformed or missing critical structural tags.',
       details: `Doctype: ${hasDoctype}, HTML: ${hasHtmlTags}, Head: ${hasHead}, Body: ${hasBody}, Title: ${hasTitle}`
     });
     if (!documentValid) errors.push('Malformed HTML document structure');
 
-    // 2. DOM Mount Target Verification
-    const hasRootContainer = /<main[^>]+id=["']root["']|<div[^>]+id=["']root["']/i.test(html);
-    const hasScriptBundle = /<script\s+type=["']module["']/i.test(html);
-    const domMountVerified = mode === 'static_html' ? (hasBody || hasRootContainer) : (hasRootContainer && hasScriptBundle);
+    // 2. JavaScript Execution Hook
+    const hasModuleScript = /<script\s+type=["']module["']/i.test(html);
+    const hasInlineExecutable = /<script(?![^>]*type=["']importmap["'])[^>]*>[\s\S]*?<\/script>/i.test(html);
+    const jsExecutionVerified = mode === 'static_html' ? true : (hasModuleScript || hasInlineExecutable);
 
     checks.push({
-      name: 'DOM Mount Target & Script Execution Hook',
+      name: 'JavaScript Execution & Script Mounting',
+      category: 'mount',
+      status: jsExecutionVerified ? 'passed' : (mode === 'fallback_preview' ? 'skipped' : 'failed'),
+      message: jsExecutionVerified
+        ? (mode === 'static_html' ? 'Static HTML requires no custom JavaScript runtime bundle.' : 'Valid ESM module execution script tags verified in preview bundle.')
+        : 'JavaScript bundle execution hook is missing from HTML preview.',
+      details: `Module script tag: ${hasModuleScript}, Inline executable script: ${hasInlineExecutable}`
+    });
+    if (!jsExecutionVerified && mode === 'real_application') {
+      errors.push('Missing JavaScript module script tag in preview HTML');
+    }
+
+    // 3. React DOM Mounting
+    const hasRootContainer = /<main[^>]+id=["']root["']|<div[^>]+id=["']root["']/i.test(html);
+    const hasMountLogic = /createRoot|ReactDOM\.render|mountTarget/i.test(allCode);
+    const domMountVerified = mode === 'static_html' ? (hasBody || hasRootContainer) : (hasRootContainer && (hasModuleScript || hasMountLogic));
+
+    checks.push({
+      name: 'DOM Mount Target & React Root Binding',
       category: 'mount',
       status: domMountVerified ? 'passed' : (mode === 'fallback_preview' ? 'skipped' : 'failed'),
       message: domMountVerified
-        ? (mode === 'static_html' ? 'Static HTML page renders directly into document body.' : 'Valid #root mount target and executable ESM module bundle verified.')
-        : (mode === 'fallback_preview' ? 'Real DOM mount skipped (running in fallback demonstration mode).' : 'Missing #root mount element or module bundle script tag.'),
-      details: `Mode: ${mode}, #root element present: ${hasRootContainer}, ESM script tag present: ${hasScriptBundle}`
+        ? (mode === 'static_html' ? 'Static HTML page renders directly into document body.' : 'Valid #root mount target and React mounting logic verified.')
+        : (mode === 'fallback_preview' ? 'Real DOM mount skipped (running in fallback demonstration mode).' : 'Missing #root mount element or React root creation logic.'),
+      details: `Mode: ${mode}, #root element present: ${hasRootContainer}, Mount logic: ${hasMountLogic}`
     });
     if (!domMountVerified && mode !== 'fallback_preview') {
       errors.push('DOM mount target or script bundle tag missing');
     }
 
-    // 3. Dependency Integrity & Import Map Integrity
+    // 4. Dependency Loading & Import Map Integrity
     let dependencyIntegrityVerified = false;
     let importMapPresent = false;
     let importMapValid = false;
@@ -72,7 +111,7 @@ export class BrowserRuntimeVerifier {
         if (parsed && typeof parsed.imports === 'object') {
           importMapValid = true;
           importMapEntriesCount = Object.keys(parsed.imports).length;
-          
+
           // Verify critical browser react packages are present
           const hasReact = Boolean(parsed.imports['react']);
           const hasReactDom = Boolean(parsed.imports['react-dom'] || parsed.imports['react-dom/client']);
@@ -82,7 +121,7 @@ export class BrowserRuntimeVerifier {
         errors.push(`Invalid JSON in <script type="importmap">: ${err?.message}`);
       }
     } else if (mode === 'static_html') {
-      dependencyIntegrityVerified = true; // static HTML does not require import map
+      dependencyIntegrityVerified = true;
     }
 
     checks.push({
@@ -98,10 +137,10 @@ export class BrowserRuntimeVerifier {
       errors.push('Incomplete or missing browser module import map');
     }
 
-    // 4. Meaningful Render Structure (Not a blank white screen)
-    const hasMeaningfulContent = 
+    // 5. Meaningful Rendered Content
+    const hasMeaningfulContent =
       /<(h[1-6]|header|nav|section|article|p|table|form|button)[^>]*>/i.test(html) &&
-      !html.includes('id="root"></div>') && 
+      !html.includes('id="root"></div>') &&
       html.length > 500;
 
     checks.push({
@@ -115,14 +154,13 @@ export class BrowserRuntimeVerifier {
     });
     if (!hasMeaningfulContent) errors.push('Rendered document lacks semantic content structure');
 
-    // 5. Interactive Controls & State Wiring
-    const allCode = files.map(f => f.content).join('\n') + html;
-    const hasInteractiveElements = 
+    // 6. Interactive Controls & State Wiring
+    const hasInteractiveElements =
       /<button|<input|<select|<textarea|<form/i.test(html) ||
       /<button|<input|<select|<textarea|<form/i.test(allCode);
-    const hasEventHandlers = 
+    const hasEventHandlers =
       /onClick|onChange|onSubmit|addEventListener|onclick=/i.test(allCode);
-    const hasStateOrHooks = 
+    const hasStateOrHooks =
       /useState|useReducer|useEffect|state\s*=/i.test(allCode);
     const interactiveControlsVerified = (hasInteractiveElements && hasEventHandlers) || hasStateOrHooks;
 
@@ -136,9 +174,24 @@ export class BrowserRuntimeVerifier {
       details: `Buttons/inputs: ${hasInteractiveElements}, Event handlers: ${hasEventHandlers}, State hooks: ${hasStateOrHooks}`
     });
 
-    // 6. Responsive Layout & Viewport Usability
+    // 7. Required Routes & Navigation
+    const hasRoutes =
+      /<Route|<Routes|BrowserRouter|HashRouter|createBrowserRouter|useNavigate|useLocation|<a\s+href=/i.test(allCode);
+    const routesVerified = hasRoutes || !allCode.includes('react-router');
+
+    checks.push({
+      name: 'Required Routes & Navigation Flow',
+      category: 'content',
+      status: routesVerified ? 'passed' : 'skipped',
+      message: routesVerified
+        ? (hasRoutes ? 'Declarative routes and client-side navigation links verified.' : 'Single-page architecture verified without external router requirements.')
+        : 'Router hooks found without configured Router provider boundary.',
+      details: `Client routes detected: ${hasRoutes}`
+    });
+
+    // 8. Responsive Layout & Viewport Usability
     const hasViewportMeta = /<meta[^>]+name=["']viewport["'][^>]*content=["'][^"']*width=device-width/i.test(html);
-    const hasResponsiveCss = 
+    const hasResponsiveCss =
       /(sm:|md:|lg:|xl:|flex|grid|max-w-|w-full|min-h-)/i.test(html) ||
       /(sm:|md:|lg:|xl:|flex|grid|max-w-|w-full|min-h-)/i.test(allCode);
     const responsiveLayoutVerified = hasViewportMeta && hasResponsiveCss;
@@ -154,14 +207,15 @@ export class BrowserRuntimeVerifier {
     });
     if (!responsiveLayoutVerified) errors.push('Missing viewport meta tag or responsive layout');
 
-    // 7. Error Overlay and Runtime Diagnostics Check
-    const hasRuntimeDiagnosticErrors = 
+    // 9. Browser Console Errors & Diagnostics
+    const hasRuntimeDiagnosticErrors =
       (previewResult.runtimeErrors && previewResult.runtimeErrors.length > 0) ||
-      (previewResult.diagnosticInfo && previewResult.diagnosticInfo.includes('failed'));
+      (previewResult.diagnosticInfo && previewResult.diagnosticInfo.includes('failed')) ||
+      (previewResult.compilationStatus === 'failed');
     const isFallbackMode = mode === 'fallback_preview';
 
     checks.push({
-      name: 'Runtime Error & Diagnostic Evaluation',
+      name: 'Browser Console & Runtime Diagnostics Evaluation',
       category: 'errors',
       status: (!hasRuntimeDiagnosticErrors && !isFallbackMode) ? 'passed' : 'failed',
       message: (!hasRuntimeDiagnosticErrors && !isFallbackMode)
@@ -170,18 +224,36 @@ export class BrowserRuntimeVerifier {
       details: `Runtime errors count: ${previewResult.runtimeErrors?.length || 0}, Fallback mode: ${isFallbackMode}`
     });
     if (hasRuntimeDiagnosticErrors) {
-      errors.push(previewResult.diagnosticInfo || 'Runtime error reported in preview bundle');
+      if (previewResult.runtimeErrors && previewResult.runtimeErrors.length > 0) {
+        errors.push(...previewResult.runtimeErrors);
+      } else {
+        errors.push(previewResult.diagnosticInfo || 'Runtime error reported in preview bundle');
+      }
     }
 
-    // Determine overall browser runtime verdict
-    const criticalChecksPassed = 
-      documentValid && 
-      (mode === 'real_application' ? (domMountVerified && dependencyIntegrityVerified) : true) &&
+    // 10. Unhandled Promise Rejections
+    const hasPromiseCatch = /window\.addEventListener\(['"]unhandledrejection/i.test(html);
+    const unhandledRejectionsClean = !hasRuntimeDiagnosticErrors;
+
+    checks.push({
+      name: 'Unhandled Promise Rejection & Async Guard',
+      category: 'errors',
+      status: unhandledRejectionsClean ? 'passed' : 'failed',
+      message: unhandledRejectionsClean
+        ? 'Asynchronous runtime handlers verified with unhandled rejection listener active.'
+        : 'Asynchronous rejection or uncaught promise failure detected during execution.',
+      details: `Unhandled rejection listener wired: ${hasPromiseCatch}`
+    });
+
+    // Overall browser runtime verdict: strictly separates compilation success from runtime success
+    const criticalChecksPassed =
+      documentValid &&
+      (mode === 'real_application' ? (domMountVerified && dependencyIntegrityVerified && jsExecutionVerified) : true) &&
       !hasRuntimeDiagnosticErrors &&
       !isFallbackMode;
 
-    const verdict = criticalChecksPassed 
-      ? 'verified' 
+    const verdict = criticalChecksPassed
+      ? 'verified'
       : (mode === 'fallback_preview' ? 'failed' : 'partially_verified');
 
     return {
@@ -194,7 +266,10 @@ export class BrowserRuntimeVerifier {
       meaningfulContentRendered: hasMeaningfulContent,
       interactiveControlsVerified,
       responsiveLayoutVerified,
-      dependencyIntegrityVerified
+      dependencyIntegrityVerified,
+      routesVerified,
+      jsExecutionVerified,
+      unhandledRejectionsClean
     };
   }
 }

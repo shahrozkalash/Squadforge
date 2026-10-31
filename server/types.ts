@@ -374,6 +374,8 @@ export interface RequirementItem {
   evidence?: string;
   verificationNotes?: string;
   testsExecuted?: Array<string | { name: string; passed: boolean; message?: string }>;
+  testResults?: Array<{ name: string; passed: boolean; message?: string }>;
+  remainingProblems?: string[];
   deterministicChecksPassed?: boolean;
 }
 

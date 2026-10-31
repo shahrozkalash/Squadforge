@@ -66,6 +66,10 @@ export class ProjectMemoryService {
    * Initializes or loads project memory with strict user isolation.
    */
   static getOrInitializeMemory(buildId: string, userId: string): ProjectMemory | null {
+    if (!buildId || !userId) {
+      throw new Error('Forbidden: Unauthorized - userId and buildId are required');
+    }
+
     const build = db.getBuild(buildId);
     if (!build) return null;
 
@@ -568,5 +572,55 @@ export class ProjectMemoryService {
       return fullContext;
     }
     return fullContext.slice(0, maxChars) + '\n...[truncated for token limit]';
+  }
+
+  /**
+   * Retrieves full project memory with strict ownership authorization.
+   */
+  static getMemory(buildId: string, userId: string): ProjectMemory | null {
+    if (!buildId || !userId) {
+      throw new Error('Forbidden: Unauthorized - userId is required to access project memory');
+    }
+    return this.getOrInitializeMemory(buildId, userId);
+  }
+
+  /**
+   * Retrieves defects for a project with mandatory ownership check.
+   */
+  static getDefects(buildId: string, userId: string): ProjectDefect[] {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.knownDefects || [];
+  }
+
+  /**
+   * Retrieves architecture decisions for a project with mandatory ownership check.
+   */
+  static getDecisions(buildId: string, userId: string): ArchitectureDecision[] {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.architectureDecisions || [];
+  }
+
+  /**
+   * Retrieves established facts for a project with mandatory ownership check.
+   */
+  static getFacts(buildId: string, userId: string): ProjectFact[] {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.facts || [];
+  }
+
+  /**
+   * Retrieves revisions for a project with mandatory ownership check.
+   */
+  static getRevisions(buildId: string, userId: string): ProjectRevision[] {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.revisions || [];
+  }
+
+  /**
+   * Retrieves module relationship graph for a project with mandatory ownership check.
+   */
+  static getModuleRelationships(buildId: string, userId: string): ModuleRelationship[] {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.moduleRelationships || [];
   }
 }

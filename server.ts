@@ -1085,6 +1085,39 @@ app.get('/api/builds/:id/memory', requireAuth, (req, res) => {
   res.json({ success: true, memory });
 });
 
+app.get('/api/builds/:id/requirements', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const requirements = ProjectMemoryService.getRequirements(build.id, req.user!.id);
+  res.json({ success: true, requirements });
+});
+
+app.get('/api/builds/:id/defects', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const defects = ProjectMemoryService.getDefects(build.id, req.user!.id);
+  res.json({ success: true, defects });
+});
+
+app.get('/api/builds/:id/decisions', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const decisions = ProjectMemoryService.getDecisions(build.id, req.user!.id);
+  res.json({ success: true, decisions });
+});
+
 // Real-Time Server-Sent Events (SSE) Stream
 app.get('/api/builds/:id/stream', requireAuth, (req, res) => {
   const buildId = req.params.id;

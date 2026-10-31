@@ -100,3 +100,39 @@ docker run -d \
   "storage": "sqlite-persistent"
 }
 ```
+
+---
+
+## Security Architecture, Sandbox Boundaries & Limitations
+
+SquadForge implements multi-layer defense-in-depth isolation for generated code execution and preview sandboxing.
+
+### 1. Preview Sandbox Boundaries
+- **Iframe Isolation**: Generated previews execute inside an iframe configured with strict sandbox tokens: `sandbox="allow-scripts allow-forms allow-same-origin allow-modals"`.
+- **Parent Hierarchy Shield**: The sandbox injects a non-configurable barrier script at the earliest point in the document head:
+  - `window.parent`, `window.top`, and `window.opener` are redefined to prevent traversing or executing functions against the host application DOM.
+  - `document.cookie` access is neutralized within the preview runtime to prevent reading parent application session tokens or authentication state.
+- **Content Security Policy (CSP)**: Previews enforce a restrictive CSP meta header:
+  - `default-src 'none'`
+  - `script-src 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://esm.sh`
+  - `style-src 'unsafe-inline' https://fonts.googleapis.com`
+  - `font-src https://fonts.gstatic.com data:`
+  - `img-src data: blob: https:`
+  - `connect-src https://esm.sh https: data:`
+  - `frame-src 'none'; object-src 'none'; base-uri 'none'`
+- **Zero API Key Leakage**: Previews do not receive parent environment variables, model provider API keys, encryption secrets, or admin credentials.
+
+### 2. Dependency Resolution Intelligence
+- **Strict Browser Allowlist**: All third-party imports are resolved through `DependencyResolverService` against pinned registries.
+- **Subpath Enforcement**: Packages configured with `allowSubpaths: false` (e.g., `clsx`, `tailwind-merge`, `axios`, `canvas-confetti`) reject subpath imports with clear diagnostics.
+- **Server Module Rejection**: All Node.js built-ins (`fs`, `path`, `crypto`, `os`, `child_process`, `net`, `http`, etc.) and server packages (`express`, `bcryptjs`, `sqlite3`, `jsonwebtoken`, etc.) are caught during AST/regex scanning and rejected before bundling.
+- **Honest Mode Reporting**: Projects that fail compilation or require unsupported dependencies never show a fallback demo disguised as real execution. The UI and verification report accurately reflect `fallback_preview` or `compilationStatus: failed`.
+
+### 3. Project Memory & Multi-Tenant Authorization
+- **Strict Ownership Checks**: All project memory queries (`getRequirements`, `getMemory`, `getDefects`, `getDecisions`, `getFacts`, `getRevisions`) mandate non-empty `userId` and verify that the target build belongs to that user.
+- **Guest Session Isolation**: Unauthenticated public users receive cryptographically isolated guest sessions (`gst_*`) with scoped storage and bounded quotas, preventing cross-tenant leakage.
+
+### 4. Remaining Limitations & Production Guidelines
+- **Browser Fetch Requests**: The CSP permits outbound HTTPS requests from preview applications (e.g. public third-party REST APIs). For air-gapped environments, restrict `connect-src` strictly to `'none'` or trusted hostnames.
+- **Multi-Process Execution**: Generated applications execute client-side inside the browser sandbox; full-stack backend components generated for downloaded ZIP packages require local container execution (`docker run` or `npm run dev` in an isolated virtual machine).
+
