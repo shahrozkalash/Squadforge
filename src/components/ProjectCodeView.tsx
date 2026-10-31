@@ -646,29 +646,93 @@ export const ProjectCodeView: React.FC = () => {
               <p className="text-xs text-neutral-400 py-4">No ADRs recorded for this build.</p>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {adrList.map((adr) => (
-                  <div key={adr.id} className="p-4 bg-neutral-950 border border-neutral-800 rounded-lg space-y-3 text-xs">
-                    <div className="flex items-center justify-between">
-                      <span className="font-mono text-amber-400 font-bold">{adr.id}</span>
-                      <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                        {adr.status}
-                      </span>
+                {adrList.map((adr) => {
+                  const statusBadge = 
+                    adr.status === 'accepted' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' :
+                    adr.status === 'proposed' ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' :
+                    adr.status === 'rejected' ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' :
+                    'bg-amber-500/10 text-amber-400 border-amber-500/30 line-through';
+
+                  return (
+                    <div key={adr.id} className="p-4 bg-neutral-950 border border-neutral-800 rounded-lg space-y-3 text-xs flex flex-col justify-between">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-amber-400 font-bold">{adr.id}</span>
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase border ${statusBadge}`}>
+                            {adr.status}
+                          </span>
+                        </div>
+                        <div className="font-semibold text-white text-sm">{adr.title}</div>
+                        {adr.supersedes && (
+                          <div className="text-[10px] font-mono text-amber-300">
+                            Supersedes: <span className="font-bold">{adr.supersedes}</span>
+                          </div>
+                        )}
+                        {adr.supersededBy && (
+                          <div className="text-[10px] font-mono text-neutral-400">
+                            Superseded by: <span className="font-bold text-amber-300">{adr.supersededBy}</span>
+                          </div>
+                        )}
+                        <div>
+                          <div className="text-[11px] font-mono text-neutral-500 uppercase tracking-wider mb-0.5">Context & Problem</div>
+                          <p className="text-neutral-400 leading-relaxed text-[11px]">{adr.context}</p>
+                        </div>
+                        <div>
+                          <div className="text-[11px] font-mono text-neutral-500 uppercase tracking-wider mb-0.5">Proposed Solution & Decision</div>
+                          <p className="text-neutral-300 leading-relaxed text-[11px] font-medium">{adr.proposedSolution || adr.decision}</p>
+                        </div>
+                        {adr.alternativesConsidered && adr.alternativesConsidered.length > 0 && (
+                          <div>
+                            <div className="text-[11px] font-mono text-neutral-500 uppercase tracking-wider mb-0.5">Alternatives Considered</div>
+                            <div className="flex flex-wrap gap-1">
+                              {adr.alternativesConsidered.map((alt, i) => (
+                                <span key={i} className="px-1.5 py-0.2 bg-neutral-900 border border-neutral-800 rounded text-[10px] text-neutral-300">
+                                  {alt}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {((adr.advantages && adr.advantages.length > 0) || (adr.disadvantages && adr.disadvantages.length > 0)) && (
+                          <div className="grid grid-cols-2 gap-2 pt-1 border-t border-neutral-800/60">
+                            <div>
+                              <span className="text-[10px] font-mono text-emerald-400 uppercase font-bold block">Advantages:</span>
+                              <ul className="text-[10px] text-neutral-400 list-disc list-inside space-y-0.5 mt-0.5">
+                                {(adr.advantages || []).map((adv, i) => (
+                                  <li key={i}>{adv}</li>
+                                ))}
+                              </ul>
+                            </div>
+                            <div>
+                              <span className="text-[10px] font-mono text-rose-400 uppercase font-bold block">Disadvantages:</span>
+                              <ul className="text-[10px] text-neutral-400 list-disc list-inside space-y-0.5 mt-0.5">
+                                {(adr.disadvantages || []).map((dis, i) => (
+                                  <li key={i}>{dis}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                        {adr.consequences && (
+                          <div>
+                            <div className="text-[11px] font-mono text-neutral-500 uppercase tracking-wider mb-0.5">Consequences</div>
+                            <p className="text-neutral-400 leading-relaxed text-[11px]">{adr.consequences}</p>
+                          </div>
+                        )}
+                      </div>
+                      {(adr.affectedFiles?.length || adr.affectedModules?.length) ? (
+                        <div className="pt-2 border-t border-neutral-800/60 flex flex-wrap gap-1 text-[10px] font-mono text-neutral-400">
+                          <span className="text-neutral-500">Affected:</span>
+                          {(adr.affectedModules || []).concat(adr.affectedFiles || []).slice(0, 3).map((item, idx) => (
+                            <span key={idx} className="px-1 py-0.2 bg-neutral-900 border border-neutral-800 rounded text-neutral-300">
+                              {item}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
-                    <div className="font-semibold text-white text-sm">{adr.title}</div>
-                    <div>
-                      <div className="text-[11px] font-mono text-neutral-500 uppercase tracking-wider mb-0.5">Context</div>
-                      <p className="text-neutral-400 leading-relaxed text-[11px]">{adr.context}</p>
-                    </div>
-                    <div>
-                      <div className="text-[11px] font-mono text-neutral-500 uppercase tracking-wider mb-0.5">Decision</div>
-                      <p className="text-neutral-300 leading-relaxed text-[11px] font-medium">{adr.decision}</p>
-                    </div>
-                    <div>
-                      <div className="text-[11px] font-mono text-neutral-500 uppercase tracking-wider mb-0.5">Consequences</div>
-                      <p className="text-neutral-400 leading-relaxed text-[11px]">{adr.consequences}</p>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

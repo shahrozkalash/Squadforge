@@ -38,18 +38,63 @@ export const TRUSTED_HTTPS_PACKAGE_ORIGINS: readonly string[] = [
 ];
 
 /**
+ * Normalizes dependency URL, stripping redundant slashes, default ports, and resolving relative segments.
+ */
+export function normalizeDependencyUrl(urlStr: string): string {
+  if (!urlStr || typeof urlStr !== 'string') return '';
+  const parsed = new URL(urlStr.trim());
+  parsed.protocol = 'https:';
+  parsed.hostname = parsed.hostname.toLowerCase();
+  if (parsed.port === '443') parsed.port = '';
+  // Normalize pathname to prevent /../ escapes
+  const segments = parsed.pathname.split('/').filter(s => s && s !== '.');
+  const cleanSegments: string[] = [];
+  for (const seg of segments) {
+    if (seg === '..') {
+      if (cleanSegments.length > 0) cleanSegments.pop();
+    } else {
+      cleanSegments.push(seg);
+    }
+  }
+  parsed.pathname = '/' + cleanSegments.join('/');
+  return parsed.toString();
+}
+
+/**
  * Validates whether a URL strictly uses an explicitly trusted HTTPS origin.
+ * Enforces no userinfo (username/password), standard port (443 or none),
+ * strict hostname verification against trusted origins, and prevents path traversal tricks.
  */
 export function isTrustedHttpsUrl(urlStr: string): boolean {
   if (!urlStr || typeof urlStr !== 'string') return false;
   try {
-    const parsed = new URL(urlStr);
+    const trimmed = urlStr.trim();
+    // Reject URL-encoded path traversal or null bytes
+    if (trimmed.includes('%00') || trimmed.includes('%2e%2e') || trimmed.includes('%2E%2E')) {
+      return false;
+    }
+
+    const parsed = new URL(trimmed);
     if (parsed.protocol !== 'https:') return false;
-    const origin = parsed.origin.toLowerCase();
-    return TRUSTED_HTTPS_PACKAGE_ORIGINS.some(trusted => 
-      origin === trusted.toLowerCase() || 
-      origin.endsWith('.' + trusted.replace('https://', ''))
-    );
+
+    // Disallow userinfo (e.g. https://user:pass@esm.sh)
+    if (parsed.username || parsed.password) return false;
+
+    // Disallow non-standard ports
+    if (parsed.port && parsed.port !== '443') return false;
+
+    // Disallow raw path traversal in pathname
+    if (parsed.pathname.includes('/../') || parsed.pathname.endsWith('/..') || parsed.pathname.startsWith('/..')) {
+      return false;
+    }
+
+    const hostname = parsed.hostname.toLowerCase();
+
+    // Check trusted origin or direct subdomain
+    return TRUSTED_HTTPS_PACKAGE_ORIGINS.some(trusted => {
+      const trustedHost = new URL(trusted).hostname.toLowerCase();
+      return hostname === trustedHost || hostname.endsWith('.' + trustedHost);
+    });
   } catch {
     return false;
   }
@@ -57,18 +102,29 @@ export function isTrustedHttpsUrl(urlStr: string): boolean {
 
 /**
  * Validates package name and configuration to prevent path traversal,
- * shell characters, or unsafe configurations.
+ * shell characters, URL-encoded tricks, or unsafe configurations.
  */
 export function validatePackageName(name: string): { valid: boolean; error?: string } {
   if (!name || typeof name !== 'string') {
     return { valid: false, error: 'Package name must be a non-empty string' };
   }
   const trimmed = name.trim();
-  if (trimmed.includes('\0') || trimmed.includes('\\') || trimmed.includes('..') || /\s/.test(trimmed)) {
+
+  // Reject URL-encoded characters (e.g. %2e, %2f, %00)
+  if (trimmed.includes('%')) {
+    return { valid: false, error: `URL-encoded characters are forbidden in package name "${name}"` };
+  }
+
+  // Reject control characters, backslashes, null bytes, spaces
+  if (trimmed.includes('\0') || trimmed.includes('\\') || trimmed.includes('..') || /\s|[\x00-\x1f\x7f]/.test(trimmed)) {
     return { valid: false, error: `Invalid characters or path traversal sequence in package name "${name}"` };
   }
+
+  // Reject paths, URLs, or schemes
   if (
     trimmed.startsWith('/') || 
+    trimmed.startsWith('./') ||
+    trimmed.startsWith('../') ||
     trimmed.startsWith('http:') || 
     trimmed.startsWith('https:') || 
     trimmed.startsWith('file:') || 
@@ -76,27 +132,56 @@ export function validatePackageName(name: string): { valid: boolean; error?: str
   ) {
     return { valid: false, error: `Package name cannot be a path or URL: "${name}"` };
   }
+
+  // Reject leading dot, underscore, or dash
+  if (trimmed.startsWith('.') || trimmed.startsWith('_') || trimmed.startsWith('-')) {
+    return { valid: false, error: `Package name cannot start with '.', '_', or '-': "${name}"` };
+  }
+
+  // Enforce npm max length constraint (214 characters)
+  if (trimmed.length > 214) {
+    return { valid: false, error: `Package name exceeds maximum length of 214 characters: "${name}"` };
+  }
+
   const pkgPattern = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(\/[a-z0-9_.-]+)*$/i;
   if (!pkgPattern.test(trimmed)) {
     return { valid: false, error: `Package name "${name}" does not match valid package name pattern` };
   }
+
+  // Check segments within package name
+  const segments = trimmed.split('/');
+  for (const seg of segments) {
+    if (seg === '.' || seg === '..' || seg.startsWith('-') || seg.startsWith('.')) {
+      return { valid: false, error: `Invalid segment "${seg}" in package name "${name}"` };
+    }
+  }
+
   return { valid: true };
 }
 
 /**
- * Derives a consistent subpath URL respecting custom package base URLs.
+ * Derives a consistent subpath URL respecting custom package base URLs
+ * while sanitizing against path traversal attempts.
  */
 export function deriveSubpathUrl(baseUrl: string, subpath: string): string {
+  // Sanitize subpath: strip leading/trailing slashes and prevent ..
+  const cleanSubpath = subpath
+    .replace(/^\/+/, '')
+    .replace(/\/+$/, '')
+    .split('/')
+    .filter(seg => seg && seg !== '.' && seg !== '..' && !seg.includes('%2e'))
+    .join('/');
+
   try {
     const urlObj = new URL(baseUrl);
     if (urlObj.pathname.endsWith('/+esm')) {
-      urlObj.pathname = urlObj.pathname.replace(/\/(\+esm)$/, `/${subpath}/$1`);
+      urlObj.pathname = urlObj.pathname.replace(/\/(\+esm)$/, `/${cleanSubpath}/$1`);
     } else {
-      urlObj.pathname = urlObj.pathname.replace(/\/+$/, '') + `/${subpath}`;
+      urlObj.pathname = urlObj.pathname.replace(/\/+$/, '') + `/${cleanSubpath}`;
     }
     return urlObj.toString();
   } catch {
-    return `${baseUrl.replace(/\/+$/, '')}/${subpath}`;
+    return `${baseUrl.replace(/\/+$/, '')}/${cleanSubpath}`;
   }
 }
 
@@ -284,12 +369,18 @@ export class DependencyResolverService {
       throw new Error(`Invalid package name "${name}": ${nameCheck.error}`);
     }
 
-    if (config?.url) {
-      if (!isTrustedHttpsUrl(config.url)) {
+    if (this.isForbiddenServerModule(name)) {
+      throw new Error(`Cannot register server-side or Node.js module "${name}" as a browser package`);
+    }
+
+    let effectiveUrl = config?.url;
+    if (effectiveUrl) {
+      if (!isTrustedHttpsUrl(effectiveUrl)) {
         throw new Error(
-          `Untrusted or non-HTTPS package URL for "${name}": "${config.url}". Only trusted HTTPS origins are allowed (${TRUSTED_HTTPS_PACKAGE_ORIGINS.join(', ')}).`
+          `Untrusted or non-HTTPS package URL for "${name}": "${effectiveUrl}". Only trusted HTTPS origins are allowed (${TRUSTED_HTTPS_PACKAGE_ORIGINS.join(', ')}).`
         );
       }
+      effectiveUrl = normalizeDependencyUrl(effectiveUrl);
     }
 
     if (config?.version) {
@@ -302,7 +393,11 @@ export class DependencyResolverService {
       throw new Error(`allowSubpaths must be a boolean for package "${name}"`);
     }
 
-    this.customAllowedPackages.set(name, config || { allowSubpaths: true });
+    this.customAllowedPackages.set(name, {
+      ...config,
+      url: effectiveUrl,
+      allowSubpaths: config?.allowSubpaths ?? true
+    });
   }
 
   static getCustomAllowedPackage(name: string): BrowserPackageConfig | undefined {
@@ -417,6 +512,17 @@ export class DependencyResolverService {
 
     // 3. Subpath import
     const subpath = trimmed.slice(basePkg.length + 1);
+
+    // Reject subpath containing path traversal or invalid characters
+    if (subpath.includes('..') || subpath.includes('\\') || subpath.includes('\0') || subpath.includes('%2e') || subpath.includes('%2E') || subpath.startsWith('/')) {
+      return {
+        allowed: false,
+        packageName: basePkg,
+        subpath,
+        status: 'rejected_subpath',
+        diagnostic: `Malicious or invalid subpath traversal sequence detected in "${trimmed}".`
+      };
+    }
 
     // Check allowSubpaths enforcement
     if (regConfig.allowSubpaths === false) {

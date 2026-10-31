@@ -4,6 +4,8 @@ import {
   ProjectType, 
   TechStackConfig, 
   ArchitectureDecision, 
+  ADRStatus,
+  ADRHistoryEntry,
   RequirementItem, 
   RequirementStatus,
   ProjectRevision,
@@ -11,7 +13,7 @@ import {
   ProjectFile
 } from '../types.js';
 
-export type { ArchitectureDecision, RequirementItem, ProjectRevision };
+export type { ArchitectureDecision, ADRStatus, ADRHistoryEntry, RequirementItem, ProjectRevision };
 
 export interface ProjectFact {
   id: string;
@@ -31,15 +33,25 @@ export interface ProjectDefect {
   discoveredAt: number;
   resolvedAt?: number;
   repairAttempts?: number;
+  scheduledRepairTaskId?: string;
   expectedCorrection?: string;
   failedRepairs?: string[];
   regressionTests?: string[];
+  maxRepairAttempts?: number;
+  discoveredAtRevision?: number;
+  resolvedWithEvidence?: string;
 }
 
 export interface ModuleRelationship {
   sourcePath: string;
   imports: string[];
   exports: string[];
+}
+
+export interface ADRConflictResult {
+  hasConflict: boolean;
+  conflictingADR?: ArchitectureDecision;
+  reason?: string;
 }
 
 export interface ProjectMemory {
@@ -59,8 +71,9 @@ export interface ProjectMemory {
 
 export class ProjectMemoryService {
   private static MAX_FACTS = 40;
-  private static MAX_ADRS = 15;
+  private static MAX_ADRS = 25;
   private static MAX_DEFECTS = 30;
+  private static DEFAULT_MAX_REPAIR_ATTEMPTS = 3;
 
   /**
    * Initializes or loads project memory with strict user isolation.
@@ -202,7 +215,108 @@ export class ProjectMemoryService {
   }
 
   /**
-   * Records or supersedes an Architecture Decision Record (ADR)
+   * Intelligent Architectural Decision Conflict Detection.
+   * Does NOT classify two decisions as conflicting merely because their titles are similar.
+   * Analyzes actual technical meaning, affected components, constraints, and consequences.
+   */
+  static detectADRConflicts(
+    newADR: ArchitectureDecision, 
+    existingADRs: ArchitectureDecision[]
+  ): ADRConflictResult {
+    const activeAccepted = existingADRs.filter(d => 
+      d.id !== newADR.id && 
+      (d.status === 'accepted' || (newADR.status === 'accepted' && d.status === 'proposed'))
+    );
+
+    const newText = `${newADR.title} ${newADR.context} ${newADR.decision} ${newADR.consequences || ''}`.toLowerCase();
+    const newFiles = (newADR.affectedFiles || []).map(f => f.toLowerCase());
+    const newModules = (newADR.affectedModules || []).map(m => m.toLowerCase());
+
+    for (const existing of activeAccepted) {
+      // Skip if newADR explicitly supersedes this existing ADR
+      if (newADR.supersedes === existing.id || existing.supersededBy === newADR.id) {
+        continue;
+      }
+
+      const existingText = `${existing.title} ${existing.context} ${existing.decision} ${existing.consequences || ''}`.toLowerCase();
+      const existingFiles = (existing.affectedFiles || []).map(f => f.toLowerCase());
+      const existingModules = (existing.affectedModules || []).map(m => m.toLowerCase());
+
+      // 1. Check for concrete affected component/module overlap
+      const hasModuleOverlap = newModules.some(m => existingModules.includes(m));
+      const hasFileOverlap = newFiles.some(f => existingFiles.includes(f));
+
+      // 2. Identify known technical contradictions
+      const contradictions: Array<{ key1: string; key2: string; reason: string }> = [
+        {
+          key1: 'sqlite',
+          key2: 'postgres',
+          reason: 'Conflicting database engines: SQLite embedded database vs PostgreSQL client'
+        },
+        {
+          key1: 'mongodb',
+          key2: 'sqlite',
+          reason: 'Conflicting database paradigm: MongoDB document store vs SQLite relational database'
+        },
+        {
+          key1: 'rest api',
+          key2: 'graphql',
+          reason: 'Conflicting API architectural paradigm: REST endpoints vs GraphQL schema'
+        },
+        {
+          key1: 'zustand',
+          key2: 'redux toolkit',
+          reason: 'Conflicting global state management library for client application'
+        },
+        {
+          key1: 'session cookie',
+          key2: 'localstorage jwt',
+          reason: 'Conflicting token storage paradigm: HTTP-only cookies vs LocalStorage Bearer tokens'
+        },
+        {
+          key1: 'single-page application',
+          key2: 'server-side rendered',
+          reason: 'Conflicting rendering paradigm: SPA client routing vs Server-Side Rendering'
+        }
+      ];
+
+      for (const c of contradictions) {
+        const newHasK1 = newText.includes(c.key1);
+        const newHasK2 = newText.includes(c.key2);
+        const exHasK1 = existingText.includes(c.key1);
+        const exHasK2 = existingText.includes(c.key2);
+
+        if ((newHasK1 && exHasK2) || (newHasK2 && exHasK1)) {
+          return {
+            hasConflict: true,
+            conflictingADR: existing,
+            reason: `${c.reason} (in decision [${existing.id}] "${existing.title}" vs [${newADR.id}] "${newADR.title}")`
+          };
+        }
+      }
+
+      // 3. Directly conflicting decision on overlapping files or modules
+      if ((hasModuleOverlap || hasFileOverlap) && newADR.status === 'accepted') {
+        // If both target same module but propose contradictory constraints
+        if (
+          (newText.includes('disable') && existingText.includes('enable')) ||
+          (newText.includes('in-memory') && existingText.includes('persistent disk'))
+        ) {
+          return {
+            hasConflict: true,
+            conflictingADR: existing,
+            reason: `Conflicting implementation policy for component [${existing.affectedModules?.join(', ') || existing.title}]`
+          };
+        }
+      }
+    }
+
+    return { hasConflict: false };
+  }
+
+  /**
+   * Records or updates an Architecture Decision Record (ADR), auditing modification history
+   * and notifying Planner and Integration Agent if an architectural conflict is detected.
    */
   static recordDecision(
     buildId: string,
@@ -212,26 +326,254 @@ export class ProjectMemoryService {
     const memory = this.getOrInitializeMemory(buildId, userId);
     if (!memory) return false;
 
+    // Check for architectural conflicts
+    const conflict = this.detectADRConflicts(decision, memory.architectureDecisions);
+    if (conflict.hasConflict && conflict.conflictingADR) {
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'architectural_conflict' as any,
+        details: `[ADR Conflict Warning] Decision [${decision.id}] "${decision.title}" contradicts accepted decision [${conflict.conflictingADR.id}] "${conflict.conflictingADR.title}": ${conflict.reason}`
+      });
+    }
+
+    const now = Date.now();
     const existingIndex = memory.architectureDecisions.findIndex(d => d.id === decision.id);
+    
+    // Maintain audit history entries
+    const historyEntry: ADRHistoryEntry = {
+      timestamp: now,
+      action: existingIndex >= 0 ? (decision.status === 'superseded' ? 'superseded' : 'modified') : 'created',
+      author: 'architect_agent',
+      note: decision.decision
+    };
+
     if (existingIndex >= 0) {
+      const existing = memory.architectureDecisions[existingIndex];
+      const history = [...(existing.history || []), historyEntry];
       memory.architectureDecisions[existingIndex] = {
+        ...existing,
         ...decision,
-        timestamp: Date.now()
+        history,
+        timestamp: now
       };
     } else {
+      const history = decision.history || [historyEntry];
       memory.architectureDecisions.push({
         ...decision,
-        timestamp: Date.now()
+        history,
+        timestamp: now
       });
       if (memory.architectureDecisions.length > this.MAX_ADRS) {
         memory.architectureDecisions = memory.architectureDecisions.slice(-this.MAX_ADRS);
       }
     }
 
-    memory.lastUpdated = Date.now();
+    memory.lastUpdated = now;
     db.saveProjectMemory(memory);
 
     // Keep build entity synchronized
+    const build = db.getBuild(buildId);
+    if (build) {
+      build.architectureDecisions = memory.architectureDecisions;
+      db.saveBuild(build);
+    }
+
+    return true;
+  }
+
+  /**
+   * Proposes a new decision in 'proposed' status
+   */
+  static proposeDecision(
+    buildId: string,
+    userId: string,
+    decision: Omit<ArchitectureDecision, 'status' | 'timestamp'>
+  ): ArchitectureDecision | null {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return null;
+
+    const fullDecision: ArchitectureDecision = {
+      ...decision,
+      status: 'proposed',
+      timestamp: Date.now(),
+      history: [{
+        timestamp: Date.now(),
+        action: 'created',
+        author: 'architect_agent',
+        note: 'Proposed architectural decision'
+      }]
+    };
+
+    this.recordDecision(buildId, userId, fullDecision);
+    return fullDecision;
+  }
+
+  /**
+   * Accepts an architectural decision after verifying no unaddressed conflicts exist
+   */
+  static acceptDecision(
+    buildId: string,
+    userId: string,
+    decisionId: string,
+    reason?: string
+  ): { success: boolean; conflictReason?: string } {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return { success: false, conflictReason: 'Memory not found' };
+
+    const adr = memory.architectureDecisions.find(d => d.id === decisionId);
+    if (!adr) return { success: false, conflictReason: 'ADR not found' };
+
+    // Check conflict against already accepted ADRs
+    const testADR: ArchitectureDecision = { ...adr, status: 'accepted' };
+    const conflict = this.detectADRConflicts(testADR, memory.architectureDecisions);
+
+    if (conflict.hasConflict && conflict.conflictingADR) {
+      return {
+        success: false,
+        conflictReason: `Cannot accept [${decisionId}]: conflicts with accepted decision [${conflict.conflictingADR.id}] "${conflict.conflictingADR.title}". Resolve or supersede first.`
+      };
+    }
+
+    adr.status = 'accepted';
+    adr.timestamp = Date.now();
+    if (!adr.history) adr.history = [];
+    adr.history.push({
+      timestamp: Date.now(),
+      action: 'accepted',
+      author: 'architect_agent',
+      note: reason || 'Decision accepted by team'
+    });
+
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
+    const build = db.getBuild(buildId);
+    if (build) {
+      build.architectureDecisions = memory.architectureDecisions;
+      db.saveBuild(build);
+    }
+
+    return { success: true };
+  }
+
+  /**
+   * Rejects a proposed architectural decision with an explanation
+   */
+  static rejectDecision(
+    buildId: string,
+    userId: string,
+    decisionId: string,
+    reason?: string
+  ): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    const adr = memory.architectureDecisions.find(d => d.id === decisionId);
+    if (!adr) return false;
+
+    adr.status = 'rejected';
+    adr.timestamp = Date.now();
+    if (!adr.history) adr.history = [];
+    adr.history.push({
+      timestamp: Date.now(),
+      action: 'rejected',
+      author: 'architect_agent',
+      note: reason || 'Decision rejected by team'
+    });
+
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
+    const build = db.getBuild(buildId);
+    if (build) {
+      build.architectureDecisions = memory.architectureDecisions;
+      db.saveBuild(build);
+    }
+
+    return true;
+  }
+
+  /**
+   * Supersedes an existing decision with a newer architectural decision record
+   */
+  static supersedeDecision(
+    buildId: string,
+    userId: string,
+    oldDecisionId: string,
+    newDecisionId: string,
+    rationale?: string
+  ): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    const oldADR = memory.architectureDecisions.find(d => d.id === oldDecisionId);
+    const newADR = memory.architectureDecisions.find(d => d.id === newDecisionId);
+
+    if (!oldADR || !newADR) return false;
+
+    const now = Date.now();
+    oldADR.status = 'superseded';
+    oldADR.supersededBy = newDecisionId;
+    if (!oldADR.history) oldADR.history = [];
+    oldADR.history.push({
+      timestamp: now,
+      action: 'superseded',
+      author: 'architect_agent',
+      note: rationale || `Superseded by [${newDecisionId}]`
+    });
+
+    newADR.supersedes = oldDecisionId;
+    newADR.status = 'accepted';
+    if (!newADR.history) newADR.history = [];
+    newADR.history.push({
+      timestamp: now,
+      action: 'accepted',
+      author: 'architect_agent',
+      note: `Supersedes [${oldDecisionId}]: ${rationale || ''}`
+    });
+
+    memory.lastUpdated = now;
+    db.saveProjectMemory(memory);
+
+    const build = db.getBuild(buildId);
+    if (build) {
+      build.architectureDecisions = memory.architectureDecisions;
+      db.saveBuild(build);
+    }
+
+    return true;
+  }
+
+  /**
+   * Reconsiders an existing rejected or accepted decision back into review
+   */
+  static reconsiderDecision(
+    buildId: string,
+    userId: string,
+    decisionId: string,
+    note?: string
+  ): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    const adr = memory.architectureDecisions.find(d => d.id === decisionId);
+    if (!adr) return false;
+
+    adr.status = 'proposed';
+    adr.timestamp = Date.now();
+    if (!adr.history) adr.history = [];
+    adr.history.push({
+      timestamp: Date.now(),
+      action: 'reconsidered',
+      author: 'architect_agent',
+      note: note || 'Reopened for team review'
+    });
+
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
     const build = db.getBuild(buildId);
     if (build) {
       build.architectureDecisions = memory.architectureDecisions;
@@ -381,7 +723,7 @@ export class ProjectMemoryService {
   }
 
   /**
-   * Logs a known defect identified by the verification service
+   * Logs or updates a defect record. Deduplicates active defects.
    */
   static recordDefect(
     buildId: string,
@@ -395,13 +737,21 @@ export class ProjectMemoryService {
     const existing = memory.knownDefects.find(
       d => !d.resolved && d.description.toLowerCase().trim() === defect.description.toLowerCase().trim()
     );
-    if (existing) return existing.id;
+    if (existing) {
+      // Update file paths if expanded
+      for (const fp of defect.filePaths) {
+        if (!existing.filePaths.includes(fp)) existing.filePaths.push(fp);
+      }
+      return existing.id;
+    }
 
     const id = `def_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const newDefect: ProjectDefect = {
       ...defect,
       id,
       resolved: false,
+      repairAttempts: 0,
+      maxRepairAttempts: defect.maxRepairAttempts || this.DEFAULT_MAX_REPAIR_ATTEMPTS,
       discoveredAt: Date.now()
     };
 
@@ -416,45 +766,87 @@ export class ProjectMemoryService {
   }
 
   /**
-   * Marks a defect as resolved with timestamp
+   * Checks whether a defect is eligible for repair and has not exceeded configured repair attempts.
    */
-  static resolveDefect(buildId: string, userId: string, defectId: string): boolean {
+  static canAttemptRepair(
+    buildId: string,
+    userId: string,
+    defectId: string
+  ): { allowed: boolean; attempts: number; maxAttempts: number; reason?: string } {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return { allowed: false, attempts: 0, maxAttempts: 3, reason: 'Memory not found' };
+
+    const defect = memory.knownDefects.find(d => d.id === defectId);
+    if (!defect) return { allowed: false, attempts: 0, maxAttempts: 3, reason: 'Defect not found' };
+
+    if (defect.resolved) {
+      return { allowed: false, attempts: defect.repairAttempts || 0, maxAttempts: defect.maxRepairAttempts || 3, reason: 'Defect already resolved' };
+    }
+
+    const max = defect.maxRepairAttempts || this.DEFAULT_MAX_REPAIR_ATTEMPTS;
+    const current = defect.repairAttempts || 0;
+
+    if (current >= max) {
+      return {
+        allowed: false,
+        attempts: current,
+        maxAttempts: max,
+        reason: `Exceeded maximum bounded repair limit (${current}/${max} attempts)`
+      };
+    }
+
+    return { allowed: true, attempts: current, maxAttempts: max };
+  }
+
+  /**
+   * Associates a scheduled repair task with a defect without incrementing execution attempts.
+   */
+  static scheduleRepairTask(
+    buildId: string,
+    userId: string,
+    defectId: string,
+    taskId: string
+  ): boolean {
     const memory = this.getOrInitializeMemory(buildId, userId);
     if (!memory) return false;
 
     const defect = memory.knownDefects.find(d => d.id === defectId);
     if (!defect) return false;
 
-    defect.resolved = true;
-    defect.resolvedAt = Date.now();
-
+    defect.scheduledRepairTaskId = taskId;
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);
     return true;
   }
 
   /**
-   * Tracks a repair attempt on a defect. Bounded to max 3 attempts to prevent infinite repair loops.
+   * Tracks execution of a repair attempt. Increments repair attempts counter ONLY upon actual execution,
+   * preserving history of failed attempts and regression checks.
    */
-  static recordRepairAttempt(
+  static recordRepairExecution(
     buildId: string,
     userId: string,
     defectId: string,
-    attemptNote?: string,
-    failed?: boolean,
+    attemptNote: string,
+    success: boolean,
+    failureReason?: string,
     regressionTest?: string
-  ): { allowed: boolean; attempts: number } {
+  ): { attempts: number; maxAttempts: number; canRetry: boolean } {
     const memory = this.getOrInitializeMemory(buildId, userId);
-    if (!memory) return { allowed: false, attempts: 0 };
+    if (!memory) return { attempts: 0, maxAttempts: 3, canRetry: false };
 
     const defect = memory.knownDefects.find(d => d.id === defectId);
-    if (!defect) return { allowed: false, attempts: 0 };
+    if (!defect) return { attempts: 0, maxAttempts: 3, canRetry: false };
 
+    // Increment actual executed attempt
     defect.repairAttempts = (defect.repairAttempts || 0) + 1;
-    if (failed && attemptNote) {
+    defect.scheduledRepairTaskId = undefined;
+
+    if (!success) {
       if (!defect.failedRepairs) defect.failedRepairs = [];
-      defect.failedRepairs.push(attemptNote);
+      defect.failedRepairs.push(failureReason || attemptNote);
     }
+
     if (regressionTest) {
       if (!defect.regressionTests) defect.regressionTests = [];
       if (!defect.regressionTests.includes(regressionTest)) {
@@ -465,8 +857,58 @@ export class ProjectMemoryService {
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);
 
-    const allowed = defect.repairAttempts < 3;
-    return { allowed, attempts: defect.repairAttempts };
+    const max = defect.maxRepairAttempts || this.DEFAULT_MAX_REPAIR_ATTEMPTS;
+    const canRetry = defect.repairAttempts < max && !defect.resolved;
+
+    return { attempts: defect.repairAttempts, maxAttempts: max, canRetry };
+  }
+
+  /**
+   * Backward-compatible repair attempt recorder.
+   */
+  static recordRepairAttempt(
+    buildId: string,
+    userId: string,
+    defectId: string,
+    attemptNote?: string,
+    failed?: boolean,
+    regressionTest?: string
+  ): { allowed: boolean; attempts: number } {
+    const res = this.recordRepairExecution(
+      buildId,
+      userId,
+      defectId,
+      attemptNote || 'Repair execution',
+      !failed,
+      failed ? attemptNote : undefined,
+      regressionTest
+    );
+    return { allowed: res.canRetry, attempts: res.attempts };
+  }
+
+  /**
+   * Marks a defect as resolved ONLY when supported by real evidence (e.g. tests passed, syntax clean).
+   */
+  static resolveDefect(
+    buildId: string, 
+    userId: string, 
+    defectId: string, 
+    evidence?: string
+  ): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    const defect = memory.knownDefects.find(d => d.id === defectId);
+    if (!defect) return false;
+
+    defect.resolved = true;
+    defect.resolvedAt = Date.now();
+    defect.resolvedWithEvidence = evidence || 'Verified through clean test and syntax execution';
+    defect.scheduledRepairTaskId = undefined;
+
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+    return true;
   }
 
   /**
@@ -502,6 +944,7 @@ export class ProjectMemoryService {
    * Produces a token-budgeted, task-relevant context block for autonomous agent prompts.
    * Eliminates hallucination by providing ONLY relevant ADRs, requirements, confirmed facts,
    * and defects for the specific task and target files.
+   * Priority: Confirmed User Requirements > Accepted ADRs > Active Defects > Conventions.
    */
   static retrieveTaskContext(
     buildId: string, 
@@ -519,10 +962,16 @@ export class ProjectMemoryService {
       `PROJECT CONTEXT: ${memory.projectType.toUpperCase()} | STACK: ${memory.techStack.frontend} + ${memory.techStack.backend}`
     );
 
-    // 2. Relevant ADRs (accepted decisions only)
+    // 2. Relevant ADRs (accepted decisions only, filtered by module/file relevance or global)
     const activeAdrs = memory.architectureDecisions.filter(d => d.status === 'accepted');
-    if (activeAdrs.length > 0) {
-      const adrLines = activeAdrs.slice(0, 3).map(d => `- [${d.id}] ${d.title}: ${d.decision}`);
+    const relevantAdrs = activeAdrs.filter(adr => {
+      if (!adr.affectedFiles || adr.affectedFiles.length === 0) return true;
+      return adr.affectedFiles.some(af => task.filePaths.some(tf => tf.includes(af) || af.includes(tf)));
+    });
+
+    const adrsToShow = (relevantAdrs.length > 0 ? relevantAdrs : activeAdrs).slice(0, 3);
+    if (adrsToShow.length > 0) {
+      const adrLines = adrsToShow.map(d => `- [${d.id}] ${d.title}: ${d.decision}`);
       sections.push(`ARCHITECTURE CONSTRAINTS:\n${adrLines.join('\n')}`);
     }
 
@@ -536,7 +985,7 @@ export class ProjectMemoryService {
       let score = 0;
       // High bonus if target file explicitly satisfies this requirement
       if (req.satisfiedByFiles?.some(f => task.filePaths.includes(f))) {
-        score += 20;
+        score += 25;
       }
       // Category match
       if (req.category && taskTokens.includes(req.category.toLowerCase())) {
@@ -546,24 +995,21 @@ export class ProjectMemoryService {
       const reqText = `${req.title || ''} ${req.description}`.toLowerCase();
       for (const token of taskTokens) {
         if (reqText.includes(token)) {
-          score += 3;
+          score += 4;
         }
       }
-      // Unsatisfied requirements get priority boost so engineers know unfinished goals
+      // Unsatisfied requirements get priority boost
       if (!req.satisfied) {
-        score += 5;
+        score += 6;
       }
       // Priority weighting
-      if (req.priority === 'must_have') score += 4;
+      if (req.priority === 'must_have') score += 5;
       else if (req.priority === 'should_have') score += 2;
 
       return { req, score };
     });
 
-    // Sort by relevance score descending
     scoredReqs.sort((a, b) => b.score - a.score);
-
-    // Pick top relevant requirements
     const relevantReqs = scoredReqs.slice(0, 4).map(s => s.req);
 
     if (relevantReqs.length > 0) {
@@ -578,12 +1024,16 @@ export class ProjectMemoryService {
       d => !d.resolved && d.filePaths.some(fp => task.filePaths.includes(fp))
     );
     if (relevantDefects.length > 0) {
-      const defectLines = relevantDefects.slice(0, 3).map(d => `- [DEFECT] ${d.description}`);
+      const defectLines = relevantDefects.slice(0, 3).map(d => 
+        `- [DEFECT] ${d.description}${d.expectedCorrection ? ` (Correction: ${d.expectedCorrection})` : ''}`
+      );
       sections.push(`ACTIVE DEFECTS TO REMEDY:\n${defectLines.join('\n')}`);
     }
 
-    // 5. Confirmed Facts
-    const confirmedFacts = memory.facts.filter(f => f.confidence === 'confirmed').slice(0, 3);
+    // 5. Confirmed Facts (Prioritized: user_revision > user_prompt > architect)
+    const confirmedFacts = memory.facts
+      .filter(f => f.confidence === 'confirmed' && !f.statement.startsWith('[SUPERSEDED'))
+      .slice(0, 3);
     if (confirmedFacts.length > 0) {
       const factLines = confirmedFacts.map(f => `- ${f.statement}`);
       sections.push(`ESTABLISHED FACTS:\n${factLines.join('\n')}`);

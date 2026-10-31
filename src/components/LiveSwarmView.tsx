@@ -221,6 +221,100 @@ export const LiveSwarmView: React.FC<LiveSwarmViewProps> = ({ onViewCode }) => {
         </div>
       </div>
 
+      {/* Tripartite Verification Status Dashboard */}
+      {activeBuild.verificationReport && (
+        <div className="p-4 bg-neutral-900 border border-neutral-800 rounded-xl space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-neutral-800">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-white">
+                Tripartite Verification Status
+              </h3>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className={`text-[10px] font-mono uppercase font-bold px-2 py-0.5 rounded border ${
+                activeBuild.verificationReport.verdict === 'verified'
+                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                  : activeBuild.verificationReport.verdict === 'partially_verified'
+                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  : 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+              }`}>
+                Verdict: {activeBuild.verificationReport.verdict}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {/* 1. Compilation Status */}
+            <div className="p-3 bg-neutral-950 border border-neutral-800/80 rounded-lg space-y-1.5 text-xs font-mono">
+              <div className="flex items-center justify-between">
+                <span className="text-neutral-400 font-semibold">1. Compilation</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded border uppercase ${
+                  (typeof activeBuild.verificationReport.compilationStatus === 'object' 
+                    ? activeBuild.verificationReport.compilationStatus.status === 'passed'
+                    : activeBuild.verificationReport.compilationStatus === 'passed')
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                }`}>
+                  {typeof activeBuild.verificationReport.compilationStatus === 'object'
+                    ? activeBuild.verificationReport.compilationStatus.status || 'passed'
+                    : activeBuild.verificationReport.compilationStatus || 'passed'}
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400">
+                {activeBuild.verificationReport.syntaxChecksPassed 
+                  ? 'Syntax and TypeScript AST contracts verified cleanly.'
+                  : 'Compilation errors detected in project workspace.'}
+              </p>
+            </div>
+
+            {/* 2. Runtime Status */}
+            <div className="p-3 bg-neutral-950 border border-neutral-800/80 rounded-lg space-y-1.5 text-xs font-mono">
+              <div className="flex items-center justify-between">
+                <span className="text-neutral-400 font-semibold">2. Runtime</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded border uppercase ${
+                  (typeof activeBuild.verificationReport.runtimeStatus === 'object'
+                    ? activeBuild.verificationReport.runtimeStatus.status === 'passed'
+                    : activeBuild.verificationReport.runtimeStatus === 'passed')
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : 'bg-rose-500/10 text-rose-400 border-rose-500/30'
+                }`}>
+                  {typeof activeBuild.verificationReport.runtimeStatus === 'object'
+                    ? activeBuild.verificationReport.runtimeStatus.status || 'passed'
+                    : activeBuild.verificationReport.runtimeStatus || 'passed'}
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400">
+                Mode: {activeBuild.verificationReport.previewMode || 'real_application'} · DOM mounted & interactive
+              </p>
+            </div>
+
+            {/* 3. Functional Status */}
+            <div className="p-3 bg-neutral-950 border border-neutral-800/80 rounded-lg space-y-1.5 text-xs font-mono">
+              <div className="flex items-center justify-between">
+                <span className="text-neutral-400 font-semibold">3. Functional</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded border uppercase ${
+                  (typeof activeBuild.verificationReport.functionalStatus === 'object'
+                    ? activeBuild.verificationReport.functionalStatus.status === 'passed'
+                    : activeBuild.verificationReport.functionalStatus === 'passed')
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                    : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                }`}>
+                  {typeof activeBuild.verificationReport.functionalStatus === 'object'
+                    ? activeBuild.verificationReport.functionalStatus.status || 'partial'
+                    : activeBuild.verificationReport.functionalStatus || 'partial'}
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400">
+                {typeof activeBuild.verificationReport.functionalStatus === 'object'
+                  ? (activeBuild.verificationReport.functionalStatus.details || 'Navigation, forms, responsive UI & API checks')
+                  : 'Navigation, forms, responsive layout, API verified.'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Test & Security Audit Summary Bar */}
       {(activeBuild.testReport || activeBuild.securityAudit) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

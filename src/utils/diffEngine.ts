@@ -1,12 +1,13 @@
 /**
  * diffEngine.ts
- * High-performance, pure Myers/LCS diff computation and line-level multi-agent
- * attribution engine for SquadForge.
+ * High-performance, pure Myers/LCS diff computation, line-level multi-agent
+ * attribution, formatting-only detection, overlapping edit detection, and
+ * revision timeline engine for SquadForge.
  */
 
 import { FileHistory } from '../types/index.js';
 
-export type DiffLineType = 'unchanged' | 'added' | 'deleted' | 'modified';
+export type DiffLineType = 'unchanged' | 'added' | 'deleted' | 'modified' | 'reverted' | 'merged';
 
 export interface DiffLine {
   id: string;
@@ -16,9 +17,14 @@ export interface DiffLine {
   content: string;
   oldContent?: string;
   author?: string;
+  authorModel?: string;
+  taskId?: string;
   commitMessage?: string;
   version?: number;
   timestamp?: number;
+  isFormattingOnly?: boolean;
+  changeCategory?: 'added' | 'removed' | 'modified' | 'reverted' | 'merged';
+  overlappingAgents?: string[];
 }
 
 export interface SplitDiffRow {
@@ -26,16 +32,20 @@ export interface SplitDiffRow {
   left?: {
     lineNumber: number;
     content: string;
-    type: 'unchanged' | 'deleted' | 'modified';
+    type: 'unchanged' | 'deleted' | 'modified' | 'reverted';
+    isFormattingOnly?: boolean;
+    taskId?: string;
   };
   right?: {
     lineNumber: number;
     content: string;
-    type: 'unchanged' | 'added' | 'modified';
+    type: 'unchanged' | 'added' | 'modified' | 'reverted' | 'merged';
     author?: string;
     commitMessage?: string;
     version?: number;
     timestamp?: number;
+    isFormattingOnly?: boolean;
+    taskId?: string;
   };
 }
 
@@ -46,6 +56,7 @@ export interface AgentDiffStat {
   modifications: number;
   totalChanges: number;
   percentage: number;
+  formattingOnlyCount?: number;
 }
 
 export interface DiffResult {
@@ -57,6 +68,8 @@ export interface DiffResult {
     modifications: number;
     unchanged: number;
     totalChanges: number;
+    formattingOnlyChanges: number;
+    isCompletelyFormattingOnly: boolean;
     agentStats: AgentDiffStat[];
   };
 }
@@ -66,8 +79,80 @@ export interface LineBlame {
   content: string;
   version: number;
   author: string;
+  taskId?: string;
   commitMessage?: string;
   timestamp: number;
+  isReverted?: boolean;
+  revisionHistory?: Array<{
+    version: number;
+    author: string;
+    taskId?: string;
+    timestamp: number;
+    action: 'created' | 'modified' | 'reverted';
+  }>;
+}
+
+export interface OverlappingEdit {
+  startLine: number;
+  endLine: number;
+  content: string;
+  agentsInvolved: string[];
+  versionsInvolved: number[];
+  tasksInvolved: string[];
+  isReverted: boolean;
+  summary: string;
+}
+
+export interface FileRevisionTimelineEntry {
+  version: number;
+  timestamp: number;
+  author: string;
+  taskId?: string;
+  commitMessage?: string;
+  changeType: 'added' | 'removed' | 'modified' | 'reverted' | 'merged';
+  isFormattingOnly: boolean;
+  additions: number;
+  deletions: number;
+  modifications: number;
+  isRenamed?: boolean;
+  originalPath?: string;
+  isDeleted?: boolean;
+  isRecreated?: boolean;
+  overlappingAgents?: string[];
+}
+
+export interface FileLifecycleAudit {
+  path: string;
+  isRenamed: boolean;
+  originalPath?: string;
+  isDeleted: boolean;
+  isRecreated: boolean;
+  versionCount: number;
+  lifecycleStatus: 'created' | 'renamed' | 'deleted' | 'recreated' | 'active';
+  authors: string[];
+}
+
+/**
+ * Normalizes a line of code for semantic comparison:
+ * strips leading/trailing whitespace, collapses internal whitespace,
+ * normalizes single/double quotes, and strips optional trailing semicolons/commas.
+ */
+export function normalizeCodeForComparison(line: string): string {
+  if (!line) return '';
+  return line
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/["']/g, "'")
+    .replace(/;+$/, '')
+    .replace(/,+$/, '');
+}
+
+/**
+ * Distinguishes semantic code changes from formatting-only changes (whitespace, indentation, quotes, semicolons).
+ */
+export function isFormattingOnlyChange(oldStr: string, newStr: string): boolean {
+  if (oldStr === newStr) return true;
+  return normalizeCodeForComparison(oldStr) === normalizeCodeForComparison(newStr);
 }
 
 /**
@@ -92,8 +177,24 @@ export function computeLCS(a: string[], b: string[]): number[][] {
 }
 
 /**
+ * Checks whether line content matches an ancestor version (prior to the immediate predecessor),
+ * indicating a reverted code change.
+ */
+function findAncestorMatchVersion(line: string, sortedAncestors: FileHistory[], currentVersion: number): number | null {
+  for (const ancestor of sortedAncestors) {
+    if (ancestor.version < currentVersion - 1) {
+      const ancestorLines = ancestor.content.split('\n');
+      if (ancestorLines.includes(line)) {
+        return ancestor.version;
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Computes line-level blame tracking across all historical revisions of a file.
- * Traces each final line to the specific historical agent and version that introduced or edited it.
+ * Traces each final line to the specific historical agent, task, and version that introduced or edited it.
  */
 export function computeHistoricalBlame(history: FileHistory[], upToVersion?: number): LineBlame[] {
   if (!history || history.length === 0) return [];
@@ -113,8 +214,16 @@ export function computeHistoricalBlame(history: FileHistory[], upToVersion?: num
     content,
     version: first.version,
     author: first.authorModel || 'initial_agent',
+    taskId: first.taskId,
     commitMessage: first.commitMessage,
     timestamp: first.timestamp || Date.now(),
+    revisionHistory: [{
+      version: first.version,
+      author: first.authorModel || 'initial_agent',
+      taskId: first.taskId,
+      timestamp: first.timestamp || Date.now(),
+      action: 'created'
+    }]
   }));
 
   // Step through each revision and propagate blame
@@ -138,20 +247,36 @@ export function computeHistoricalBlame(history: FileHistory[], upToVersion?: num
           content: nextLines[j - 1],
           version: prev.version,
           author: prev.author,
+          taskId: prev.taskId,
           commitMessage: prev.commitMessage,
           timestamp: prev.timestamp,
+          isReverted: prev.isReverted,
+          revisionHistory: prev.revisionHistory ? [...prev.revisionHistory] : []
         });
         i--;
         j--;
       } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-        // Added line attributed to current revision's author
+        // Added or modified line attributed to current revision's author
+        const addedContent = nextLines[j - 1];
+        const ancestorMatch = findAncestorMatchVersion(addedContent, sortedHistory.slice(0, step), rev.version);
+        const isReverted = ancestorMatch !== null;
+
         newBlameReversed.push({
           lineNumber: j,
-          content: nextLines[j - 1],
+          content: addedContent,
           version: rev.version,
           author: rev.authorModel || 'unknown_agent',
+          taskId: rev.taskId,
           commitMessage: rev.commitMessage,
           timestamp: rev.timestamp || Date.now(),
+          isReverted,
+          revisionHistory: [{
+            version: rev.version,
+            author: rev.authorModel || 'unknown_agent',
+            taskId: rev.taskId,
+            timestamp: rev.timestamp || Date.now(),
+            action: isReverted ? 'reverted' : 'modified'
+          }]
         });
         j--;
       } else if (i > 0) {
@@ -171,6 +296,97 @@ export function computeHistoricalBlame(history: FileHistory[], upToVersion?: num
 }
 
 /**
+ * Detects overlapping edits where multiple agents have touched or modified the same file ranges across history.
+ */
+export function detectOverlappingEdits(history: FileHistory[]): OverlappingEdit[] {
+  if (!history || history.length < 2) return [];
+
+  const sortedHistory = [...history].sort((a, b) => a.version - b.version);
+  const overlappingEdits: OverlappingEdit[] = [];
+  const lineAuthorsMap = new Map<number, Set<string>>();
+  const lineVersionsMap = new Map<number, Set<number>>();
+  const lineTasksMap = new Map<number, Set<string>>();
+  const lineContentMap = new Map<number, string>();
+
+  // Walk through each version to track line presence
+  for (const ver of sortedHistory) {
+    const lines = ver.content.split('\n');
+    lines.forEach((line, idx) => {
+      const lineNum = idx + 1;
+      lineContentMap.set(lineNum, line);
+
+      if (!lineAuthorsMap.has(lineNum)) lineAuthorsMap.set(lineNum, new Set());
+      if (!lineVersionsMap.has(lineNum)) lineVersionsMap.set(lineNum, new Set());
+      if (!lineTasksMap.has(lineNum)) lineTasksMap.set(lineNum, new Set());
+
+      if (ver.authorModel) lineAuthorsMap.get(lineNum)!.add(ver.authorModel);
+      lineVersionsMap.get(lineNum)!.add(ver.version);
+      if (ver.taskId) lineTasksMap.get(lineNum)!.add(ver.taskId);
+    });
+  }
+
+  // Detect consecutive blocks touched by 2+ different authors
+  let blockStart: number | null = null;
+  let currentAuthors = new Set<string>();
+  let currentVersions = new Set<number>();
+  let currentTasks = new Set<string>();
+  let blockContent: string[] = [];
+
+  const totalLines = Math.max(...Array.from(lineContentMap.keys()), 0);
+
+  for (let l = 1; l <= totalLines; l++) {
+    const authors = lineAuthorsMap.get(l);
+    if (authors && authors.size >= 2) {
+      if (blockStart === null) {
+        blockStart = l;
+        currentAuthors = new Set(authors);
+        currentVersions = new Set(lineVersionsMap.get(l) || []);
+        currentTasks = new Set(lineTasksMap.get(l) || []);
+        blockContent = [lineContentMap.get(l) || ''];
+      } else {
+        authors.forEach(a => currentAuthors.add(a));
+        (lineVersionsMap.get(l) || []).forEach(v => currentVersions.add(v));
+        (lineTasksMap.get(l) || []).forEach(t => currentTasks.add(t));
+        blockContent.push(lineContentMap.get(l) || '');
+      }
+    } else {
+      if (blockStart !== null) {
+        overlappingEdits.push({
+          startLine: blockStart,
+          endLine: l - 1,
+          content: blockContent.join('\n'),
+          agentsInvolved: Array.from(currentAuthors),
+          versionsInvolved: Array.from(currentVersions).sort((a, b) => a - b),
+          tasksInvolved: Array.from(currentTasks),
+          isReverted: false,
+          summary: `Lines ${blockStart}-${l - 1} jointly modified by ${Array.from(currentAuthors).join(', ')} across ${currentVersions.size} revisions`
+        });
+        blockStart = null;
+        currentAuthors = new Set();
+        currentVersions = new Set();
+        currentTasks = new Set();
+        blockContent = [];
+      }
+    }
+  }
+
+  if (blockStart !== null) {
+    overlappingEdits.push({
+      startLine: blockStart,
+      endLine: totalLines,
+      content: blockContent.join('\n'),
+      agentsInvolved: Array.from(currentAuthors),
+      versionsInvolved: Array.from(currentVersions).sort((a, b) => a - b),
+      tasksInvolved: Array.from(currentTasks),
+      isReverted: false,
+      summary: `Lines ${blockStart}-${totalLines} jointly modified by ${Array.from(currentAuthors).join(', ')}`
+    });
+  }
+
+  return overlappingEdits;
+}
+
+/**
  * Computes an interactive diff comparing two texts, attributing changes to agents.
  * Can use historical blame to attribute target lines to the exact agent that wrote them.
  */
@@ -184,7 +400,10 @@ export function computeAgentDiff(
     defaultOldAgent?: string;
     commitMessage?: string;
     timestamp?: number;
+    taskId?: string;
     blameMap?: LineBlame[];
+    history?: FileHistory[];
+    isMerged?: boolean;
   }
 ): DiffResult {
   const oldLines = oldContent ? oldContent.split('\n') : [];
@@ -245,18 +464,31 @@ export function computeAgentDiff(
   let deletions = 0;
   let modifications = 0;
   let unchanged = 0;
-  const agentChangeMap = new Map<string, { additions: number; deletions: number; modifications: number }>();
+  let formattingOnlyCount = 0;
+  const agentChangeMap = new Map<string, { additions: number; deletions: number; modifications: number; formattingOnly: number }>();
 
-  const trackAgentChange = (agent: string, type: 'add' | 'delete' | 'modify') => {
+  const trackAgentChange = (agent: string, type: 'add' | 'delete' | 'modify', isFmt: boolean = false) => {
     const key = agent || 'swarm_agent';
-    const entry = agentChangeMap.get(key) || { additions: 0, deletions: 0, modifications: 0 };
+    const entry = agentChangeMap.get(key) || { additions: 0, deletions: 0, modifications: 0, formattingOnly: 0 };
     if (type === 'add') entry.additions++;
     else if (type === 'delete') entry.deletions++;
     else if (type === 'modify') entry.modifications++;
+    if (isFmt) entry.formattingOnly++;
     agentChangeMap.set(key, entry);
   };
 
-  // Convert raw hunks into paired modified blocks or add/delete lines
+  // Helper to test if added content is a reverted change from an older version
+  const checkReverted = (text: string): boolean => {
+    if (!options?.history || options.history.length < 2) return false;
+    const curVer = options.newVersion || 999;
+    for (const h of options.history) {
+      if (h.version < curVer - 1 && h.content.split('\n').includes(text)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   let idx = 0;
   let lineKey = 0;
 
@@ -275,6 +507,8 @@ export function computeAgentDiff(
         newLineNumber: current.newLine,
         content: current.text,
         author: blame?.author || options?.defaultTargetAgent,
+        authorModel: blame?.author || options?.defaultTargetAgent,
+        taskId: blame?.taskId || options?.taskId,
         version: blame?.version ?? options?.newVersion,
         commitMessage: blame?.commitMessage ?? options?.commitMessage,
         timestamp: blame?.timestamp ?? options?.timestamp,
@@ -286,6 +520,7 @@ export function computeAgentDiff(
           lineNumber: current.oldLine,
           content: current.text,
           type: 'unchanged',
+          taskId: blame?.taskId || options?.taskId,
         },
         right: {
           lineNumber: current.newLine,
@@ -295,6 +530,7 @@ export function computeAgentDiff(
           version: blame?.version ?? options?.newVersion,
           commitMessage: blame?.commitMessage ?? options?.commitMessage,
           timestamp: blame?.timestamp ?? options?.timestamp,
+          taskId: blame?.taskId || options?.taskId,
         },
       });
 
@@ -324,9 +560,13 @@ export function computeAgentDiff(
           modifications++;
           const blame = blameLookup.get(add.newLine);
           const author = blame?.author || options?.defaultTargetAgent || 'swarm_agent';
-          trackAgentChange(author, 'modify');
+          const isFmt = isFormattingOnlyChange(del.text, add.text);
+          const isRev = checkReverted(add.text);
+          const changeType: DiffLineType = isRev ? 'reverted' : options?.isMerged ? 'merged' : 'modified';
 
-          // In unified view, we show delete then add (standard git diff style)
+          if (isFmt) formattingOnlyCount++;
+          trackAgentChange(author, 'modify', isFmt);
+
           unifiedLines.push({
             id: `u-del-${rowId}`,
             type: 'deleted',
@@ -334,6 +574,9 @@ export function computeAgentDiff(
             content: del.text,
             author: options?.defaultOldAgent,
             version: options?.oldVersion,
+            isFormattingOnly: isFmt,
+            changeCategory: 'removed',
+            taskId: options?.taskId,
           });
 
           unifiedLines.push({
@@ -343,9 +586,13 @@ export function computeAgentDiff(
             content: add.text,
             oldContent: del.text,
             author,
+            authorModel: author,
+            taskId: blame?.taskId || options?.taskId,
             version: blame?.version ?? options?.newVersion,
             commitMessage: blame?.commitMessage ?? options?.commitMessage,
             timestamp: blame?.timestamp ?? options?.timestamp,
+            isFormattingOnly: isFmt,
+            changeCategory: isRev ? 'reverted' : options?.isMerged ? 'merged' : 'modified',
           });
 
           splitRows.push({
@@ -354,6 +601,8 @@ export function computeAgentDiff(
               lineNumber: del.oldLine,
               content: del.text,
               type: 'modified',
+              isFormattingOnly: isFmt,
+              taskId: options?.taskId,
             },
             right: {
               lineNumber: add.newLine,
@@ -363,6 +612,8 @@ export function computeAgentDiff(
               version: blame?.version ?? options?.newVersion,
               commitMessage: blame?.commitMessage ?? options?.commitMessage,
               timestamp: blame?.timestamp ?? options?.timestamp,
+              isFormattingOnly: isFmt,
+              taskId: blame?.taskId || options?.taskId,
             },
           });
         } else if (del) {
@@ -378,6 +629,8 @@ export function computeAgentDiff(
             content: del.text,
             author: options?.defaultOldAgent,
             version: options?.oldVersion,
+            changeCategory: 'removed',
+            taskId: options?.taskId,
           });
 
           splitRows.push({
@@ -386,6 +639,7 @@ export function computeAgentDiff(
               lineNumber: del.oldLine,
               content: del.text,
               type: 'deleted',
+              taskId: options?.taskId,
             },
             right: undefined,
           });
@@ -394,17 +648,23 @@ export function computeAgentDiff(
           additions++;
           const blame = blameLookup.get(add.newLine);
           const author = blame?.author || options?.defaultTargetAgent || 'swarm_agent';
+          const isRev = checkReverted(add.text);
+          const changeType: DiffLineType = isRev ? 'reverted' : options?.isMerged ? 'merged' : 'added';
+
           trackAgentChange(author, 'add');
 
           unifiedLines.push({
             id: `u-${rowId}`,
-            type: 'added',
+            type: changeType,
             newLineNumber: add.newLine,
             content: add.text,
             author,
+            authorModel: author,
+            taskId: blame?.taskId || options?.taskId,
             version: blame?.version ?? options?.newVersion,
             commitMessage: blame?.commitMessage ?? options?.commitMessage,
             timestamp: blame?.timestamp ?? options?.timestamp,
+            changeCategory: isRev ? 'reverted' : options?.isMerged ? 'merged' : 'added',
           });
 
           splitRows.push({
@@ -413,11 +673,12 @@ export function computeAgentDiff(
             right: {
               lineNumber: add.newLine,
               content: add.text,
-              type: 'added',
+              type: changeType,
               author,
               version: blame?.version ?? options?.newVersion,
               commitMessage: blame?.commitMessage ?? options?.commitMessage,
               timestamp: blame?.timestamp ?? options?.timestamp,
+              taskId: blame?.taskId || options?.taskId,
             },
           });
         }
@@ -426,6 +687,7 @@ export function computeAgentDiff(
   }
 
   const totalChanges = additions + deletions + modifications;
+  const isCompletelyFormattingOnly = totalChanges > 0 && modifications > 0 && additions === 0 && deletions === 0 && formattingOnlyCount === modifications;
 
   const agentStats: AgentDiffStat[] = Array.from(agentChangeMap.entries()).map(([agent, stats]) => {
     const changes = stats.additions + stats.deletions + stats.modifications;
@@ -436,6 +698,7 @@ export function computeAgentDiff(
       modifications: stats.modifications,
       totalChanges: changes,
       percentage: totalChanges > 0 ? Math.round((changes / totalChanges) * 100) : 0,
+      formattingOnlyCount: stats.formattingOnly,
     };
   }).sort((a, b) => b.totalChanges - a.totalChanges);
 
@@ -448,9 +711,86 @@ export function computeAgentDiff(
       modifications,
       unchanged,
       totalChanges,
+      formattingOnlyChanges: formattingOnlyCount,
+      isCompletelyFormattingOnly,
       agentStats,
     },
   };
+}
+
+/**
+ * Computes a comprehensive revision timeline across all versions of a file,
+ * identifying changes, commit author, task IDs, and overlapping edits.
+ */
+export function computeFileRevisionTimeline(
+  history: FileHistory[],
+  fileMeta?: {
+    isRenamed?: boolean;
+    originalPath?: string;
+    isDeleted?: boolean;
+    isRecreated?: boolean;
+  }
+): FileRevisionTimelineEntry[] {
+  if (!history || history.length === 0) return [];
+
+  const sorted = [...history].sort((a, b) => a.version - b.version);
+  const timeline: FileRevisionTimelineEntry[] = [];
+
+  for (let idx = 0; idx < sorted.length; idx++) {
+    const current = sorted[idx];
+    const prev = idx > 0 ? sorted[idx - 1] : null;
+
+    if (!prev) {
+      // Version 1 creation
+      const lines = current.content.split('\n');
+      timeline.push({
+        version: current.version,
+        timestamp: current.timestamp || Date.now(),
+        author: current.authorModel || 'initial_agent',
+        taskId: current.taskId,
+        commitMessage: current.commitMessage || 'Initial file creation',
+        changeType: fileMeta?.isRecreated ? 'added' : 'added',
+        isFormattingOnly: false,
+        additions: lines.length,
+        deletions: 0,
+        modifications: 0,
+        isRenamed: fileMeta?.isRenamed,
+        originalPath: fileMeta?.originalPath,
+        isDeleted: fileMeta?.isDeleted,
+        isRecreated: fileMeta?.isRecreated
+      });
+    } else {
+      const diff = computeAgentDiff(prev.content, current.content, {
+        oldVersion: prev.version,
+        newVersion: current.version,
+        defaultTargetAgent: current.authorModel,
+        history: sorted.slice(0, idx + 1),
+        taskId: current.taskId
+      });
+
+      const isRev = diff.lines.some(l => l.type === 'reverted');
+      const changeType = isRev ? 'reverted' : diff.summary.modifications > 0 ? 'modified' : 'added';
+
+      timeline.push({
+        version: current.version,
+        timestamp: current.timestamp || Date.now(),
+        author: current.authorModel || 'swarm_agent',
+        taskId: current.taskId,
+        commitMessage: current.commitMessage || `Revision v${current.version}`,
+        changeType,
+        isFormattingOnly: diff.summary.isCompletelyFormattingOnly,
+        additions: diff.summary.additions,
+        deletions: diff.summary.deletions,
+        modifications: diff.summary.modifications,
+        isRenamed: fileMeta?.isRenamed,
+        originalPath: fileMeta?.originalPath,
+        isDeleted: fileMeta?.isDeleted,
+        isRecreated: fileMeta?.isRecreated
+      });
+    }
+  }
+
+  return timeline;
 }
 
 /**

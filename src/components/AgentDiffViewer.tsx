@@ -58,6 +58,7 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
   const [targetVersion, setTargetVersion] = useState<number>(() => maxVersion);
   const [selectedAgentFilter, setSelectedAgentFilter] = useState<string | null>(null);
   const [hideUnchanged, setHideUnchanged] = useState<boolean>(false);
+  const [hideFormattingOnly, setHideFormattingOnly] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [activeTooltip, setActiveTooltip] = useState<string | null>(null);
 
@@ -90,6 +91,7 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
       commitMessage: targetRevision?.commitMessage,
       timestamp: targetRevision?.timestamp,
       blameMap,
+      history,
     });
   }, [baseContent, targetContent, baseVersion, targetVersion, targetRevision, file.ownerModel, history, blameMap]);
 
@@ -98,6 +100,9 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
     return diffResult.lines.filter(line => {
       // Unchanged filter
       if (hideUnchanged && line.type === 'unchanged') return false;
+
+      // Formatting only filter
+      if (hideFormattingOnly && line.isFormattingOnly) return false;
 
       // Search filter
       if (searchQuery.trim()) {
@@ -109,13 +114,15 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
 
       return true;
     });
-  }, [diffResult.lines, hideUnchanged, searchQuery]);
+  }, [diffResult.lines, hideUnchanged, hideFormattingOnly, searchQuery]);
 
   // Filtered rows for Split mode
   const filteredSplitRows = useMemo(() => {
     return diffResult.splitRows.filter(row => {
       const isUnchanged = row.left?.type === 'unchanged' && row.right?.type === 'unchanged';
       if (hideUnchanged && isUnchanged) return false;
+
+      if (hideFormattingOnly && (row.left?.isFormattingOnly || row.right?.isFormattingOnly)) return false;
 
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
@@ -127,7 +134,7 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
 
       return true;
     });
-  }, [diffResult.splitRows, hideUnchanged, searchQuery]);
+  }, [diffResult.splitRows, hideUnchanged, hideFormattingOnly, searchQuery]);
 
   // Quick preset handlers
   const handleSetPrevToCurrent = () => {
@@ -308,8 +315,8 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
             )}
           </div>
 
-          {/* Right Controls: Changes Only & Search */}
-          <div className="flex items-center gap-3">
+          {/* Right Controls: Changes Only, Hide Formatting & Search */}
+          <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-1.5 cursor-pointer text-neutral-400 hover:text-white select-none">
               <input
                 type="checkbox"
@@ -320,6 +327,16 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
               <span>Changes only</span>
             </label>
 
+            <label className="flex items-center gap-1.5 cursor-pointer text-neutral-400 hover:text-white select-none">
+              <input
+                type="checkbox"
+                checked={hideFormattingOnly}
+                onChange={e => setHideFormattingOnly(e.target.checked)}
+                className="rounded border-neutral-700 text-amber-500 focus:ring-0 cursor-pointer"
+              />
+              <span>Hide formatting</span>
+            </label>
+
             <div className="relative flex items-center">
               <Search className="w-3 h-3 text-neutral-400 absolute left-2 pointer-events-none" />
               <input
@@ -327,7 +344,7 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
                 placeholder="Filter lines..."
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
-                className="bg-neutral-950 border border-neutral-800 rounded-lg pl-6 pr-2 py-0.5 text-neutral-200 placeholder-neutral-400 focus:outline-none focus:border-amber-500/50 w-32 sm:w-40"
+                className="bg-neutral-950 border border-neutral-800 rounded-lg pl-6 pr-2 py-0.5 text-neutral-200 placeholder-neutral-400 focus:outline-none focus:border-amber-500/50 w-28 sm:w-36"
               />
             </div>
           </div>
@@ -347,11 +364,37 @@ export const AgentDiffViewer: React.FC<AgentDiffViewerProps> = ({ file, classNam
             <span className="text-emerald-400 font-bold">+{diffResult.summary.additions}</span>
             <span className="text-amber-400 font-bold">~{diffResult.summary.modifications}</span>
             <span className="text-rose-400 font-bold">-{diffResult.summary.deletions}</span>
+            {diffResult.summary.formattingOnlyCount > 0 && (
+              <span className="px-1.5 py-0.2 rounded bg-cyan-950/60 text-cyan-300 border border-cyan-800/60 text-[10px]">
+                {diffResult.summary.formattingOnlyCount} format-only
+              </span>
+            )}
             <span className="text-neutral-400">
               ({diffResult.summary.totalChanges} changed / {diffResult.summary.unchanged} unchanged)
             </span>
           </div>
         </div>
+
+        {/* Overlapping Agent Edits Warning Banner */}
+        {diffResult.overlappingEdits && diffResult.overlappingEdits.length > 0 && (
+          <div className="p-2.5 bg-amber-950/30 border border-amber-500/30 rounded-lg text-[11px] text-amber-200 flex items-start gap-2">
+            <Layers className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <span className="font-semibold text-amber-300">
+                Overlapping Agent Edits Detected ({diffResult.overlappingEdits.length}):
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {diffResult.overlappingEdits.map((oe, idx) => (
+                  <span key={idx} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-neutral-900 border border-amber-500/30 rounded text-[10px]">
+                    <span className="font-mono text-amber-300">Lines {oe.startLine}-{oe.endLine}</span>
+                    <span className="text-neutral-400">touched by</span>
+                    <span className="font-bold text-amber-200">{oe.agentsInvolved.join(', ')}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 4. Diff View Body */}

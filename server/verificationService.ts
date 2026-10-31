@@ -3,6 +3,7 @@ import { ExecutionAdapter } from './swarm/executionAdapter.js';
 import { ProjectMemoryService } from './swarm/projectMemory.js';
 import { PreviewGenerator } from './swarm/previewGenerator.js';
 import { BrowserRuntimeVerifier } from './swarm/runtimeVerifier.js';
+import { IntegrationAgent } from './swarm/integrationAgent.js';
 import { 
   Build, 
   VerificationReport, 
@@ -222,33 +223,134 @@ export class HonestVerificationService {
       }
     }
 
+    // Contract analysis via TypeScript-aware IntegrationAgent
+    const contractResult = IntegrationAgent.analyzeProjectContracts(files);
+    for (const issue of contractResult.issues) {
+      if (issue.severity === 'error') {
+        knownDefects.push(`[${issue.rule}] ${issue.filePath}: ${issue.message}`);
+        checks.push({
+          category: 'types',
+          name: `Contract Check: ${issue.rule}`,
+          status: 'failed',
+          evidence: `${issue.filePath}: ${issue.message}. Suggestion: ${issue.suggestedFix || 'Fix contract interface'}`
+        });
+      } else if (issue.severity === 'warning') {
+        unresolvedRisks.push(`[${issue.rule}] ${issue.filePath}: ${issue.message}`);
+      }
+    }
+
+    // 5c. Functional Verification (Navigation, Forms, Responsive Layout, API Integration, Regressions)
+    const hasNavigation = files.some(f => 
+      /<(?:nav|Navbar|Route|Link|Tab)/i.test(f.content) || 
+      /current(?:Page|View|Tab)|activeTab|setActiveTab|useNavigate|BrowserRouter|HashRouter/i.test(f.content)
+    );
+
+    const hasForms = files.some(f => /<form|handleSubmit|onSubmit|FormData/i.test(f.content));
+    const formsProperlyHandled = !hasForms || files.some(f => 
+      /onSubmit\s*=|handleSubmit|preventDefault/i.test(f.content)
+    );
+
+    const hasResponsiveLayout = files.some(f => 
+      /(?:sm:|md:|lg:|xl:|@media|flex-wrap|grid-cols-|max-w-|min-w-)/.test(f.content)
+    );
+
+    const hasApiIntegration = files.some(f => 
+      /fetch\s*\(|axios\.|apiClient|XMLHttpRequest|useQuery|endpoints/i.test(f.content)
+    );
+    const apiErrorHandlingPassed = !hasApiIntegration || files.some(f => 
+      /try\s*\{[\s\S]*catch|\.catch\s*\(|onError|status\s*===/i.test(f.content)
+    );
+
+    const regressionFailures = testReport.details.filter(d => !d.passed).map(d => d.name);
+
     // 6. Connect each requirement to real files, tests, and evidence
     const verifiedRequirements = this.verifyRequirements(build, files, execResult, previewResult);
     const implementedCount = verifiedRequirements.filter(r => r.status === 'implemented' || r.status === 'verified').length;
     const failedReqCount = verifiedRequirements.filter(r => r.status === 'failed').length;
     const blockedReqCount = verifiedRequirements.filter(r => r.status === 'blocked').length;
 
+    const functionalPassed = 
+      hasFiles &&
+      syntaxPassed &&
+      formsProperlyHandled && 
+      hasResponsiveLayout && 
+      apiErrorHandlingPassed &&
+      regressionFailures.length === 0 &&
+      (files.length <= 1 || implementedCount > 0) &&
+      failedReqCount === 0;
+
+    const functionalStatusObj = {
+      status: functionalPassed ? ('passed' as const) : (regressionFailures.length > 0 || failedReqCount > 0 ? ('failed' as const) : ('partial' as const)),
+      navigationPassed: hasNavigation,
+      formsPassed: formsProperlyHandled,
+      responsiveLayoutPassed: hasResponsiveLayout,
+      apiIntegrationPassed: apiErrorHandlingPassed,
+      requirementsCompleted: implementedCount,
+      totalRequirements: verifiedRequirements.length || 1,
+      regressionFailures,
+      details: functionalPassed 
+        ? 'All functional checks (navigation, forms, responsive design, API contracts) verified without regression.'
+        : `Functional checks incomplete: ${[
+            !formsProperlyHandled ? 'Form submissions missing event handlers' : null,
+            !hasResponsiveLayout ? 'Responsive layout breakpoints missing' : null,
+            !apiErrorHandlingPassed ? 'API integration lacking robust error handling' : null,
+            regressionFailures.length > 0 ? `${regressionFailures.length} test regression(s) detected` : null
+          ].filter(Boolean).join('; ') || 'Some functional criteria not fully met'}`
+    };
+
+    checks.push({
+      category: 'requirements',
+      name: 'Functional Verification (UI & API Capabilities)',
+      status: functionalPassed ? 'passed' : 'failed',
+      evidence: functionalStatusObj.details
+    });
+
+    const compilationIsPassing = syntaxPassed && typePassed && (!buildReport || buildReport.passed !== false) && contractResult.issues.filter(i => i.severity === 'error').length === 0;
+    const runtimeIsPassing = previewPassed && runtimeReport.verified && previewResult.mode !== 'fallback_preview';
+    const functionalIsPassing = functionalStatusObj.status === 'passed';
+
     // 7. Determine Honest Verdict based on real evidence
+    // A build must ONLY receive a verified verdict when all 3 checks pass, known defects are 0, and automated tests succeed.
     let verdict: VerificationVerdict;
 
     if (build.status === 'stopped' || build.status === 'failed') {
       verdict = 'failed';
     } else if (inProgressTasks > 0) {
       verdict = 'in_progress';
-    } else if (!hasFiles || !syntaxPassed || failedTasks > 0 || testReport.failed > 0 || !secPassed || failedReqCount > 0) {
+    } else if (!hasFiles || !compilationIsPassing || failedTasks > 0 || testReport.failed > 0 || !secPassed || failedReqCount > 0 || knownDefects.length > 0) {
       verdict = 'failed';
-    } else if (requirementsCoveragePercent >= 90 && syntaxPassed && secPassed && (testReport.status === 'passed' || testReport.total === 0)) {
-      // Must not be marked 'verified' if running in fallback preview mode, build/tests skipped, or browser runtime verification failed
-      if (testReport.status === 'skipped' || buildReport.status === 'skipped' || previewResult.mode === 'fallback_preview' || blockedReqCount > 0 || !runtimeReport.verified) {
-        verdict = 'partially_verified';
-      } else {
-        verdict = 'verified';
-      }
+    } else if (
+      compilationIsPassing &&
+      runtimeIsPassing &&
+      functionalIsPassing &&
+      knownDefects.length === 0 &&
+      (testReport.status === 'passed' || testReport.total === 0)
+    ) {
+      verdict = 'verified';
     } else {
       verdict = 'partially_verified';
     }
 
     const finalOutcome = verdict === 'verified' ? 'verified' : verdict === 'partially_verified' ? 'partially_verified' : 'failed';
+
+    const compilationStatus = {
+      status: compilationIsPassing ? ('passed' as const) : ('failed' as const),
+      syntaxPassed,
+      typePassed,
+      previewBundlePassed: buildReport.passed,
+      errors: [
+        ...execResult.syntaxErrors.map(e => `${e.filePath}:${e.line || 1} ${e.message}`),
+        ...(buildReport.errors || [])
+      ]
+    };
+
+    const runtimeStatus = {
+      status: runtimeIsPassing ? ('passed' as const) : ('failed' as const),
+      mode: previewResult.mode,
+      entryPoint: previewResult.entryPoint,
+      interactiveState: runtimeReport.interactiveControlsVerified,
+      errors: runtimeReport.errors
+    };
 
     const report: VerificationReport = {
       verdict,
@@ -277,8 +379,9 @@ export class HonestVerificationService {
       unresolvedRisks,
       evidenceSummary: `Honest Evaluation Verdict: [${verdict.toUpperCase()}]. Implemented requirements: ${implementedCount}/${verifiedRequirements.length || 1}. Syntax valid: ${syntaxPassed}. Tests: ${testReport.passed}/${testReport.total} passed. Preview mode: ${previewResult.mode}. Security score: ${execResult.securityAudit.score}/100.`,
       requirementsReport: verifiedRequirements,
-      compilationStatus: syntaxPassed ? 'passed' : 'failed',
-      runtimeStatus: previewResult.mode === 'real_application' || previewResult.mode === 'static_html' ? 'passed' : 'failed',
+      compilationStatus,
+      runtimeStatus,
+      functionalStatus: functionalStatusObj,
       knownLimitations: [...knownDefects, ...unresolvedRisks],
       finalOutcome
     };

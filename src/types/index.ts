@@ -123,6 +123,29 @@ export interface Task {
     testsPassed?: boolean;
     errors?: string[];
   };
+  taskResult?: AgentTaskResult;
+}
+
+export interface AgentTaskResult {
+  taskId: string;
+  agentModelId: string;
+  agentRole?: AgentRole;
+  workCompleted: string;
+  filesCreated: string[];
+  filesModified: string[];
+  dependencies: string[];
+  architecturalDecisionsUsed: string[];
+  issuesDiscovered: string[];
+  testsExecuted: Array<{
+    name: string;
+    passed: boolean;
+    durationMs?: number;
+    error?: string;
+  }>;
+  remainingWork?: string[];
+  confidence: number;
+  evidence: string;
+  timestamp: number;
 }
 
 export interface FileVersion {
@@ -131,6 +154,9 @@ export interface FileVersion {
   authorModel: string;
   timestamp: number;
   commitMessage?: string;
+  taskId?: string;
+  changeType?: 'added' | 'removed' | 'modified' | 'reverted' | 'merged';
+  isFormattingOnly?: boolean;
 }
 
 export type FileHistory = FileVersion;
@@ -145,6 +171,10 @@ export interface ProjectFile {
   leaseExpiresAt?: number | null;
   createdAt: number;
   updatedAt: number;
+  originalPath?: string;
+  isRenamed?: boolean;
+  isDeleted?: boolean;
+  isRecreated?: boolean;
 }
 
 export type EventType = 
@@ -157,6 +187,7 @@ export type EventType =
   | 'patch_applied'
   | 'patch_rejected'
   | 'file_created'
+  | 'file_deleted'
   | 'file_leased'
   | 'sandbox_check'
   | 'tests_executed'
@@ -298,14 +329,33 @@ export type ProjectType =
   | 'api_service' 
   | 'internal_tool';
 
+export type ADRStatus = 'proposed' | 'accepted' | 'rejected' | 'superseded';
+
+export interface ADRHistoryEntry {
+  timestamp: number;
+  action: 'created' | 'modified' | 'accepted' | 'rejected' | 'superseded' | 'reconsidered';
+  author?: string;
+  note?: string;
+}
+
 export interface ArchitectureDecision {
   id: string;
   title: string;
-  status: 'proposed' | 'accepted' | 'superseded';
+  status: ADRStatus;
   context: string;
+  proposedSolution?: string;
   decision: string;
+  alternativesConsidered?: string[];
+  advantages?: string[];
+  disadvantages?: string[];
   rationale?: string;
   consequences?: string;
+  relatedRequirements?: string[];
+  affectedFiles?: string[];
+  affectedModules?: string[];
+  history?: ADRHistoryEntry[];
+  supersededBy?: string;
+  supersedes?: string;
   timestamp: number;
 }
 
@@ -396,16 +446,29 @@ export interface VerificationReport {
     items: RequirementItem[];
   };
   compilationStatus?: {
+    status?: 'passed' | 'failed';
     syntaxPassed: boolean;
     typePassed: boolean;
     previewBundlePassed: boolean;
     errors?: string[];
-  };
+  } | string;
   runtimeStatus?: {
+    status?: 'passed' | 'failed';
     mode: 'real_application' | 'static_html' | 'fallback_preview';
     entryPoint?: string;
     interactiveState: boolean;
     errors?: string[];
+  } | string;
+  functionalStatus?: {
+    status: 'passed' | 'failed' | 'partial';
+    navigationPassed?: boolean;
+    formsPassed?: boolean;
+    responsiveLayoutPassed?: boolean;
+    apiIntegrationPassed?: boolean;
+    requirementsCompleted?: number;
+    totalRequirements?: number;
+    regressionFailures?: string[];
+    details?: string;
   };
   knownLimitations?: string[];
   finalOutcome?: {

@@ -153,12 +153,17 @@ export class MergeManager {
       }
 
       const now = Date.now();
+      const events = db.getEvents(buildId);
+      const wasPreviouslyDeleted = events.some(e => e.type === 'file_deleted' && e.filePath === cleanPath);
+
       const initialVersion: FileVersion = {
         version: 1,
         content: action.content,
         authorModel: modelId,
         timestamp: now,
-        commitMessage: action.commitMessage || `Created ${cleanPath}`
+        commitMessage: action.commitMessage || (wasPreviouslyDeleted ? `Recreated ${cleanPath}` : `Created ${cleanPath}`),
+        taskId: action.taskId,
+        changeType: wasPreviouslyDeleted ? 'recreated' : 'added'
       };
 
       const newFile: ProjectFile = {
@@ -168,7 +173,8 @@ export class MergeManager {
         ownerModel: modelId,
         history: [initialVersion],
         createdAt: now,
-        updatedAt: now
+        updatedAt: now,
+        isRecreated: wasPreviouslyDeleted
       };
 
       db.setFile(buildId, newFile);
@@ -315,12 +321,18 @@ export class MergeManager {
       }
 
       const newVersionNum = file.version + 1;
+      const isReverted = file.history.some(h => h.version < file.version && h.content === content);
+      const isFormattingOnly = file.content.trim().replace(/\s+/g, ' ') === content.trim().replace(/\s+/g, ' ');
+
       const newVersion: FileVersion = {
         version: newVersionNum,
         content,
         authorModel: modelId,
         timestamp: now,
-        commitMessage: action.commitMessage || `Patch ${cleanPath} v${newVersionNum}`
+        commitMessage: action.commitMessage || `Patch ${cleanPath} v${newVersionNum}`,
+        taskId: action.taskId,
+        changeType: isReverted ? 'reverted' : 'modified',
+        isFormattingOnly
       };
 
       file.content = content;
@@ -428,12 +440,16 @@ export class MergeManager {
       file.version = newVersionNum;
       file.ownerModel = modelId;
       file.updatedAt = now;
+      file.isRenamed = true;
+      file.originalPath = file.originalPath || sanitizeOld.cleanPath;
       file.history.push({
         version: newVersionNum,
         content: file.content,
         authorModel: modelId,
         timestamp: now,
-        commitMessage: action.commitMessage || `Renamed from ${sanitizeOld.cleanPath} to ${sanitizeNew.cleanPath}`
+        commitMessage: action.commitMessage || `Renamed from ${sanitizeOld.cleanPath} to ${sanitizeNew.cleanPath}`,
+        taskId: action.taskId,
+        changeType: 'modified'
       });
 
       db.setFile(buildId, file);
