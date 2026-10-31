@@ -1,6 +1,7 @@
 import { db } from '../store.js';
 import { Task, TaskPriority, TaskStatus, ModelStrength, AgentRole } from '../types.js';
 import { modelRegistry } from '../modelRegistry.js';
+import { ProjectMemoryService } from './projectMemory.js';
 
 export class TaskManager {
   private static LEASE_DURATION_MS = 90 * 1000; // 90 seconds lease duration
@@ -170,12 +171,120 @@ export class TaskManager {
   }
 
   /**
-   * Marks a task as successfully completed
+   * Evaluates verification status of a task honestly using actual file presence and execution evidence.
+   */
+  static verifyTaskExecution(
+    buildId: string, 
+    taskId: string, 
+    modelId: string, 
+    taskResult?: import('../types.js').AgentTaskResult
+  ): {
+    verified: boolean;
+    verificationStatus: 'passed' | 'failed' | 'skipped' | 'not_run';
+    filesVerified: boolean;
+    testsPassed: boolean;
+    errors: string[];
+    evidence: string;
+    filesChecked: Array<{ path: string; exists: boolean; modified: boolean }>;
+  } {
+    const task = db.getTask(buildId, taskId);
+    if (!task) {
+      return {
+        verified: false,
+        verificationStatus: 'failed',
+        filesVerified: false,
+        testsPassed: false,
+        errors: [`Task ${taskId} not found`],
+        evidence: 'Task not found in store',
+        filesChecked: []
+      };
+    }
+
+    const filesChecked: Array<{ path: string; exists: boolean; modified: boolean }> = [];
+    const errors: string[] = [];
+
+    // 1. Verify that reported and target files actually exist in the project store
+    const candidatePaths = new Set<string>([
+      ...task.filePaths,
+      ...(taskResult?.filesCreated || []),
+      ...(taskResult?.filesModified || [])
+    ]);
+
+    for (const fp of candidatePaths) {
+      const cleanPath = fp.replace(/^\/+/, '');
+      const file = db.getFile(buildId, fp) || db.getFile(buildId, cleanPath);
+      const exists = Boolean(file && file.content && file.content.trim().length > 0);
+      const modified = Boolean(file && ((file.version && file.version > 1) || (file.history && file.history.length > 0) || exists));
+      filesChecked.push({ path: fp, exists, modified });
+
+      if (!exists && task.filePaths.includes(fp)) {
+        errors.push(`Target file "${fp}" was not found or has empty content in workspace`);
+      }
+    }
+
+    const filesVerified = errors.length === 0 && (task.filePaths.length === 0 || filesChecked.some(f => f.exists));
+
+    // 2. Validate tests honestly without fabricating results
+    let testsPassed = false;
+    let testStatus: 'passed' | 'failed' | 'skipped' | 'not_run' = 'not_run';
+
+    if (taskResult && taskResult.testsExecuted && taskResult.testsExecuted.length > 0) {
+      const failedTests = taskResult.testsExecuted.filter(t => t.passed === false || t.status === 'failed');
+      const skippedTests = taskResult.testsExecuted.filter(t => t.status === 'skipped');
+      const passedTests = taskResult.testsExecuted.filter(t => t.passed === true || t.status === 'passed');
+
+      if (failedTests.length > 0) {
+        testStatus = 'failed';
+        testsPassed = false;
+        for (const ft of failedTests) {
+          errors.push(`Test failure: "${ft.name}" (${ft.error || 'Assertion failed'})`);
+        }
+      } else if (passedTests.length > 0) {
+        testStatus = 'passed';
+        testsPassed = true;
+      } else if (skippedTests.length > 0) {
+        testStatus = 'skipped';
+        testsPassed = false;
+      }
+    } else {
+      // No tests were executed by the agent
+      testStatus = 'not_run';
+      testsPassed = false;
+    }
+
+    const verified = filesVerified && (testStatus === 'passed' || testStatus === 'not_run');
+    const overallStatus: 'passed' | 'failed' | 'skipped' | 'not_run' = 
+      errors.length > 0 ? 'failed' : (testStatus === 'passed' ? 'passed' : 'not_run');
+
+    const evidence = [
+      `Files verified: ${filesChecked.filter(f => f.exists).length}/${filesChecked.length || 1} present`,
+      testStatus === 'passed' ? `Tests passed (${taskResult?.testsExecuted?.length || 0} executed)` :
+      testStatus === 'failed' ? `Test failures detected (${errors.length} error(s))` :
+      'Tests: not executed for this task'
+    ].join('. ');
+
+    return {
+      verified,
+      verificationStatus: overallStatus,
+      filesVerified,
+      testsPassed,
+      errors,
+      evidence,
+      filesChecked
+    };
+  }
+
+  /**
+   * Marks a task as completed while honestly recording verification evidence,
+   * avoiding fabricated test results, and updating verification history.
    */
   static completeTask(buildId: string, taskId: string, modelId: string, taskResult?: import('../types.js').AgentTaskResult): void {
     const now = Date.now();
     const task = db.getTask(buildId, taskId);
     if (!task) return;
+
+    // Run honest verification check on files and tests
+    const verification = this.verifyTaskExecution(buildId, taskId, modelId, taskResult);
 
     const result: import('../types.js').AgentTaskResult = taskResult || {
       taskId,
@@ -187,26 +296,63 @@ export class TaskManager {
       dependencies: task.dependencies || [],
       architecturalDecisionsUsed: [],
       issuesDiscovered: [],
-      testsExecuted: [{ name: `${task.title} execution check`, passed: true }],
-      confidence: 0.95,
-      evidence: 'Clean execution with no syntax or contract errors',
-      timestamp: now
+      // Honest: empty testsExecuted when none were actually run
+      testsExecuted: [],
+      confidence: verification.verified ? 0.95 : 0.6,
+      evidence: verification.evidence,
+      timestamp: now,
+      executionEvidence: {
+        verifiedAt: now,
+        filesVerified: verification.filesChecked
+      }
     };
 
+    // If taskResult was supplied, normalize test statuses
+    if (result.testsExecuted) {
+      result.testsExecuted = result.testsExecuted.map(t => ({
+        ...t,
+        status: t.status || (t.passed ? 'passed' : 'failed')
+      }));
+    }
+
+    const newHistoryEntry = {
+      timestamp: now,
+      verifier: modelId,
+      status: verification.verificationStatus,
+      syntaxPassed: true,
+      testsPassed: verification.testsPassed,
+      filesVerified: verification.filesVerified,
+      evidence: verification.evidence,
+      details: verification.errors.length > 0 ? verification.errors.join('; ') : undefined,
+      command: taskResult?.executionEvidence?.command,
+      exitCode: taskResult?.executionEvidence?.exitCode,
+      durationMs: taskResult?.executionEvidence?.durationMs
+    };
+
+    const updatedHistory = [...(task.verificationHistory || []), newHistoryEntry];
+
+    // Separate task status (completed) from honest verification output
+    const isVerificationFailed = verification.errors.length > 0 && !verification.filesVerified;
+    
     db.updateTask(buildId, taskId, {
-      status: 'completed',
-      completedAt: now,
+      status: isVerificationFailed ? 'failed' : 'completed',
+      completedAt: isVerificationFailed ? undefined : now,
       leaseExpiresAt: null,
-      error: undefined,
+      error: isVerificationFailed ? verification.errors.join('; ') : undefined,
       taskResult: result,
       verificationOutput: {
         syntaxPassed: true,
-        testsPassed: true
-      }
+        testsPassed: verification.testsPassed,
+        filesVerified: verification.filesVerified,
+        status: verification.verificationStatus,
+        errors: verification.errors.length > 0 ? verification.errors : undefined,
+        evidence: verification.evidence
+      },
+      verificationHistory: updatedHistory
     });
 
-    // If this was a fix task, check if associated defect can be marked resolved with evidence
-    if (task.isFixTask) {
+    // If this was a fix task, only mark defect resolved if verification succeeded
+    if (task.isFixTask && verification.verified) {
       try {
         const build = db.getBuild(buildId);
         if (build?.userId) {
@@ -220,7 +366,7 @@ export class TaskManager {
               buildId, 
               build.userId, 
               relatedDefect.id, 
-              `Resolved by ${modelId} via task "${task.title}": ${result.evidence}`
+              `Resolved by ${modelId} via task "${task.title}": ${verification.evidence}`
             );
           }
         }
@@ -233,16 +379,18 @@ export class TaskManager {
       id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       buildId,
       timestamp: now,
-      type: 'task_completed',
+      type: isVerificationFailed ? 'task_failed' : 'task_completed',
       taskId,
       modelId,
-      details: `${modelId} completed task: "${task.title}"`
+      details: isVerificationFailed 
+        ? `${modelId} task "${task.title}" verification failed: ${verification.errors.join('; ')}`
+        : `${modelId} completed task: "${task.title}" [Verification: ${verification.verificationStatus}]`
     });
 
     db.updateModelRun(buildId, modelId, {
-      status: 'idle',
+      status: isVerificationFailed ? 'failed' : 'idle',
       currentTaskId: null,
-      lastActionSummary: `Completed: ${task.title}`
+      lastActionSummary: `${isVerificationFailed ? 'Failed' : 'Completed'}: ${task.title}`
     });
   }
 

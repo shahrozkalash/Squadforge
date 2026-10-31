@@ -30,6 +30,7 @@ export interface ProjectDefect {
   filePaths: string[];
   severity: 'low' | 'medium' | 'high';
   resolved: boolean;
+  status?: 'discovered' | 'scheduled' | 'repairing' | 'resolved' | 'failed';
   discoveredAt: number;
   resolvedAt?: number;
   repairAttempts?: number;
@@ -195,6 +196,20 @@ export class ProjectMemoryService {
       return true;
     }
 
+    // Protect confirmed requirements: an assumption cannot contradict a confirmed fact
+    if (fact.confidence === 'assumption') {
+      const contradictsConfirmed = memory.facts.some(f => 
+        f.confidence === 'confirmed' && 
+        f.category === fact.category &&
+        ((normalized.includes('not ') && f.statement.toLowerCase().includes(normalized.replace('not ', ''))) ||
+         (f.statement.toLowerCase().includes('not ') && normalized.includes(f.statement.toLowerCase().replace('not ', ''))))
+      );
+      if (contradictsConfirmed) {
+        // Reject or mark assumption as contradictory
+        return false;
+      }
+    }
+
     const newFact: ProjectFact = {
       category: fact.category || 'requirement',
       statement: fact.statement.trim(),
@@ -205,8 +220,13 @@ export class ProjectMemoryService {
     };
 
     memory.facts.unshift(newFact);
+
+    // Safe truncation: never drop confirmed facts; prune oldest assumptions first
     if (memory.facts.length > this.MAX_FACTS) {
-      memory.facts = memory.facts.slice(0, this.MAX_FACTS);
+      const confirmed = memory.facts.filter(f => f.confidence === 'confirmed');
+      const assumptions = memory.facts.filter(f => f.confidence !== 'confirmed');
+      const allowedAssumptions = Math.max(0, this.MAX_FACTS - confirmed.length);
+      memory.facts = [...confirmed, ...assumptions.slice(0, allowedAssumptions)];
     }
 
     memory.lastUpdated = Date.now();
@@ -734,8 +754,12 @@ export class ProjectMemoryService {
     if (!memory) return null;
 
     // Check duplicate defect
+    const normalizedDesc = defect.description.toLowerCase().trim();
     const existing = memory.knownDefects.find(
-      d => !d.resolved && d.description.toLowerCase().trim() === defect.description.toLowerCase().trim()
+      d => !d.resolved && (
+        d.description.toLowerCase().trim() === normalizedDesc ||
+        (d.expectedCorrection && defect.expectedCorrection && d.expectedCorrection === defect.expectedCorrection && d.filePaths.some(fp => defect.filePaths.includes(fp)))
+      )
     );
     if (existing) {
       // Update file paths if expanded
@@ -750,6 +774,7 @@ export class ProjectMemoryService {
       ...defect,
       id,
       resolved: false,
+      status: 'discovered',
       repairAttempts: 0,
       maxRepairAttempts: defect.maxRepairAttempts || this.DEFAULT_MAX_REPAIR_ATTEMPTS,
       discoveredAt: Date.now()
@@ -814,6 +839,7 @@ export class ProjectMemoryService {
     if (!defect) return false;
 
     defect.scheduledRepairTaskId = taskId;
+    defect.status = 'scheduled';
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);
     return true;
@@ -842,7 +868,16 @@ export class ProjectMemoryService {
     defect.repairAttempts = (defect.repairAttempts || 0) + 1;
     defect.scheduledRepairTaskId = undefined;
 
-    if (!success) {
+    const max = defect.maxRepairAttempts || this.DEFAULT_MAX_REPAIR_ATTEMPTS;
+    const canRetry = defect.repairAttempts < max && !defect.resolved;
+
+    if (success) {
+      defect.resolved = true;
+      defect.status = 'resolved';
+      defect.resolvedAt = Date.now();
+      defect.resolvedWithEvidence = attemptNote;
+    } else {
+      defect.status = canRetry ? 'discovered' : 'failed';
       if (!defect.failedRepairs) defect.failedRepairs = [];
       defect.failedRepairs.push(failureReason || attemptNote);
     }
@@ -856,9 +891,6 @@ export class ProjectMemoryService {
 
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);
-
-    const max = defect.maxRepairAttempts || this.DEFAULT_MAX_REPAIR_ATTEMPTS;
-    const canRetry = defect.repairAttempts < max && !defect.resolved;
 
     return { attempts: defect.repairAttempts, maxAttempts: max, canRetry };
   }
@@ -902,6 +934,7 @@ export class ProjectMemoryService {
     if (!defect) return false;
 
     defect.resolved = true;
+    defect.status = 'resolved';
     defect.resolvedAt = Date.now();
     defect.resolvedWithEvidence = evidence || 'Verified through clean test and syntax execution';
     defect.scheduledRepairTaskId = undefined;
@@ -945,6 +978,7 @@ export class ProjectMemoryService {
    * Eliminates hallucination by providing ONLY relevant ADRs, requirements, confirmed facts,
    * and defects for the specific task and target files.
    * Priority: Confirmed User Requirements > Accepted ADRs > Active Defects > Conventions.
+   * Safe truncation: Never cuts records or lines in half; truncates cleanly at line/section boundaries.
    */
   static retrieveTaskContext(
     buildId: string, 
@@ -1044,11 +1078,39 @@ export class ProjectMemoryService {
       sections.push(`CODING CONVENTIONS:\n${memory.conventions.slice(0, 3).map(c => `- ${c}`).join('\n')}`);
     }
 
-    const fullContext = sections.join('\n\n');
-    if (fullContext.length <= maxChars) {
-      return fullContext;
+    // Safe truncation: Assemble sections and complete bullet items without cutting lines or words in half
+    let currentLength = 0;
+    const keptSections: string[] = [];
+
+    for (const section of sections) {
+      if (currentLength + section.length + 2 <= maxChars) {
+        keptSections.push(section);
+        currentLength += section.length + 2;
+      } else {
+        // Line-by-line safe packing for this section
+        const lines = section.split('\n');
+        const header = lines[0];
+        const keptLines = [header];
+        let secLen = header.length;
+
+        for (let i = 1; i < lines.length; i++) {
+          const line = lines[i];
+          if (currentLength + secLen + line.length + 1 <= maxChars) {
+            keptLines.push(line);
+            secLen += line.length + 1;
+          } else {
+            break;
+          }
+        }
+
+        if (keptLines.length > 1) {
+          keptSections.push(keptLines.join('\n'));
+        }
+        break;
+      }
     }
-    return fullContext.slice(0, maxChars) + '\n...[truncated for token limit]';
+
+    return keptSections.join('\n\n');
   }
 
   /**

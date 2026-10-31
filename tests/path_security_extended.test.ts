@@ -40,10 +40,8 @@ test('Path Security: sanitizeProjectFilePath test matrix', async (t) => {
     assert.strictEqual(sanitizeProjectFilePath('src/App.tsx\0.png'), null);
     assert.strictEqual(sanitizeProjectFilePath(''), null);
     assert.strictEqual(sanitizeProjectFilePath('   '), null);
-    // @ts-expect-error test invalid types
-    assert.strictEqual(sanitizeProjectFilePath(null), null);
-    // @ts-expect-error test invalid types
-    assert.strictEqual(sanitizeProjectFilePath(undefined), null);
+    assert.strictEqual(sanitizeProjectFilePath(null as any), null);
+    assert.strictEqual(sanitizeProjectFilePath(undefined as any), null);
   });
 
   await t.test('accepts and normalizes valid relative paths', () => {
@@ -87,10 +85,8 @@ test('Path Security: ExecutionAdapter.sanitizeFilePath test matrix', async (t) =
     assert.strictEqual(ExecutionAdapter.sanitizeFilePath('foo\0bar.txt').valid, false);
     assert.strictEqual(ExecutionAdapter.sanitizeFilePath('').valid, false);
     assert.strictEqual(ExecutionAdapter.sanitizeFilePath('   ').valid, false);
-    // @ts-expect-error test invalid types
-    assert.strictEqual(ExecutionAdapter.sanitizeFilePath(null).valid, false);
-    // @ts-expect-error test invalid types
-    assert.strictEqual(ExecutionAdapter.sanitizeFilePath(undefined).valid, false);
+    assert.strictEqual(ExecutionAdapter.sanitizeFilePath(null as any).valid, false);
+    assert.strictEqual(ExecutionAdapter.sanitizeFilePath(undefined as any).valid, false);
   });
 
   await t.test('accepts valid relative paths within workspace directory', () => {

@@ -35,6 +35,7 @@ export class HonestVerificationService {
       category: 'files',
       name: 'Project Workspace Files',
       status: hasFiles ? 'passed' : 'failed',
+      passed: hasFiles,
       evidence: `${files.length} modular source file(s) present in workspace.`
     });
 
@@ -48,6 +49,7 @@ export class HonestVerificationService {
       category: 'files',
       name: 'Documentation & Specification (README.md)',
       status: hasReadme ? 'passed' : 'failed',
+      passed: hasReadme,
       evidence: hasReadme ? 'README.md exists with project instructions.' : 'README.md is missing.'
     });
 
@@ -64,6 +66,7 @@ export class HonestVerificationService {
       category: 'syntax',
       name: 'Language & Syntax Validation (esbuild & AST)',
       status: syntaxPassed ? 'passed' : 'failed',
+      passed: syntaxPassed,
       evidence: syntaxPassed 
         ? `All ${files.length} files passed syntax validation cleanly.`
         : `${execResult.syntaxErrors.length} syntax error(s): ${execResult.syntaxErrors.map(e => `${e.filePath}:${e.line || 1} ${e.message}`).join('; ')}`
@@ -81,6 +84,7 @@ export class HonestVerificationService {
       category: 'types',
       name: 'TypeScript Structural Typing',
       status: typePassed ? 'passed' : 'failed',
+      passed: typePassed,
       evidence: typePassed ? 'TypeScript syntax and structure valid.' : 'TypeScript syntax errors detected.'
     });
 
@@ -90,6 +94,7 @@ export class HonestVerificationService {
       category: 'security',
       name: 'Static Security & Secret Audit',
       status: secPassed ? 'passed' : 'failed',
+      passed: secPassed,
       evidence: secPassed 
         ? `Security audit passed with score ${execResult.securityAudit.score}/100. No exposed keys or dangerous eval.`
         : `Security score ${execResult.securityAudit.score}/100. Findings: ${execResult.securityAudit.findings.map(f => `[${f.severity}] ${f.message}`).join(', ')}`
@@ -112,6 +117,7 @@ export class HonestVerificationService {
       category: 'tests',
       name: 'Automated Test Suite Execution',
       status: testStatus,
+      passed: testStatus === 'passed',
       evidence: testReport.status === 'skipped'
         ? (testReport.skipReason || 'Tests were skipped')
         : `${testReport.passed}/${testReport.total} test(s) passed in ${testReport.executionTimeMs || 0}ms.`,
@@ -131,6 +137,7 @@ export class HonestVerificationService {
       category: 'build',
       name: 'Production Build & Bundling',
       status: buildStatus,
+      passed: buildStatus === 'passed',
       evidence: buildReport.output || (buildReport.passed ? 'Build passed' : 'Build failed'),
       reasonIfSkipped: buildReport.status === 'skipped' ? 'No standalone bundle entry point identified' : undefined
     });
@@ -163,11 +170,13 @@ export class HonestVerificationService {
     const inProgressTasks = tasks.filter(t => t.status === 'in_progress' || t.status === 'pending' || t.status === 'retrying').length;
 
     const requirementsCoveragePercent = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+    const milestonePassed = requirementsCoveragePercent >= 90 && failedTasks === 0;
 
     checks.push({
       category: 'requirements',
       name: 'Milestone & Task Acceptance Coverage',
-      status: (requirementsCoveragePercent >= 90 && failedTasks === 0) ? 'passed' : failedTasks > 0 ? 'failed' : 'blocked',
+      status: milestonePassed ? 'passed' : failedTasks > 0 ? 'failed' : 'blocked',
+      passed: milestonePassed,
       evidence: `${completedTasks}/${totalTasks} tasks completed (${requirementsCoveragePercent}%). ${failedTasks} failed, ${inProgressTasks} pending.`
     });
 
@@ -196,6 +205,7 @@ export class HonestVerificationService {
       category: 'preview',
       name: 'Application Live Preview Execution',
       status: previewPassed ? 'passed' : hasFiles ? 'failed' : 'blocked',
+      passed: previewPassed,
       evidence: previewPassed
         ? `Live execution verified: ${previewResult.mode === 'real_application' ? 'Real React application compiled and mounted in DOM' : 'Static project asset rendered'}.`
         : `Preview running in fallback demonstration mode (${previewResult.diagnosticInfo || 'No runnable entry point'}).`
@@ -212,6 +222,7 @@ export class HonestVerificationService {
         category: 'runtime',
         name: `Browser Runtime: ${c.name}`,
         status: c.status,
+        passed: c.status === 'passed',
         evidence: c.message,
         reasonIfSkipped: c.status === 'skipped' ? c.details : undefined
       });
@@ -227,15 +238,16 @@ export class HonestVerificationService {
     const contractResult = IntegrationAgent.analyzeProjectContracts(files);
     for (const issue of contractResult.issues) {
       if (issue.severity === 'error') {
-        knownDefects.push(`[${issue.rule}] ${issue.filePath}: ${issue.message}`);
+        knownDefects.push(`[${issue.type}] ${issue.sourceFile}: ${issue.message}`);
         checks.push({
           category: 'types',
-          name: `Contract Check: ${issue.rule}`,
+          name: `Contract Check: ${issue.type}`,
           status: 'failed',
-          evidence: `${issue.filePath}: ${issue.message}. Suggestion: ${issue.suggestedFix || 'Fix contract interface'}`
+          passed: false,
+          evidence: `${issue.sourceFile}: ${issue.message}. Suggestion: ${issue.suggestedCorrection || 'Fix contract interface'}`
         });
       } else if (issue.severity === 'warning') {
-        unresolvedRisks.push(`[${issue.rule}] ${issue.filePath}: ${issue.message}`);
+        unresolvedRisks.push(`[${issue.type}] ${issue.sourceFile}: ${issue.message}`);
       }
     }
 
@@ -302,6 +314,7 @@ export class HonestVerificationService {
       category: 'requirements',
       name: 'Functional Verification (UI & API Capabilities)',
       status: functionalPassed ? 'passed' : 'failed',
+      passed: functionalPassed,
       evidence: functionalStatusObj.details
     });
 

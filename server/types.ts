@@ -162,9 +162,37 @@ export interface Task {
   verificationOutput?: {
     syntaxPassed?: boolean;
     testsPassed?: boolean;
+    filesVerified?: boolean;
+    status?: 'pending' | 'running' | 'passed' | 'failed' | 'skipped' | 'not_run';
     errors?: string[];
+    evidence?: string;
+    durationMs?: number;
+    command?: string;
+    exitCode?: number;
   };
+  verificationHistory?: Array<{
+    timestamp: number;
+    verifier: string;
+    status: 'pending' | 'running' | 'passed' | 'failed' | 'skipped' | 'not_run';
+    syntaxPassed?: boolean;
+    testsPassed?: boolean;
+    filesVerified?: boolean;
+    evidence?: string;
+    details?: string;
+    command?: string;
+    exitCode?: number;
+    durationMs?: number;
+  }>;
   taskResult?: AgentTaskResult;
+}
+
+export interface TaskExecutionEvidence {
+  command?: string;
+  exitCode?: number;
+  durationMs?: number;
+  output?: string;
+  filesVerified?: Array<{ path: string; exists: boolean; modified: boolean }>;
+  verifiedAt: number;
 }
 
 export interface AgentTaskResult {
@@ -180,9 +208,14 @@ export interface AgentTaskResult {
   testsExecuted: Array<{
     name: string;
     passed: boolean;
+    status?: 'pending' | 'running' | 'passed' | 'failed' | 'skipped' | 'not_run';
+    command?: string;
+    exitCode?: number;
     durationMs?: number;
     error?: string;
+    output?: string;
   }>;
+  executionEvidence?: TaskExecutionEvidence;
   remainingWork?: string[];
   confidence: number;
   evidence: string;
@@ -469,7 +502,9 @@ export interface VerificationCheckItem {
   category: 'requirements' | 'files' | 'syntax' | 'types' | 'tests' | 'build' | 'security' | 'config' | 'preview' | 'runtime';
   name: string;
   status: 'passed' | 'failed' | 'skipped' | 'blocked';
+  passed?: boolean;
   evidence?: string;
+  details?: string;
   reasonIfSkipped?: string;
 }
 
@@ -571,6 +606,7 @@ export interface PatchAction {
   edits: PatchEdit[];
   taskId?: string;
   commitMessage?: string;
+  expectedVersion?: number;
 }
 
 export interface CreateFileAction {

@@ -38,26 +38,50 @@ export const TRUSTED_HTTPS_PACKAGE_ORIGINS: readonly string[] = [
 ];
 
 /**
- * Normalizes dependency URL, stripping redundant slashes, default ports, and resolving relative segments.
+ * Normalizes dependency URL without upgrading untrusted schemes or allowing credential injection.
  */
 export function normalizeDependencyUrl(urlStr: string): string {
   if (!urlStr || typeof urlStr !== 'string') return '';
-  const parsed = new URL(urlStr.trim());
-  parsed.protocol = 'https:';
-  parsed.hostname = parsed.hostname.toLowerCase();
-  if (parsed.port === '443') parsed.port = '';
-  // Normalize pathname to prevent /../ escapes
-  const segments = parsed.pathname.split('/').filter(s => s && s !== '.');
-  const cleanSegments: string[] = [];
-  for (const seg of segments) {
-    if (seg === '..') {
-      if (cleanSegments.length > 0) cleanSegments.pop();
-    } else {
-      cleanSegments.push(seg);
+  const trimmed = urlStr.trim();
+  try {
+    const parsed = new URL(trimmed);
+    // Never turn an untrusted scheme (e.g. http, ftp, javascript) into https
+    if (parsed.protocol !== 'https:') {
+      return '';
     }
+    // Reject userinfo (e.g. username/password)
+    if (parsed.username || parsed.password) {
+      return '';
+    }
+    // Reject non-standard ports
+    if (parsed.port && parsed.port !== '443') {
+      return '';
+    }
+    // Reject traversal tricks
+    if (/%00|%2e%2e/i.test(trimmed)) {
+      return '';
+    }
+
+    parsed.hostname = parsed.hostname.toLowerCase();
+    if (parsed.port === '443') parsed.port = '';
+    parsed.hash = ''; // Strip fragment
+
+    // Normalize pathname to prevent /../ escapes
+    const segments = parsed.pathname.split('/').filter(s => s && s !== '.');
+    const cleanSegments: string[] = [];
+    for (const seg of segments) {
+      if (seg === '..') {
+        if (cleanSegments.length > 0) cleanSegments.pop();
+        else return ''; // Attempted escape above root!
+      } else {
+        cleanSegments.push(seg);
+      }
+    }
+    parsed.pathname = '/' + cleanSegments.join('/');
+    return parsed.toString();
+  } catch {
+    return '';
   }
-  parsed.pathname = '/' + cleanSegments.join('/');
-  return parsed.toString();
 }
 
 /**
@@ -70,7 +94,7 @@ export function isTrustedHttpsUrl(urlStr: string): boolean {
   try {
     const trimmed = urlStr.trim();
     // Reject URL-encoded path traversal or null bytes
-    if (trimmed.includes('%00') || trimmed.includes('%2e%2e') || trimmed.includes('%2E%2E')) {
+    if (trimmed.includes('%00') || /%2e%2e/i.test(trimmed)) {
       return false;
     }
 

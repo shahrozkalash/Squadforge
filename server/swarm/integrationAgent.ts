@@ -74,9 +74,12 @@ export class IntegrationAgent {
 
     for (const file of files) {
       const clean = file.path.replace(/^\/+/, '');
+      const cleanKey = clean.replace(/\.(tsx|ts|jsx|js|mjs|cjs)$/, '');
+      importGraph.set(cleanKey, new Set());
+      // Also register full clean path for lookup flexibility
       importGraph.set(clean, new Set());
 
-      if (/\.(ts|tsx|js|jsx|mjs)$/.test(file.path)) {
+      if (/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(file.path)) {
         try {
           const parsedExports = this.extractExportsWithAST(file.path, file.content);
           exportsMap.set(clean, parsedExports);
@@ -89,26 +92,17 @@ export class IntegrationAgent {
     let totalImports = 0;
     let validImports = 0;
 
-    // Pass 2: Analyze imports, interfaces, incomplete bodies, and env vars
+    // Pass 2: Analyze imports, interfaces, incomplete bodies, and env vars via TypeScript AST
     for (const file of files) {
       const cleanSourcePath = file.path.replace(/^\/+/, '');
-      if (!/\.(ts|tsx|js|jsx|mjs)$/.test(file.path)) continue;
+      if (!/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(file.path)) continue;
 
       const content = file.content;
       const fileDir = file.path.includes('/') 
         ? file.path.substring(0, file.path.lastIndexOf('/')) 
         : '';
 
-      // 1. Scan environment variables
-      const envMatches = content.match(/process\.env\.([A-Z0-9_]+)/g);
-      if (envMatches) {
-        for (const m of envMatches) {
-          const varName = m.replace('process.env.', '');
-          envVarsUsed.add(varName);
-        }
-      }
-
-      // 2. Scan external browser module dependencies
+      // 1. Scan external browser module dependencies
       const scannedImports = DependencyResolverService.parseCodeImports(content, file.path);
       for (const imp of scannedImports) {
         if (imp.status !== 'allowed') {
@@ -124,7 +118,7 @@ export class IntegrationAgent {
         }
       }
 
-      // 3. Syntax-aware AST inspection for relative imports, exports, and function contracts
+      // 2. Syntax-aware AST inspection for imports, path aliases, env vars, and contracts
       try {
         const sourceFile = ts.createSourceFile(
           file.path,
@@ -142,6 +136,7 @@ export class IntegrationAgent {
           exportsMap,
           importGraph,
           issues,
+          envVarsUsed,
           () => { totalImports++; },
           () => { validImports++; }
         );
@@ -156,7 +151,7 @@ export class IntegrationAgent {
         });
       }
 
-      // 4. Incomplete implementation or decorative placeholder detection
+      // 3. Incomplete implementation or decorative placeholder detection
       this.detectIncompleteImplementations(file, issues);
     }
 
@@ -247,11 +242,22 @@ export class IntegrationAgent {
       this.spawnIntegrationFixTasks(buildId, issues);
     }
 
+    // Deduplicate issues by canonical fingerprint
+    const seenIssues = new Set<string>();
+    const deduplicatedIssues: IntegrationIssue[] = [];
+    for (const issue of issues) {
+      const key = `${issue.type}::${issue.sourceFile}::${issue.targetFile || ''}::${issue.identifier || ''}::${issue.message}`;
+      if (!seenIssues.has(key)) {
+        seenIssues.add(key);
+        deduplicatedIssues.push(issue);
+      }
+    }
+
     return {
       passed: !hasErrors,
       totalImportsAnalyzed: totalImports,
       validImportsCount: validImports,
-      issues,
+      issues: deduplicatedIssues,
       environmentVarsUsed: Array.from(envVarsUsed),
       undocumentedEnvVars,
       circularDependencyChains: circularChains,
@@ -357,8 +363,9 @@ export class IntegrationAgent {
   }
 
   /**
-   * Walks the AST of a single source file to validate relative import targets,
-   * named/default bindings, and interface signatures.
+   * Walks the AST of a single source file to validate relative import targets, path aliases (@/*, ~/*),
+   * named/default/namespace/type-only bindings, CommonJS requires, dynamic imports,
+   * environment variable access without comment false-positives, and function call interfaces.
    */
   private static walkSourceAST(
     sourceFile: ts.SourceFile,
@@ -368,91 +375,215 @@ export class IntegrationAgent {
     exportsMap: Map<string, ParsedFileExports>,
     importGraph: Map<string, Set<string>>,
     issues: IntegrationIssue[],
+    envVarsUsed: Set<string>,
     onImportAnalyzed: () => void,
     onValidImport: () => void
   ): void {
     const cleanSourcePath = file.path.replace(/^\/+/, '');
+    const importedFunctions = new Map<string, { targetExports: ParsedFileExports; originalName: string; targetFile: string }>();
+
+    const checkModuleImport = (
+      specifier: string,
+      nodeText: string,
+      importClause?: ts.ImportClause
+    ) => {
+      const { resolvedPath, isProjectModule } = this.resolveModuleSpecifier(fileDir, specifier, filesByCleanPath);
+      if (!isProjectModule) return;
+
+      onImportAnalyzed();
+      const targetFile = this.findMatchingFile(resolvedPath, filesByCleanPath);
+      const cleanTarget = resolvedPath.replace(/^\/+/, '');
+
+      if (importGraph.has(cleanSourcePath)) {
+        importGraph.get(cleanSourcePath)!.add(cleanTarget.replace(/\.(tsx|ts|jsx|js|mjs|cjs)$/, ''));
+      }
+
+      if (!targetFile) {
+        issues.push({
+          type: 'missing_imported_file',
+          sourceFile: file.path,
+          targetFile: resolvedPath,
+          identifier: specifier,
+          message: `File "${file.path}" imports from "${specifier}", but target file "${resolvedPath}" does not exist.`,
+          severity: 'error',
+          evidence: `Import statement: ${nodeText}`,
+          suggestedCorrection: `Create file "${resolvedPath}" or update import path to match existing files.`
+        });
+        return;
+      }
+
+      onValidImport();
+      const cleanTargetKey = targetFile.path.replace(/^\/+/, '');
+      const targetExports = exportsMap.get(cleanTargetKey);
+
+      if (targetExports && importClause) {
+        // 1. Check default import: import Foo from './target'
+        if (importClause.name && !importClause.isTypeOnly) {
+          const defaultName = importClause.name.text;
+          if (!targetExports.hasDefaultExport && targetExports.namedExports.size > 0) {
+            issues.push({
+              type: 'invalid_default_import',
+              sourceFile: file.path,
+              targetFile: targetFile.path,
+              identifier: defaultName,
+              message: `Module "${targetFile.path}" has no default export, but is imported with default import "${defaultName}".`,
+              severity: 'error',
+              evidence: `Import: ${nodeText}`,
+              suggestedCorrection: `Use named import: import { ${Array.from(targetExports.namedExports).slice(0, 3).join(', ')} } from "${specifier}";`
+            });
+          }
+        }
+
+        // 2. Check named imports: import { a, b } from './target'
+        if (importClause.namedBindings && ts.isNamedImports(importClause.namedBindings)) {
+          for (const elem of importClause.namedBindings.elements) {
+            if (elem.isTypeOnly) continue; // Skip type-only named import
+            const importedIdentifier = (elem.propertyName || elem.name).text;
+            const localIdentifier = elem.name.text;
+
+            // Track function signatures for contract checking
+            if (targetExports.exportedFunctions.has(importedIdentifier)) {
+              importedFunctions.set(localIdentifier, {
+                targetExports,
+                originalName: importedIdentifier,
+                targetFile: targetFile.path
+              });
+            }
+
+            // Verify if target exports this identifier
+            const isExported = 
+              targetExports.namedExports.has(importedIdentifier) ||
+              targetExports.reExports.some(r => r.isAll || r.names?.includes(importedIdentifier));
+
+            if (!isExported) {
+              issues.push({
+                type: 'unexported_identifier',
+                sourceFile: file.path,
+                targetFile: targetFile.path,
+                identifier: importedIdentifier,
+                message: `Identifier "${importedIdentifier}" is imported in "${file.path}" but not exported by "${targetFile.path}".`,
+                severity: 'error',
+                evidence: `Import clause: ${elem.getText(sourceFile)}`,
+                suggestedCorrection: `Export "${importedIdentifier}" from "${targetFile.path}", or choose from available exports: [${Array.from(targetExports.namedExports).slice(0, 5).join(', ')}].`
+              });
+            }
+          }
+        }
+      }
+    };
 
     const visit = (node: ts.Node) => {
+      // 1. Static ES module import: import { foo } from './foo'
       if (ts.isImportDeclaration(node)) {
         const specifierNode = node.moduleSpecifier;
         if (ts.isStringLiteral(specifierNode)) {
-          const specifier = specifierNode.text;
+          checkModuleImport(specifierNode.text, node.getText(sourceFile), node.importClause);
+        }
+      }
 
-          // Only analyze relative imports
-          if (specifier.startsWith('.')) {
-            onImportAnalyzed();
+      // 2. Static re-export: export { foo } from './foo' or export * from './foo'
+      if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        checkModuleImport(node.moduleSpecifier.text, node.getText(sourceFile));
+      }
 
-            const resolvedPath = this.resolveRelativePath(fileDir, specifier);
-            const targetFile = this.findMatchingFile(resolvedPath, filesByCleanPath);
-            const cleanTarget = resolvedPath.replace(/^\/+/, '');
+      // 3. Dynamic import: import('./foo')
+      if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        if (node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0])) {
+          checkModuleImport((node.arguments[0] as ts.StringLiteral).text, node.getText(sourceFile));
+        }
+      }
 
-            if (importGraph.has(cleanSourcePath)) {
-              importGraph.get(cleanSourcePath)!.add(cleanTarget.replace(/\.(tsx|ts|jsx|js|mjs)$/, ''));
-            }
+      // 4. CommonJS require: require('./foo')
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require') {
+        if (node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0])) {
+          checkModuleImport((node.arguments[0] as ts.StringLiteral).text, node.getText(sourceFile));
+        }
+      }
 
-            if (!targetFile) {
-              issues.push({
-                type: 'missing_imported_file',
-                sourceFile: file.path,
-                targetFile: resolvedPath,
-                identifier: specifier,
-                message: `File "${file.path}" imports from "${specifier}", but target file "${resolvedPath}" does not exist.`,
-                severity: 'error',
-                evidence: `Import statement: ${node.getText(sourceFile)}`,
-                suggestedCorrection: `Create file "${resolvedPath}" or update import path to match existing files.`
-              });
-            } else {
-              onValidImport();
+      // 5. AST Environment variable access (accurate, ignores comments and arbitrary strings)
+      // a. process.env.NAME
+      if (ts.isPropertyAccessExpression(node)) {
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          node.expression.expression.text === 'process' &&
+          node.expression.name.text === 'env'
+        ) {
+          envVarsUsed.add(node.name.text);
+        }
+        // b. import.meta.env.NAME
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          node.expression.name.text === 'env' &&
+          node.expression.expression.kind === ts.SyntaxKind.MetaProperty
+        ) {
+          envVarsUsed.add(node.name.text);
+        }
+      }
 
-              const cleanTargetKey = targetFile.path.replace(/^\/+/, '');
-              const targetExports = exportsMap.get(cleanTargetKey);
+      // c. process.env['NAME'] or import.meta.env['NAME']
+      if (ts.isElementAccessExpression(node) && node.argumentExpression && ts.isStringLiteral(node.argumentExpression)) {
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          ts.isIdentifier(node.expression.expression) &&
+          node.expression.expression.text === 'process' &&
+          node.expression.name.text === 'env'
+        ) {
+          envVarsUsed.add(node.argumentExpression.text);
+        }
+        if (
+          ts.isPropertyAccessExpression(node.expression) &&
+          node.expression.name.text === 'env' &&
+          node.expression.expression.kind === ts.SyntaxKind.MetaProperty
+        ) {
+          envVarsUsed.add(node.argumentExpression.text);
+        }
+      }
 
-              if (targetExports && node.importClause) {
-                // 1. Check default import: import Foo from './target'
-                if (node.importClause.name && !node.importClause.isTypeOnly) {
-                  const defaultName = node.importClause.name.text;
-                  if (!targetExports.hasDefaultExport && targetExports.namedExports.size > 0) {
-                    issues.push({
-                      type: 'invalid_default_import',
-                      sourceFile: file.path,
-                      targetFile: targetFile.path,
-                      identifier: defaultName,
-                      message: `Module "${targetFile.path}" has no default export, but is imported with default import "${defaultName}".`,
-                      severity: 'error',
-                      evidence: `Import: ${node.getText(sourceFile)}`,
-                      suggestedCorrection: `Use named import: import { ${Array.from(targetExports.namedExports).slice(0, 3).join(', ')} } from "${specifier}";`
-                    });
-                  }
-                }
+      // d. Destructured: const { A, B } = process.env or const { A } = import.meta.env
+      if (ts.isVariableDeclaration(node) && node.initializer && ts.isObjectBindingPattern(node.name)) {
+        let isEnvInitializer = false;
+        if (
+          ts.isPropertyAccessExpression(node.initializer) &&
+          ts.isIdentifier(node.initializer.expression) &&
+          node.initializer.expression.text === 'process' &&
+          node.initializer.name.text === 'env'
+        ) {
+          isEnvInitializer = true;
+        } else if (
+          ts.isPropertyAccessExpression(node.initializer) &&
+          node.initializer.name.text === 'env' &&
+          node.initializer.expression.kind === ts.SyntaxKind.MetaProperty
+        ) {
+          isEnvInitializer = true;
+        }
 
-                // 2. Check named imports: import { a, b } from './target'
-                if (node.importClause.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
-                  for (const elem of node.importClause.namedBindings.elements) {
-                    if (elem.isTypeOnly) continue; // Skip type-only named import
-                    const importedIdentifier = (elem.propertyName || elem.name).text;
+        if (isEnvInitializer) {
+          for (const elem of node.name.elements) {
+            const varName = elem.propertyName && ts.isIdentifier(elem.propertyName)
+              ? elem.propertyName.text
+              : (ts.isIdentifier(elem.name) ? elem.name.text : null);
+            if (varName) envVarsUsed.add(varName);
+          }
+        }
+      }
 
-                    // Verify if target exports this identifier
-                    const isExported = 
-                      targetExports.namedExports.has(importedIdentifier) ||
-                      targetExports.reExports.some(r => r.isAll || r.names?.includes(importedIdentifier));
-
-                    if (!isExported) {
-                      issues.push({
-                        type: 'unexported_identifier',
-                        sourceFile: file.path,
-                        targetFile: targetFile.path,
-                        identifier: importedIdentifier,
-                        message: `Identifier "${importedIdentifier}" is imported in "${file.path}" but not exported by "${targetFile.path}".`,
-                        severity: 'error',
-                        evidence: `Import clause: ${elem.getText(sourceFile)}`,
-                        suggestedCorrection: `Export "${importedIdentifier}" from "${targetFile.path}", or choose from available exports: [${Array.from(targetExports.namedExports).slice(0, 5).join(', ')}].`
-                      });
-                    }
-                  }
-                }
-              }
-            }
+      // 6. Incompatible interface check: imported function called with missing arguments
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+        const fnInfo = importedFunctions.get(node.expression.text);
+        if (fnInfo) {
+          const sig = fnInfo.targetExports.exportedFunctions.get(fnInfo.originalName);
+          if (sig && node.arguments.length < sig.requiredParamCount) {
+            issues.push({
+              type: 'incompatible_interface',
+              sourceFile: file.path,
+              targetFile: fnInfo.targetFile,
+              identifier: fnInfo.originalName,
+              message: `Function "${fnInfo.originalName}" imported from "${fnInfo.targetFile}" requires ${sig.requiredParamCount} parameter(s), but called with ${node.arguments.length}.`,
+              severity: 'error',
+              evidence: `Call expression: ${node.getText(sourceFile)}`,
+              suggestedCorrection: `Provide all ${sig.requiredParamCount} required arguments to "${fnInfo.originalName}".`
+            });
           }
         }
       }
@@ -461,6 +592,36 @@ export class IntegrationAgent {
     };
 
     visit(sourceFile);
+  }
+
+  /**
+   * Resolves module specifier with relative paths and path aliases (@/*, ~/*).
+   */
+  private static resolveModuleSpecifier(
+    fileDir: string, 
+    specifier: string, 
+    filesByCleanPath: Map<string, ProjectFile>
+  ): { resolvedPath: string; isProjectModule: boolean } {
+    if (specifier.startsWith('.')) {
+      return { resolvedPath: this.resolveRelativePath(fileDir, specifier), isProjectModule: true };
+    }
+    if (specifier.startsWith('@/')) {
+      const stripped = specifier.slice(2);
+      const srcCandidate = `src/${stripped}`;
+      if (filesByCleanPath.has(srcCandidate) || this.findMatchingFile(srcCandidate, filesByCleanPath)) {
+        return { resolvedPath: srcCandidate, isProjectModule: true };
+      }
+      return { resolvedPath: stripped, isProjectModule: true };
+    }
+    if (specifier.startsWith('~/')) {
+      const stripped = specifier.slice(2);
+      const srcCandidate = `src/${stripped}`;
+      if (filesByCleanPath.has(srcCandidate) || this.findMatchingFile(srcCandidate, filesByCleanPath)) {
+        return { resolvedPath: srcCandidate, isProjectModule: true };
+      }
+      return { resolvedPath: stripped, isProjectModule: true };
+    }
+    return { resolvedPath: specifier, isProjectModule: false };
   }
 
   /**
@@ -502,10 +663,12 @@ export class IntegrationAgent {
   }
 
   /**
-   * Detects circular dependency cycles in module import graph using Depth-First Search.
+   * Detects circular dependency cycles in module import graph using Depth-First Search
+   * and deduplicates cycles using canonical rotation.
    */
   private static detectCircularDependencies(graph: Map<string, Set<string>>): string[][] {
     const cycles: string[][] = [];
+    const seenCycleKeys = new Set<string>();
     const visited = new Set<string>();
     const recStack = new Set<string>();
     const pathStack: string[] = [];
@@ -520,11 +683,22 @@ export class IntegrationAgent {
         if (!visited.has(neighbor)) {
           dfs(neighbor);
         } else if (recStack.has(neighbor)) {
-          // Cycle found
           const cycleStartIndex = pathStack.indexOf(neighbor);
           if (cycleStartIndex >= 0) {
-            const cycle = pathStack.slice(cycleStartIndex).concat(neighbor);
-            cycles.push(cycle);
+            const rawCycle = pathStack.slice(cycleStartIndex);
+            if (rawCycle.length > 0) {
+              // Canonical rotation to deduplicate cycle representations
+              let minIdx = 0;
+              for (let i = 1; i < rawCycle.length; i++) {
+                if (rawCycle[i] < rawCycle[minIdx]) minIdx = i;
+              }
+              const canonical = [...rawCycle.slice(minIdx), ...rawCycle.slice(0, minIdx)];
+              const key = canonical.join(' -> ');
+              if (!seenCycleKeys.has(key)) {
+                seenCycleKeys.add(key);
+                cycles.push([...rawCycle, neighbor]);
+              }
+            }
           }
         }
       }
@@ -559,22 +733,26 @@ export class IntegrationAgent {
   }
 
   private static findMatchingFile(resolvedPath: string, filesMap: Map<string, ProjectFile>): ProjectFile | undefined {
+    const clean = resolvedPath.replace(/^\/+/, '');
     // 1. Direct match
-    if (filesMap.has(resolvedPath)) return filesMap.get(resolvedPath);
+    if (filesMap.has(clean)) return filesMap.get(clean);
 
     // 2. Strip extension
-    const base = resolvedPath.replace(/\.(js|mjs|cjs|ts|tsx|jsx)$/, '');
+    const base = clean.replace(/\.(js|mjs|cjs|ts|tsx|jsx)$/, '');
     if (filesMap.has(base)) return filesMap.get(base);
 
-    // 3. Try standard extensions
+    // 3. Try standard extensions (including ESM .js mapping to .ts)
     const candidates = [
       `${base}.ts`,
       `${base}.tsx`,
       `${base}.js`,
       `${base}.jsx`,
+      `${base}.mjs`,
+      `${base}.cjs`,
       `${base}/index.ts`,
       `${base}/index.tsx`,
-      `${base}/index.js`
+      `${base}/index.js`,
+      `${base}/index.jsx`
     ];
 
     for (const c of candidates) {

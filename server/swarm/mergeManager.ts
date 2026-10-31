@@ -27,25 +27,69 @@ export class MergeManager {
   private static patchQueues: Map<string, Promise<any>> = new Map();
 
   /**
-   * Enqueues patch operations sequentially
+   * Enqueues patch operations sequentially with automatic cleanup of idle queues
    */
   static enqueuePatch<T>(buildId: string, operation: () => Promise<T>): Promise<T> {
     const previousPromise = this.patchQueues.get(buildId) || Promise.resolve();
-    const currentPromise = previousPromise.then(operation, operation);
+    const currentPromise = previousPromise.then(
+      async () => {
+        try {
+          return await operation();
+        } finally {
+          if (this.patchQueues.get(buildId) === currentPromise) {
+            this.patchQueues.delete(buildId);
+          }
+        }
+      },
+      async (err) => {
+        if (this.patchQueues.get(buildId) === currentPromise) {
+          this.patchQueues.delete(buildId);
+        }
+        throw err;
+      }
+    );
     this.patchQueues.set(buildId, currentPromise);
     return currentPromise;
   }
 
   /**
-   * Requests a 60-second exclusive lease on one or multiple files.
-   * If multiple files are requested, they MUST be acquired in alphabetical path order
-   * to strictly avoid deadlocks.
+   * Sweeps and clears expired file leases across the build
    */
-  static acquireFileLeases(buildId: string, modelId: string, filePaths: string[]): { success: boolean; lockedBy?: string } {
+  static cleanExpiredLeases(buildId: string): number {
+    const files = db.getAllFiles(buildId);
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const f of files) {
+      if (f.leaseOwner && f.leaseExpiresAt && f.leaseExpiresAt <= now) {
+        f.leaseOwner = null;
+        f.leaseExpiresAt = null;
+        db.setFile(buildId, f);
+        cleaned++;
+      }
+    }
+
+    return cleaned;
+  }
+
+  /**
+   * Requests an exclusive lease on one or multiple files.
+   * If multiple files are requested, they MUST be acquired in alphabetical path order
+   * to strictly avoid deadlocks. Automatically sweeps expired leases first.
+   */
+  static acquireFileLeases(
+    buildId: string, 
+    modelId: string, 
+    filePaths: string[],
+    durationMs: number = this.FILE_LEASE_DURATION_MS
+  ): { success: boolean; lockedBy?: string; acquiredPaths?: string[] } {
     const sortedPaths = [...filePaths].sort(); // Alphabetical order to prevent deadlocks
     const now = Date.now();
 
-    // Check if any file is actively leased by another model
+    // 1. Clean expired leases first so abandoned locks do not block new work
+    this.cleanExpiredLeases(buildId);
+
+    // 2. Check if any file is actively leased by another model
     for (const p of sortedPaths) {
       const file = db.getFile(buildId, p);
       if (file && file.leaseOwner && file.leaseOwner !== modelId) {
@@ -55,13 +99,15 @@ export class MergeManager {
       }
     }
 
-    // Grant lease
+    // 3. Grant lease
+    const acquiredPaths: string[] = [];
     for (const p of sortedPaths) {
       const file = db.getFile(buildId, p);
       if (file) {
         file.leaseOwner = modelId;
-        file.leaseExpiresAt = now + this.FILE_LEASE_DURATION_MS;
+        file.leaseExpiresAt = now + durationMs;
         db.setFile(buildId, file);
+        acquiredPaths.push(p);
       }
     }
 
@@ -71,24 +117,71 @@ export class MergeManager {
       timestamp: now,
       type: 'file_leased',
       modelId,
-      details: `${modelId} acquired 60s refactor lease on: ${sortedPaths.join(', ')}`
+      details: `${modelId} acquired refactor lease on: ${sortedPaths.join(', ')} (${Math.round(durationMs / 1000)}s)`
     });
 
-    return { success: true };
+    return { success: true, acquiredPaths };
+  }
+
+  /**
+   * Renews existing file leases held by modelId, extending their expiry
+   */
+  static renewFileLeases(
+    buildId: string, 
+    modelId: string, 
+    filePaths: string[], 
+    durationMs: number = this.FILE_LEASE_DURATION_MS
+  ): { success: boolean; error?: string; renewedPaths?: string[] } {
+    const sortedPaths = [...filePaths].sort();
+    const now = Date.now();
+    const renewedPaths: string[] = [];
+
+    // Verify all leases are held by modelId
+    for (const p of sortedPaths) {
+      const file = db.getFile(buildId, p);
+      if (!file) {
+        return { success: false, error: `File ${p} not found` };
+      }
+      if (file.leaseOwner && file.leaseOwner !== modelId && file.leaseExpiresAt && file.leaseExpiresAt > now) {
+        return { success: false, error: `File ${p} is leased by ${file.leaseOwner}` };
+      }
+    }
+
+    for (const p of sortedPaths) {
+      const file = db.getFile(buildId, p);
+      if (file) {
+        file.leaseOwner = modelId;
+        file.leaseExpiresAt = now + durationMs;
+        db.setFile(buildId, file);
+        renewedPaths.push(p);
+      }
+    }
+
+    return { success: true, renewedPaths };
   }
 
   /**
    * Releases file leases held by a model
    */
-  static releaseFileLeases(buildId: string, modelId: string, filePaths: string[]): void {
-    for (const p of filePaths) {
+  static releaseFileLeases(
+    buildId: string, 
+    modelId: string, 
+    filePaths: string[]
+  ): { success: boolean; releasedPaths: string[] } {
+    const sortedPaths = [...filePaths].sort();
+    const releasedPaths: string[] = [];
+
+    for (const p of sortedPaths) {
       const file = db.getFile(buildId, p);
       if (file && file.leaseOwner === modelId) {
         file.leaseOwner = null;
         file.leaseExpiresAt = null;
         db.setFile(buildId, file);
+        releasedPaths.push(p);
       }
     }
+
+    return { success: true, releasedPaths };
   }
 
   /**
@@ -249,6 +342,26 @@ export class MergeManager {
           modelId,
           filePath: cleanPath,
           details: `Rejected patch from ${modelId}: File leased by ${file.leaseOwner}`
+        });
+        return {
+          success: false,
+          filePath: cleanPath,
+          error,
+          currentContent: file.content
+        };
+      }
+
+      // Version freshness check to prevent stale agents from overwriting newer changes
+      if (action.expectedVersion !== undefined && file.version !== action.expectedVersion) {
+        const error = `Version conflict: Expected file version v${action.expectedVersion}, but ${cleanPath} is currently at v${file.version}. File was modified concurrently.`;
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected patch from ${modelId}: Version mismatch (expected v${action.expectedVersion}, got v${file.version})`
         });
         return {
           success: false,
