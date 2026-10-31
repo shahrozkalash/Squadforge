@@ -133,6 +133,8 @@ export interface FileVersion {
   commitMessage?: string;
 }
 
+export type FileHistory = FileVersion;
+
 export interface ProjectFile {
   path: string;
   content: string;

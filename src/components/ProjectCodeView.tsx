@@ -30,6 +30,7 @@ import {
   ExternalLink
 } from 'lucide-react';
 import { ProjectFile } from '../types/index.js';
+import { AgentDiffViewer } from './AgentDiffViewer.js';
 
 export const ProjectCodeView: React.FC = () => {
   const { 
@@ -171,63 +172,7 @@ export const ProjectCodeView: React.FC = () => {
     return 'bg-purple-500/10 text-purple-300 border-purple-500/20';
   };
 
-  // Compute simple unified line diff between previous version and current version
-  const renderDiff = () => {
-    if (!currentFile || !currentFile.history || currentFile.history.length < 2) {
-      return (
-        <div className="p-8 text-center text-xs font-mono text-neutral-500">
-          This file is at version 1 (initial creation). No prior versions to diff against.
-        </div>
-      );
-    }
 
-    const prevVersion = currentFile.history[currentFile.history.length - 2];
-    const prevLines = prevVersion.content.split('\n');
-    const currLines = currentFile.content.split('\n');
-
-    // Simple diff display
-    return (
-      <div className="p-4 font-mono text-xs overflow-x-auto min-h-[500px] leading-relaxed bg-neutral-950/90">
-        <div className="text-[11px] text-neutral-400 pb-3 mb-2 border-b border-neutral-800 flex items-center justify-between">
-          <span>Comparing <span className="text-rose-400 font-bold">v{prevVersion.version}</span> against <span className="text-emerald-400 font-bold">v{currentFile.version}</span>:</span>
-          <span>Target: {currentFile.path}</span>
-        </div>
-
-        <table className="w-full border-collapse">
-          <tbody>
-            {currLines.map((line, idx) => {
-              const prevLine = prevLines[idx];
-              const isAdded = prevLine === undefined;
-              const isModified = prevLine !== undefined && prevLine !== line;
-
-              return (
-                <tr 
-                  key={idx} 
-                  className={
-                    isAdded 
-                      ? 'bg-emerald-950/30 text-emerald-200' 
-                      : isModified 
-                      ? 'bg-amber-950/30 text-amber-200' 
-                      : 'hover:bg-neutral-900/50 text-neutral-300'
-                  }
-                >
-                  <td className="w-8 pr-2 text-right text-neutral-600 select-none text-[11px]">
-                    {idx + 1}
-                  </td>
-                  <td className="w-6 text-center select-none font-bold text-[11px]">
-                    {isAdded ? '+' : isModified ? '~' : ' '}
-                  </td>
-                  <td className="whitespace-pre">
-                    {line || ' '}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    );
-  };
 
   const handleSubmitRevision = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -472,7 +417,9 @@ export const ProjectCodeView: React.FC = () => {
               </div>
             )}
 
-            {activeTab === 'diff' && renderDiff()}
+            {activeTab === 'diff' && currentFile && (
+              <AgentDiffViewer file={currentFile} />
+            )}
 
             {activeTab === 'history' && (
               <div className="p-4 space-y-3 bg-neutral-950/80 min-h-[500px]">
