@@ -69,29 +69,53 @@ export class ExecutionAdapter {
   private static MAX_TOTAL_PROJECT_BYTES = 10 * 1024 * 1024; // 10 MB total project limit
 
   /**
-   * Sanitizes relative file path and protects against path traversal attempts
+   * Sanitizes relative file path and protects against path traversal attempts.
+   * Strictly rejects absolute Unix paths, Windows drive paths, UNC paths, and null bytes.
    */
   static sanitizeFilePath(rawPath: string): { valid: boolean; cleanPath: string; error?: string } {
     if (!rawPath || typeof rawPath !== 'string') {
       return { valid: false, cleanPath: '', error: 'File path cannot be empty' };
     }
 
-    if (rawPath.includes('\0')) {
+    const trimmed = rawPath.trim();
+    if (!trimmed) {
+      return { valid: false, cleanPath: '', error: 'File path cannot be empty' };
+    }
+
+    if (trimmed.includes('\0')) {
       return { valid: false, cleanPath: '', error: 'Null byte injection detected in file path' };
     }
 
-    // Strip leading slashes and drive letters
-    let cleaned = rawPath.replace(/^([a-zA-Z]:)?[\\/]+/, '').replace(/\\/g, '/');
+    // Reject UNC paths (e.g. //server/share or \\server\share)
+    if (trimmed.startsWith('//') || trimmed.startsWith('\\\\')) {
+      return { valid: false, cleanPath: '', error: 'UNC network paths are forbidden' };
+    }
 
-    // Disallow traversal components
-    const segments = cleaned.split('/');
+    // Reject absolute Unix paths
+    if (trimmed.startsWith('/') || trimmed.startsWith('\\')) {
+      return { valid: false, cleanPath: '', error: 'Absolute file paths are forbidden' };
+    }
+
+    // Reject Windows drive paths (e.g. C:, C:/, C:\, d:\...)
+    if (/^[a-zA-Z]:/i.test(trimmed)) {
+      return { valid: false, cleanPath: '', error: 'Windows drive paths are forbidden' };
+    }
+
+    // Disallow traversal components in normalized path
+    const normalized = trimmed.replace(/\\/g, '/');
+    const segments = normalized.split('/');
     if (segments.some(seg => seg === '..' || seg === '.')) {
       return { valid: false, cleanPath: '', error: 'Directory traversal sequence (..) is prohibited' };
     }
 
-    cleaned = segments.filter(Boolean).join('/');
+    const cleaned = segments.filter(Boolean).join('/');
     if (!cleaned) {
       return { valid: false, cleanPath: '', error: 'Resolved path is empty' };
+    }
+
+    const resolved = path.posix.normalize(cleaned);
+    if (resolved.startsWith('..') || resolved.startsWith('/') || resolved === '.') {
+      return { valid: false, cleanPath: '', error: 'Path resolved outside project boundary' };
     }
 
     return { valid: true, cleanPath: cleaned };

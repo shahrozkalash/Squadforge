@@ -40,6 +40,7 @@ describe('SquadForge Deep Audit Verification & Quality Improvements', () => {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       selectedModels: ['gemini-2.5-pro'],
+      autoPushGithub: true,
       totalTokens: 0,
       totalCost: 0,
       costLimit: 5.0,
@@ -176,8 +177,11 @@ describe('SquadForge Deep Audit Verification & Quality Improvements', () => {
       assert.equal(sanitizeProjectFilePath('src/\0evil.ts'), null);
 
       assert.equal(sanitizeProjectFilePath('src/App.tsx'), 'src/App.tsx');
-      assert.equal(sanitizeProjectFilePath('/src/components/Button.tsx'), 'src/components/Button.tsx');
-      assert.equal(sanitizeProjectFilePath('C:/app/src/index.tsx'), 'app/src/index.tsx');
+      assert.equal(sanitizeProjectFilePath('src/components/Button.tsx'), 'src/components/Button.tsx');
+      assert.equal(sanitizeProjectFilePath('/src/components/Button.tsx'), null, 'Must reject absolute Unix paths');
+      assert.equal(sanitizeProjectFilePath('C:/app/src/index.tsx'), null, 'Must reject Windows drive paths');
+      assert.equal(sanitizeProjectFilePath('\\\\server\\share\\evil.tsx'), null, 'Must reject UNC paths');
+      assert.equal(sanitizeProjectFilePath('//unc/path.tsx'), null, 'Must reject UNC paths');
     });
 
     test('bundles real React application with nested source directories', () => {
@@ -322,7 +326,7 @@ describe('SquadForge Deep Audit Verification & Quality Improvements', () => {
         description: 'Create interactive whiteboard canvas drawing surface',
         filePaths: ['src/components/CanvasView.tsx'],
         status: 'pending' as const,
-        priority: 1,
+        priority: 1 as const,
         createdAt: Date.now()
       };
 

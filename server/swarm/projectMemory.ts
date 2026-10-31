@@ -5,6 +5,7 @@ import {
   TechStackConfig, 
   ArchitectureDecision, 
   RequirementItem, 
+  RequirementStatus,
   ProjectRevision,
   Task,
   ProjectFile
@@ -217,15 +218,28 @@ export class ProjectMemoryService {
   }
 
   /**
-   * Retrieves all requirements for the project
+   * Retrieves all requirements for the project with mandatory ownership authorization.
    */
-  static getRequirements(buildId: string, userId?: string): any[] {
-    const memory = db.getProjectMemory(buildId);
-    if (memory && memory.requirements && memory.requirements.length > 0) {
-      return memory.requirements;
+  static getRequirements(buildId: string, userId: string): RequirementItem[] {
+    if (!buildId || !userId) {
+      throw new Error('Forbidden: Unauthorized - userId is required to access project requirements');
     }
     const build = db.getBuild(buildId);
-    return build?.requirementsChecklist || [];
+    if (!build) {
+      throw new Error(`Project not found: ${buildId}`);
+    }
+    if (build.userId !== userId) {
+      throw new Error(`Forbidden: Access denied to project memory for build ${buildId}`);
+    }
+
+    const memory = db.getProjectMemory(buildId);
+    if (memory && memory.requirements && memory.requirements.length > 0) {
+      if (memory.userId !== userId) {
+        throw new Error('Forbidden: Project memory owner mismatch');
+      }
+      return memory.requirements;
+    }
+    return build.requirementsChecklist || [];
   }
 
   /**
@@ -235,27 +249,48 @@ export class ProjectMemoryService {
     buildId: string,
     userId: string,
     reqId: string,
-    satisfied: boolean,
+    satisfiedOrOpts: boolean | {
+      satisfied?: boolean;
+      status?: RequirementStatus;
+      files?: string[];
+      notes?: string;
+      evidence?: string;
+      testsExecuted?: Array<{ name: string; passed: boolean; message?: string }> | string[];
+      deterministicChecksPassed?: boolean;
+    },
     files?: string[],
     notes?: string,
-    status?: 'implemented' | 'partially_implemented' | 'unverified' | 'blocked' | 'failed' | 'satisfied' | 'pending',
+    status?: RequirementStatus,
     evidence?: string,
-    testsExecuted?: Array<{ name: string; passed: boolean; message?: string }>,
+    testsExecuted?: Array<{ name: string; passed: boolean; message?: string }> | string[],
     deterministicChecksPassed?: boolean
   ): boolean {
+    if (!buildId || !userId) {
+      throw new Error('Forbidden: Unauthorized - userId is required for project memory updates');
+    }
     const memory = this.getOrInitializeMemory(buildId, userId);
     if (!memory) return false;
 
     const req = memory.requirements.find(r => r.id === reqId);
     if (!req) return false;
 
-    req.satisfied = satisfied;
-    req.status = status || (satisfied ? 'satisfied' : 'unmet');
-    if (files) req.satisfiedByFiles = files;
-    if (notes) req.verificationNotes = notes;
-    if (evidence) req.evidence = evidence;
-    if (testsExecuted) req.testsExecuted = testsExecuted;
-    if (deterministicChecksPassed !== undefined) req.deterministicChecksPassed = deterministicChecksPassed;
+    if (typeof satisfiedOrOpts === 'object' && satisfiedOrOpts !== null) {
+      if (satisfiedOrOpts.satisfied !== undefined) req.satisfied = satisfiedOrOpts.satisfied;
+      if (satisfiedOrOpts.status !== undefined) req.status = satisfiedOrOpts.status;
+      if (satisfiedOrOpts.files !== undefined) req.satisfiedByFiles = satisfiedOrOpts.files;
+      if (satisfiedOrOpts.notes !== undefined) req.verificationNotes = satisfiedOrOpts.notes;
+      if (satisfiedOrOpts.evidence !== undefined) req.evidence = satisfiedOrOpts.evidence;
+      if (satisfiedOrOpts.testsExecuted !== undefined) req.testsExecuted = satisfiedOrOpts.testsExecuted;
+      if (satisfiedOrOpts.deterministicChecksPassed !== undefined) req.deterministicChecksPassed = satisfiedOrOpts.deterministicChecksPassed;
+    } else {
+      req.satisfied = Boolean(satisfiedOrOpts);
+      req.status = status || (satisfiedOrOpts ? 'satisfied' : 'unmet');
+      if (files) req.satisfiedByFiles = files;
+      if (notes) req.verificationNotes = notes;
+      if (evidence) req.evidence = evidence;
+      if (testsExecuted) req.testsExecuted = testsExecuted;
+      if (deterministicChecksPassed !== undefined) req.deterministicChecksPassed = deterministicChecksPassed;
+    }
 
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);

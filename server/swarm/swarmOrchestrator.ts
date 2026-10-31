@@ -13,6 +13,7 @@ import { tokenOptimizer } from '../tokenOptimizer.js';
 import { PreviewGenerator } from './previewGenerator.js';
 import { IntegrationAgent } from './integrationAgent.js';
 import { ProjectMemoryService } from './projectMemory.js';
+import { HonestVerificationService } from '../verificationService.js';
 import { 
   Build, 
   ModelConfig, 
@@ -1243,7 +1244,10 @@ Output ONLY JSON in this exact schema:
     const verificationReport = HonestVerificationService.evaluateProjectReadiness(buildId);
 
     // Reject completion if critical requirements failed or are blocked
-    const failedRequirements = (verificationReport.requirementsReport || []).filter(r => 
+    const reqList: RequirementItem[] = Array.isArray(verificationReport.requirementsReport)
+      ? verificationReport.requirementsReport
+      : (verificationReport.requirementsReport?.items || []);
+    const failedRequirements = reqList.filter((r: RequirementItem) => 
       r.status === 'failed' || r.status === 'blocked'
     );
 
@@ -1259,7 +1263,7 @@ Output ONLY JSON in this exact schema:
       if (currentAttempt >= maxAttempts) {
         build.status = 'failed';
         build.completedAt = Date.now();
-        build.failureReason = `Verification failed: ${failedRequirements.length} requirement(s) failed verification: ${failedRequirements.map(r => r.description.slice(0, 40)).join('; ')}`;
+        build.failureReason = `Verification failed: ${failedRequirements.length} requirement(s) failed verification: ${failedRequirements.map((r: RequirementItem) => r.description.slice(0, 40)).join('; ')}`;
         build.error = build.failureReason;
         db.saveBuild(build);
         control.stopRequested = true;

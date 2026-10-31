@@ -140,8 +140,8 @@ export interface Task {
   filePaths: string[];
   priority: TaskPriority;
   status: TaskStatus;
-  claimedBy: string | null; // modelId
-  leaseExpiresAt: number | null; // epoch timestamp ms
+  claimedBy?: string | null; // modelId
+  leaseExpiresAt?: number | null; // epoch timestamp ms
   createdAt: number;
   completedAt?: number;
   error?: string;
@@ -178,12 +178,12 @@ export interface ProjectFile {
   path: string;
   content: string;
   version: number;
-  ownerModel: string;
+  ownerModel?: string;
   history: FileVersion[];
   leaseOwner?: string | null;
   leaseExpiresAt?: number | null;
-  createdAt: number;
-  updatedAt: number;
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 export type EventType = 
@@ -359,20 +359,21 @@ export type RequirementStatus =
   | 'blocked' 
   | 'failed' 
   | 'satisfied' 
-  | 'pending';
+  | 'pending'
+  | 'unmet';
 
 export interface RequirementItem {
   id: string;
   title?: string;
   category?: string;
   description: string;
-  priority: 'must_have' | 'should_have' | 'nice_to_have';
+  priority?: 'must_have' | 'should_have' | 'nice_to_have';
   satisfied: boolean;
   status?: RequirementStatus;
   satisfiedByFiles?: string[];
   evidence?: string;
   verificationNotes?: string;
-  testsExecuted?: Array<{ name: string; passed: boolean; message?: string }>;
+  testsExecuted?: Array<string | { name: string; passed: boolean; message?: string }>;
   deterministicChecksPassed?: boolean;
 }
 
@@ -409,11 +410,32 @@ export type VerificationVerdict =
   | 'verified';
 
 export interface VerificationCheckItem {
-  category: 'requirements' | 'files' | 'syntax' | 'types' | 'tests' | 'build' | 'security' | 'config' | 'preview';
+  category: 'requirements' | 'files' | 'syntax' | 'types' | 'tests' | 'build' | 'security' | 'config' | 'preview' | 'runtime';
   name: string;
   status: 'passed' | 'failed' | 'skipped' | 'blocked';
   evidence?: string;
   reasonIfSkipped?: string;
+}
+
+export interface BrowserRuntimeCheck {
+  name: string;
+  category: 'document' | 'mount' | 'dependencies' | 'content' | 'interactivity' | 'layout' | 'errors';
+  status: 'passed' | 'failed' | 'skipped';
+  message: string;
+  details?: string;
+}
+
+export interface BrowserRuntimeVerificationReport {
+  verified: boolean;
+  verdict: 'verified' | 'partially_verified' | 'failed';
+  timestamp: number;
+  checks: BrowserRuntimeCheck[];
+  errors: string[];
+  domMountVerified: boolean;
+  meaningfulContentRendered: boolean;
+  interactiveControlsVerified: boolean;
+  responsiveLayoutVerified: boolean;
+  dependencyIntegrityVerified: boolean;
 }
 
 export interface VerificationReport {
@@ -422,7 +444,7 @@ export interface VerificationReport {
   checks: VerificationCheckItem[];
   requirementsCoveragePercent: number;
   requirementsReport?: {
-    originalRequirements: string;
+    originalRequirements?: string;
     total: number;
     implemented: number;
     partiallyImplemented: number;
@@ -430,24 +452,25 @@ export interface VerificationReport {
     failed: number;
     blocked: number;
     items: RequirementItem[];
-  };
+  } | RequirementItem[];
   compilationStatus?: {
     syntaxPassed: boolean;
     typePassed: boolean;
-    previewBundlePassed: boolean;
+    previewBundlePassed?: boolean;
     errors?: string[];
-  };
+  } | string;
   runtimeStatus?: {
     mode: 'real_application' | 'static_html' | 'fallback_preview';
     entryPoint?: string;
-    interactiveState: boolean;
+    interactiveState?: boolean;
     errors?: string[];
-  };
+  } | string;
+  browserRuntimeVerification?: BrowserRuntimeVerificationReport;
   knownLimitations?: string[];
   finalOutcome?: {
     verdict: VerificationVerdict;
     summary: string;
-  };
+  } | string;
   syntaxChecksPassed: boolean;
   typeChecksPassed: boolean;
   previewMode?: 'real_application' | 'static_html' | 'fallback_preview';
@@ -457,7 +480,7 @@ export interface VerificationReport {
     passed: number;
     failed: number;
     skipped: number;
-    details: Array<{ name: string; status: 'passed' | 'failed' | 'skipped'; message?: string }>;
+    details: Array<{ name: string; status: 'passed' | 'failed' | 'skipped' | boolean; message?: string }>;
   };
   buildPassed: boolean;
   buildOutput?: string;

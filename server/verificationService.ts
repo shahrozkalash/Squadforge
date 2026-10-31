@@ -2,6 +2,7 @@ import { db } from './store.js';
 import { ExecutionAdapter } from './swarm/executionAdapter.js';
 import { ProjectMemoryService } from './swarm/projectMemory.js';
 import { PreviewGenerator } from './swarm/previewGenerator.js';
+import { BrowserRuntimeVerifier } from './swarm/runtimeVerifier.js';
 import { 
   Build, 
   VerificationReport, 
@@ -177,13 +178,14 @@ export class HonestVerificationService {
       unresolvedCriteria.push(`${inProgressTasks} tasks are still in progress or pending.`);
     }
 
-    // 5. Application Live Preview & Runtime Execution Check
     let previewResult;
     try {
       previewResult = PreviewGenerator.generateInteractivePreview(build.idea, files, build.projectType || 'fullstack');
     } catch (err: any) {
       previewResult = {
+        html: '<!DOCTYPE html><html><head><title>Preview Error</title></head><body><div id="root">Preview generation failed</div></body></html>',
         mode: 'fallback_preview' as const,
+        entryPoint: 'fallback_preview.html',
         diagnosticInfo: err.message || 'Preview generation failed'
       };
     }
@@ -202,6 +204,24 @@ export class HonestVerificationService {
       unresolvedRisks.push('Project preview is running in fallback demonstration mode and cannot be verified as running code.');
     }
 
+    // 5b. Real Browser Runtime Verification (Document, Mounting, Dependencies, Errors)
+    const runtimeReport = BrowserRuntimeVerifier.verifyPreviewRuntime(previewResult, files);
+    for (const c of runtimeReport.checks) {
+      checks.push({
+        category: 'runtime',
+        name: `Browser Runtime: ${c.name}`,
+        status: c.status,
+        evidence: c.message,
+        reasonIfSkipped: c.status === 'skipped' ? c.details : undefined
+      });
+    }
+
+    if (!runtimeReport.verified && previewResult.mode === 'real_application') {
+      for (const err of runtimeReport.errors) {
+        knownDefects.push(`Browser runtime failure: ${err}`);
+      }
+    }
+
     // 6. Connect each requirement to real files, tests, and evidence
     const verifiedRequirements = this.verifyRequirements(build, files, execResult, previewResult);
     const implementedCount = verifiedRequirements.filter(r => r.status === 'implemented').length;
@@ -218,8 +238,8 @@ export class HonestVerificationService {
     } else if (!hasFiles || !syntaxPassed || failedTasks > 0 || testReport.failed > 0 || !secPassed || failedReqCount > 0) {
       verdict = 'failed';
     } else if (requirementsCoveragePercent >= 90 && syntaxPassed && secPassed && (testReport.status === 'passed' || testReport.total === 0)) {
-      // Must not be marked 'verified' if running in fallback preview mode or build/tests skipped
-      if (testReport.status === 'skipped' || buildReport.status === 'skipped' || previewResult.mode === 'fallback_preview' || blockedReqCount > 0) {
+      // Must not be marked 'verified' if running in fallback preview mode, build/tests skipped, or browser runtime verification failed
+      if (testReport.status === 'skipped' || buildReport.status === 'skipped' || previewResult.mode === 'fallback_preview' || blockedReqCount > 0 || !runtimeReport.verified) {
         verdict = 'partially_verified';
       } else {
         verdict = 'verified';
@@ -239,6 +259,7 @@ export class HonestVerificationService {
       typeChecksPassed: typePassed,
       previewMode: previewResult.mode,
       previewPassed,
+      browserRuntimeVerification: runtimeReport,
       testExecution: {
         total: testReport.total,
         passed: testReport.passed,
@@ -294,7 +315,7 @@ export class HonestVerificationService {
     execResult: any,
     previewResult: any
   ): Array<import('./types.js').RequirementItem> {
-    const memoryReqs = ProjectMemoryService.getRequirements(build.id);
+    const memoryReqs = build.userId ? (ProjectMemoryService.getRequirements(build.id, build.userId) || []) : [];
     const existingChecklist = build.requirementsChecklist || [];
 
     // Combine or harmonize requirement items
@@ -312,11 +333,11 @@ export class HonestVerificationService {
 
     for (const item of rawItems) {
       const descLower = item.description.toLowerCase();
-      const catLower = item.category.toLowerCase();
+      const catLower = (item.category || '').toLowerCase();
       const tokens = descLower
         .replace(/[^a-z0-9_]/g, ' ')
         .split(/\s+/)
-        .filter(t => t.length >= 3 && !stopWords.has(t));
+        .filter((t: string) => t.length >= 3 && !stopWords.has(t));
 
       // Match files specifically relevant to this requirement
       const matchedFiles: Array<{ path: string; score: number }> = [];
@@ -346,7 +367,7 @@ export class HonestVerificationService {
       const relevantTests = testDetails
         .filter((t: any) => {
           const testNameLower = t.name.toLowerCase();
-          return tokens.some(tok => testNameLower.includes(tok)) || topMatchedFilePaths.some(fp => testNameLower.includes(fp.toLowerCase()));
+          return tokens.some((tok: string) => testNameLower.includes(tok)) || topMatchedFilePaths.some(fp => testNameLower.includes(fp.toLowerCase()));
         })
         .map((t: any) => t.name);
 
@@ -399,6 +420,7 @@ export class HonestVerificationService {
         id: item.id,
         category: item.category,
         description: item.description,
+        priority: (item as any).priority || 'should_have',
         satisfied: status === 'implemented',
         status,
         evidence,
@@ -412,8 +434,8 @@ export class HonestVerificationService {
 
       // Keep ProjectMemory synchronized with deterministic status
       try {
-        ProjectMemoryService.updateRequirement(build.id, item.id, {
-          status: status === 'implemented' ? 'satisfied' : status === 'blocked' ? 'blocked' : 'unmet',
+        ProjectMemoryService.updateRequirement(build.id, build.userId, item.id, {
+          status: status === 'implemented' ? 'satisfied' : 'unmet',
           evidence,
           testsExecuted: relevantTests,
           deterministicChecksPassed

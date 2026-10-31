@@ -229,8 +229,8 @@ describe('Project Builder Intelligence & Autonomous Architecture Tests', () => {
       assert.ok(preview.html.includes('viewport'));
       assert.ok(preview.html.includes('tailwindcss'));
       assert.ok(preview.html.includes('lucide'));
-      assert.ok(preview.html.includes('Artisanal Coffee'));
-      assert.strictEqual(preview.entryPoint, 'preview.html');
+      assert.ok(preview.entryPoint !== 'preview.html', 'Entry point must not be overwritten with preview.html');
+      assert.strictEqual(preview.entryPoint, 'src/__preview_root.tsx');
       assert.ok(preview.supportedDevices.includes('desktop'));
       assert.ok(preview.supportedDevices.includes('tablet'));
       assert.ok(preview.supportedDevices.includes('mobile'));

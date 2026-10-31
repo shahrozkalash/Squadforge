@@ -30,24 +30,125 @@ export function cleanupTempDir(dir: string): void {
   }
 }
 
+export interface BrowserPackageConfig {
+  version?: string;
+  url?: string;
+  allowSubpaths?: boolean;
+}
+
+export const BROWSER_PACKAGE_REGISTRY: Record<string, BrowserPackageConfig> = {
+  'react': { version: '19.0.1', url: 'https://esm.sh/react@19.0.1?dev', allowSubpaths: true },
+  'react-dom': { version: '19.0.1', url: 'https://esm.sh/react-dom@19.0.1?dev', allowSubpaths: true },
+  'react-dom/client': { version: '19.0.1', url: 'https://esm.sh/react-dom@19.0.1/client?dev' },
+  'react/jsx-runtime': { version: '19.0.1', url: 'https://esm.sh/react@19.0.1/jsx-runtime?dev' },
+  'lucide-react': { version: '0.546.0', url: 'https://esm.sh/lucide-react@0.546.0?dev', allowSubpaths: true },
+  'motion': { version: '12.23.24', url: 'https://esm.sh/motion@12.23.24?dev', allowSubpaths: true },
+  'framer-motion': { version: '12.23.24', url: 'https://esm.sh/framer-motion@12.23.24?dev', allowSubpaths: true },
+  'canvas-confetti': { version: '1.9.4', url: 'https://esm.sh/canvas-confetti?dev', allowSubpaths: false },
+  'clsx': { url: 'https://esm.sh/clsx?dev', allowSubpaths: false },
+  'tailwind-merge': { url: 'https://esm.sh/tailwind-merge?dev', allowSubpaths: false },
+  'date-fns': { allowSubpaths: true },
+  'zustand': { allowSubpaths: true },
+  'axios': { allowSubpaths: false },
+  '@tanstack/react-query': { allowSubpaths: true },
+  'react-router-dom': { allowSubpaths: true },
+  'react-router': { allowSubpaths: true }
+};
+
+export const FORBIDDEN_SERVER_MODULES = new Set([
+  'fs', 'node:fs', 'path', 'node:path', 'os', 'node:os', 'crypto', 'node:crypto',
+  'child_process', 'node:child_process', 'express', 'cookie-parser', 'nodemailer',
+  'dotenv', 'bcryptjs', 'sqlite', 'better-sqlite3', 'node:sqlite', 'jsonwebtoken',
+  'cluster', 'dgram', 'dns', 'http', 'https', 'net', 'readline', 'tls', 'v8', 'vm'
+]);
+
 /**
- * Validates and sanitizes relative file paths, rejecting traversal attacks
+ * Validates and sanitizes relative file paths, strictly rejecting traversal attacks,
+ * absolute Unix paths, Windows drive paths, UNC paths, and null bytes.
+ * Never silently converts an unsafe absolute path into an accepted relative path.
  */
 export function sanitizeProjectFilePath(filePath: string): string | null {
   if (!filePath || typeof filePath !== 'string') return null;
-  if (filePath.includes('\0')) return null;
-  const normalized = filePath.replace(/\\/g, '/');
-  const stripped = normalized.replace(/^([a-zA-Z]:)?[/]+/, '');
-  const segments = stripped.split('/');
+  const trimmed = filePath.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes('\0')) return null;
+
+  // Reject absolute Unix paths
+  if (trimmed.startsWith('/') || trimmed.startsWith('\\')) return null;
+
+  // Reject Windows drive paths (e.g. C:, C:/, C:\, d:\...)
+  if (/^[a-zA-Z]:/i.test(trimmed)) return null;
+
+  // Reject UNC paths (e.g. //server/share or \\server\share)
+  if (trimmed.startsWith('//') || trimmed.startsWith('\\\\')) return null;
+
+  const normalized = trimmed.replace(/\\/g, '/');
+  const segments = normalized.split('/');
   for (const seg of segments) {
     if (seg === '..') return null;
   }
-  return stripped;
+
+  const cleaned = segments.filter(s => s && s !== '.').join('/');
+  if (!cleaned) return null;
+
+  const resolved = path.posix.normalize(cleaned);
+  if (resolved.startsWith('..') || resolved.startsWith('/') || resolved === '.') {
+    return null;
+  }
+
+  return cleaned;
+}
+
+export function isForbiddenServerModule(moduleName: string): boolean {
+  if (!moduleName || typeof moduleName !== 'string') return false;
+  const clean = moduleName.trim().toLowerCase();
+  const base = clean.startsWith('@') ? clean.split('/').slice(0, 2).join('/') : clean.split('/')[0];
+  return FORBIDDEN_SERVER_MODULES.has(clean) || FORBIDDEN_SERVER_MODULES.has(base);
+}
+
+export function getEffectivePackageVersion(packageName: string): string | undefined {
+  return BROWSER_PACKAGE_REGISTRY[packageName]?.version;
+}
+
+export function resolveAllowedDependency(specifier: string): { packageName: string; subpath?: string; esmUrl: string } | null {
+  if (!specifier || typeof specifier !== 'string') return null;
+  const trimmed = specifier.trim();
+  const basePkg = trimmed.startsWith('@') ? trimmed.split('/').slice(0, 2).join('/') : trimmed.split('/')[0];
+  if (isForbiddenServerModule(trimmed)) return null;
+
+  const regConfig = BROWSER_PACKAGE_REGISTRY[basePkg] || 
+                    BROWSER_PACKAGE_REGISTRY[trimmed] || 
+                    PreviewGenerator.getCustomAllowedPackage(basePkg) ||
+                    PreviewGenerator.getCustomAllowedPackage(trimmed);
+  if (!regConfig) return null;
+
+  if (trimmed === basePkg) {
+    const esmUrl = regConfig.url || (regConfig.version ? `https://esm.sh/${basePkg}@${regConfig.version}?dev` : `https://esm.sh/${basePkg}?dev`);
+    return { packageName: basePkg, esmUrl };
+  } else {
+    const subpath = trimmed.slice(basePkg.length + 1);
+    const ver = regConfig.version ? `@${regConfig.version}` : '';
+    const esmUrl = `https://esm.sh/${basePkg}${ver}/${subpath}?dev`;
+    return { packageName: basePkg, subpath, esmUrl };
+  }
 }
 
 export class PreviewGenerator {
   static cleanupTempDir = cleanupTempDir;
   static sanitizeProjectFilePath = sanitizeProjectFilePath;
+  private static customAllowedPackages: Map<string, BrowserPackageConfig> = new Map();
+
+  static registerAllowedPackage(name: string, config?: BrowserPackageConfig): void {
+    this.customAllowedPackages.set(name, config || {});
+  }
+
+  static getCustomAllowedPackage(name: string): BrowserPackageConfig | undefined {
+    return this.customAllowedPackages.get(name);
+  }
+
+  static resetAllowedPackages(): void {
+    this.customAllowedPackages.clear();
+  }
 
   /**
    * Generates a self-contained, responsive HTML bundle for live preview in an iframe.
@@ -64,8 +165,8 @@ export class PreviewGenerator {
     const preview = this.generateInteractivePreview(titleOrIdea, files, projectTypeOrIdea);
     return {
       ...preview,
-      entryPoint: 'preview.html',
-      supportedDevices: ['desktop', 'tablet', 'mobile']
+      entryPoint: preview.entryPoint || (preview.mode === 'static_html' ? 'index.html' : 'src/App.tsx'),
+      supportedDevices: preview.supportedDevices || ['desktop', 'tablet', 'mobile']
     };
   }
 
@@ -191,19 +292,85 @@ export class PreviewGenerator {
       ]);
 
       const importRegex = /(?:import\s+(?:[\w*\s{},]*\s+from\s+)?['"]([^'"./\\][^'"]*)['"]|require\(['"]([^'"./\\][^'"]*)['"]\))/g;
+      const scannedSpecifiers = new Set<string>();
+      const unsupportedDependencies: string[] = [];
+
       for (const f of allFiles) {
         if (!f.path.endsWith('.ts') && !f.path.endsWith('.tsx') && !f.path.endsWith('.js') && !f.path.endsWith('.jsx')) {
           continue;
         }
         let match;
         while ((match = importRegex.exec(f.content)) !== null) {
-          const pkg = match[1] || match[2];
-          if (pkg && !pkg.startsWith('.') && !pkg.startsWith('/') && !pkg.startsWith('node:')) {
-            // Strip subpaths if main package name
-            const basePkg = pkg.startsWith('@') ? pkg.split('/').slice(0, 2).join('/') : pkg.split('/')[0];
-            externalImports.add(basePkg);
+          const spec = match[1] || match[2];
+          if (spec && !spec.startsWith('.') && !spec.startsWith('/') && !spec.startsWith('node:')) {
+            scannedSpecifiers.add(spec);
           }
         }
+      }
+
+      // Build dynamic import map for browser execution with controlled allowlist and version consistency
+      const importMapEntries: Record<string, string> = {
+        'react': 'https://esm.sh/react@19?dev',
+        'react-dom': 'https://esm.sh/react-dom@19?dev',
+        'react-dom/client': 'https://esm.sh/react-dom@19/client?dev',
+        'react/jsx-runtime': 'https://esm.sh/react@19/jsx-runtime?dev',
+        'lucide-react': 'https://esm.sh/lucide-react@0.546.0?dev'
+      };
+
+      for (const spec of scannedSpecifiers) {
+        const basePkg = spec.startsWith('@')
+          ? spec.split('/').slice(0, 2).join('/')
+          : spec.split('/')[0];
+
+        if (FORBIDDEN_SERVER_MODULES.has(spec) || FORBIDDEN_SERVER_MODULES.has(basePkg)) {
+          unsupportedDependencies.push(`Server-side module "${spec}" cannot run in browser preview.`);
+          continue;
+        }
+
+        const regConfig = BROWSER_PACKAGE_REGISTRY[basePkg] || 
+                          BROWSER_PACKAGE_REGISTRY[spec] || 
+                          PreviewGenerator.customAllowedPackages.get(basePkg) || 
+                          PreviewGenerator.customAllowedPackages.get(spec);
+
+        if (regConfig) {
+          externalImports.add(spec);
+          externalImports.add(basePkg);
+
+          if (!importMapEntries[spec]) {
+            if (spec === basePkg) {
+              importMapEntries[basePkg] = regConfig.url || (regConfig.version ? `https://esm.sh/${basePkg}@${regConfig.version}?dev` : `https://esm.sh/${basePkg}?dev`);
+            } else {
+              const subpath = spec.slice(basePkg.length + 1);
+              const ver = regConfig.version ? `@${regConfig.version}` : '';
+              importMapEntries[spec] = `https://esm.sh/${basePkg}${ver}/${subpath}?dev`;
+              if (!importMapEntries[basePkg]) {
+                importMapEntries[basePkg] = regConfig.url || (regConfig.version ? `https://esm.sh/${basePkg}@${regConfig.version}?dev` : `https://esm.sh/${basePkg}?dev`);
+              }
+            }
+          }
+        } else {
+          unsupportedDependencies.push(`Unsupported browser dependency: "${spec}". Package is not in browser allowlist.`);
+        }
+      }
+
+      if (unsupportedDependencies.length > 0) {
+        const fallbackDiagnostic = `Dependency resolution rejected: ${unsupportedDependencies.join('; ')}`;
+        const renderedHtml = this.buildThematicPreview(idea, projectType, allFiles, [], [], {
+          isFallback: true,
+          diagnostic: fallbackDiagnostic
+        });
+        return {
+          html: renderedHtml,
+          title,
+          fileCount: allFiles.length,
+          hasInteractiveState: false,
+          generatedAt: Date.now(),
+          mode: 'fallback_preview',
+          entryPoint: 'fallback_preview.html',
+          diagnosticInfo: fallbackDiagnostic,
+          runtimeErrors: unsupportedDependencies,
+          supportedDevices: ['desktop', 'tablet', 'mobile']
+        };
       }
 
       // Identify or synthesize entry point
@@ -365,21 +532,6 @@ if (mountTarget) {
           runtimeErrors: [compilationDiagnostics],
           supportedDevices: ['desktop', 'tablet', 'mobile']
         };
-      }
-
-      // Build dynamic import map for browser execution
-      const importMapEntries: Record<string, string> = {
-        'react': 'https://esm.sh/react@19?dev',
-        'react-dom': 'https://esm.sh/react-dom@19?dev',
-        'react-dom/client': 'https://esm.sh/react-dom@19/client?dev',
-        'react/jsx-runtime': 'https://esm.sh/react@19/jsx-runtime?dev',
-        'lucide-react': 'https://esm.sh/lucide-react@0.475.0?dev'
-      };
-
-      for (const pkg of externalImports) {
-        if (!importMapEntries[pkg]) {
-          importMapEntries[pkg] = `https://esm.sh/${pkg}?dev`;
-        }
       }
 
       const importMapJson = JSON.stringify({ imports: importMapEntries }, null, 2);
