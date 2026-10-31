@@ -85,6 +85,14 @@ export class ProjectMemoryService {
       if (stored.userId !== userId) {
         throw new Error(`Forbidden: Project memory owner mismatch`);
       }
+      // Defensive schema healing for corrupted or missing arrays
+      stored.facts = Array.isArray(stored.facts) ? stored.facts : [];
+      stored.architectureDecisions = Array.isArray(stored.architectureDecisions) ? stored.architectureDecisions : [];
+      stored.requirements = Array.isArray(stored.requirements) ? stored.requirements : [];
+      stored.knownDefects = Array.isArray(stored.knownDefects) ? stored.knownDefects : [];
+      stored.moduleRelationships = Array.isArray(stored.moduleRelationships) ? stored.moduleRelationships : [];
+      stored.revisions = Array.isArray(stored.revisions) ? stored.revisions : [];
+      stored.conventions = Array.isArray(stored.conventions) ? stored.conventions : [];
       return stored;
     }
 
@@ -142,12 +150,17 @@ export class ProjectMemoryService {
 
   /**
    * Records a confirmed fact or an assumption, preventing duplicates
+   * and never allowing unverified agent assumptions to overwrite confirmed requirements.
    */
   static recordFact(
     buildId: string, 
     userId: string, 
     fact: Omit<ProjectFact, 'id' | 'timestamp'>
   ): boolean {
+    if (!fact || !fact.statement || typeof fact.statement !== 'string' || !fact.statement.trim()) {
+      return false;
+    }
+
     const memory = this.getOrInitializeMemory(buildId, userId);
     if (!memory) return false;
 
@@ -155,6 +168,10 @@ export class ProjectMemoryService {
     const normalized = fact.statement.toLowerCase().trim();
     const existing = memory.facts.find(f => f.statement.toLowerCase().trim() === normalized);
     if (existing) {
+      // If existing fact is confirmed and incoming is only an assumption, strictly preserve confirmed!
+      if (existing.confidence === 'confirmed' && fact.confidence === 'assumption') {
+        return true;
+      }
       // If upgraded from assumption to confirmed, update confidence
       if (existing.confidence === 'assumption' && fact.confidence === 'confirmed') {
         existing.confidence = 'confirmed';
@@ -166,7 +183,10 @@ export class ProjectMemoryService {
     }
 
     const newFact: ProjectFact = {
-      ...fact,
+      category: fact.category || 'requirement',
+      statement: fact.statement.trim(),
+      confidence: fact.confidence || 'assumption',
+      source: fact.source || 'architect_agent',
       id: `fact_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       timestamp: Date.now()
     };
@@ -421,7 +441,8 @@ export class ProjectMemoryService {
     userId: string,
     defectId: string,
     attemptNote?: string,
-    failed?: boolean
+    failed?: boolean,
+    regressionTest?: string
   ): { allowed: boolean; attempts: number } {
     const memory = this.getOrInitializeMemory(buildId, userId);
     if (!memory) return { allowed: false, attempts: 0 };
@@ -433,6 +454,12 @@ export class ProjectMemoryService {
     if (failed && attemptNote) {
       if (!defect.failedRepairs) defect.failedRepairs = [];
       defect.failedRepairs.push(attemptNote);
+    }
+    if (regressionTest) {
+      if (!defect.regressionTests) defect.regressionTests = [];
+      if (!defect.regressionTests.includes(regressionTest)) {
+        defect.regressionTests.push(regressionTest);
+      }
     }
 
     memory.lastUpdated = Date.now();

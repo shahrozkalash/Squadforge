@@ -2,14 +2,24 @@ import { ProjectFile } from '../types.js';
 import { db } from '../store.js';
 import { TaskManager } from './taskManager.js';
 import { ProjectMemoryService } from './projectMemory.js';
+import { DependencyResolverService } from './dependencyResolver.js';
 
 export interface IntegrationIssue {
-  type: 'missing_imported_file' | 'unexported_identifier' | 'missing_env_doc' | 'api_route_mismatch';
+  type: 
+    | 'missing_imported_file' 
+    | 'unexported_identifier' 
+    | 'missing_env_doc' 
+    | 'api_route_mismatch'
+    | 'conflicting_files'
+    | 'architectural_conflict'
+    | 'missing_dependency'
+    | 'incomplete_implementation';
   sourceFile: string;
   targetFile?: string;
   identifier?: string;
   message: string;
   severity: 'error' | 'warning';
+  evidence?: string;
 }
 
 export interface IntegrationAnalysisReport {
@@ -24,7 +34,8 @@ export interface IntegrationAnalysisReport {
 
 export class IntegrationAgent {
   /**
-   * Analyzes cross-module contracts, relative imports, missing files, and environment requirements.
+   * Analyzes cross-module contracts, relative imports, missing files, external dependencies,
+   * architectural decisions, and incomplete implementations.
    */
   static analyzeProjectContracts(buildIdOrFiles: string | ProjectFile[]): IntegrationAnalysisReport {
     const files = typeof buildIdOrFiles === 'string' ? db.getAllFiles(buildIdOrFiles) : buildIdOrFiles;
@@ -60,7 +71,22 @@ export class IntegrationAgent {
         }
       }
 
-      // 2. Scan ES imports: import ... from './...'
+      // 2. Scan external browser module dependencies
+      const scannedImports = DependencyResolverService.parseCodeImports(content, file.path);
+      for (const imp of scannedImports) {
+        if (imp.status !== 'allowed') {
+          issues.push({
+            type: 'missing_dependency',
+            sourceFile: file.path,
+            identifier: imp.specifier,
+            message: imp.diagnostic || `File "${file.path}" requires unsupported or unresolvable dependency "${imp.specifier}".`,
+            severity: 'error',
+            evidence: `Import statement: ${imp.type} "${imp.specifier}"`
+          });
+        }
+      }
+
+      // 3. Scan ES relative imports: import ... from './...'
       const importRegex = /(?:import\s+(?:(?:{[^}]+})|(?:[\w\s,*]+))\s+from\s+['"]([^'"]+)['"])|(?:import\s+['"]([^'"]+)['"])/g;
       let match;
 
@@ -114,9 +140,26 @@ export class IntegrationAgent {
           }
         }
       }
+
+      // 4. Incomplete implementation or decorative placeholder stub detection
+      if (file.path.endsWith('.tsx') || file.path.endsWith('.ts')) {
+        const trimmed = content.trim();
+        if (
+          trimmed.length > 0 && 
+          trimmed.length < 35 && 
+          !file.path.includes('.d.ts')
+        ) {
+          issues.push({
+            type: 'incomplete_implementation',
+            sourceFile: file.path,
+            message: `File "${file.path}" contains an undersized implementation (${trimmed.length} characters) that may be incomplete.`,
+            severity: 'warning'
+          });
+        }
+      }
     }
 
-    // 3. Check environment documentation in .env.example
+    // 5. Check environment documentation in .env.example
     const envExampleFile = files.find(f => f.path === '.env.example');
     const envExampleContent = envExampleFile ? envExampleFile.content : '';
     const undocumentedEnvVars: string[] = [];
@@ -132,6 +175,35 @@ export class IntegrationAgent {
           message: `Environment variable "${v}" is referenced in source code but missing from .env.example template.`,
           severity: 'warning'
         });
+      }
+    }
+
+    // 6. Check for architectural conflicts in ProjectMemory if buildId is available
+    if (buildId) {
+      try {
+        const build = db.getBuild(buildId);
+        if (build?.userId) {
+          const decisions = ProjectMemoryService.getDecisions(buildId, build.userId);
+          const accepted = decisions.filter(d => d.status === 'accepted');
+          const titleMap = new Map<string, string>();
+          for (const d of accepted) {
+            const key = d.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (titleMap.has(key)) {
+              issues.push({
+                type: 'architectural_conflict',
+                sourceFile: 'ProjectMemory',
+                identifier: d.id,
+                message: `Architectural disagreement or duplicate decision: "${d.title}" conflicts with previously accepted decision "${titleMap.get(key)}".`,
+                severity: 'warning',
+                evidence: d.decision
+              });
+            } else {
+              titleMap.set(key, d.title);
+            }
+          }
+        }
+      } catch {
+        // Fallback gracefully
       }
     }
 
@@ -201,7 +273,7 @@ export class IntegrationAgent {
     const build = db.getBuild(buildId);
 
     for (const issue of errorIssues.slice(0, 3)) {
-      const taskTitle = `[Integration Fix] Resolve broken import: ${issue.identifier || issue.targetFile || 'cross-module contract'}`;
+      const taskTitle = `[Integration Fix] Resolve broken contract: ${issue.identifier || issue.targetFile || issue.sourceFile}`;
       // Prevent duplicate fix tasks
       if (existingTasks.some(t => t.title === taskTitle && t.status !== 'failed')) {
         continue;
@@ -219,16 +291,16 @@ export class IntegrationAgent {
           const memory = ProjectMemoryService.getOrInitializeMemory(buildId, build.userId);
           const defect = memory?.knownDefects.find(d => d.id === defectId);
           if (defect && (defect.repairAttempts || 0) >= 3) {
-            // Reached maximum bounded self-repair attempts (3 max)
+            // Reached maximum bounded self-repair attempts (3 max) to avoid endless loops
             continue;
           }
-          ProjectMemoryService.recordRepairAttempt(buildId, build.userId, defectId, 'Spawned integration fix task');
+          ProjectMemoryService.recordRepairAttempt(buildId, build.userId, defectId, `Spawned integration fix task for ${issue.type}`);
         }
       }
 
       TaskManager.createNewTask(buildId, {
         title: taskTitle,
-        description: issue.message,
+        description: `${issue.message}\nAcceptance Criteria: Ensure "${issue.sourceFile}" imports and contracts resolve without errors.`,
         filePaths: [issue.sourceFile, issue.targetFile || ''].filter(Boolean),
         priority: 1, // High priority
         assignedRole: 'integration_specialist',

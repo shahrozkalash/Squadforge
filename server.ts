@@ -1118,6 +1118,60 @@ app.get('/api/builds/:id/decisions', requireAuth, (req, res) => {
   res.json({ success: true, decisions });
 });
 
+app.post('/api/builds/:id/decisions', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const { id, title, context, decision, rationale, consequences } = req.body;
+  if (!title || !decision) {
+    return res.status(400).json({ error: 'title and decision are required' });
+  }
+
+  const adrId = id || `ADR-${Date.now().toString().slice(-4)}`;
+  const recorded = ProjectMemoryService.recordDecision(build.id, req.user!.id, {
+    id: adrId,
+    title: String(title).trim(),
+    context: String(context || '').trim(),
+    decision: String(decision).trim(),
+    rationale: rationale ? String(rationale).trim() : undefined,
+    consequences: consequences ? String(consequences).trim() : undefined,
+    status: 'accepted',
+    timestamp: Date.now()
+  });
+
+  res.status(201).json({ success: recorded, decisions: ProjectMemoryService.getDecisions(build.id, req.user!.id) });
+});
+
+app.put('/api/builds/:id/requirements/:reqId', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const { satisfied, status, notes, evidence, files } = req.body;
+  if (typeof satisfied !== 'boolean' && typeof status !== 'string') {
+    return res.status(400).json({ error: 'satisfied (boolean) or status (string) is required' });
+  }
+
+  const updated = ProjectMemoryService.updateRequirement(build.id, req.user!.id, req.params.reqId, {
+    satisfied,
+    status,
+    notes,
+    evidence,
+    files
+  });
+
+  if (!updated) {
+    return res.status(404).json({ error: `Requirement "${req.params.reqId}" not found in project` });
+  }
+
+  res.json({ success: true, requirements: ProjectMemoryService.getRequirements(build.id, req.user!.id) });
+});
+
 // Real-Time Server-Sent Events (SSE) Stream
 app.get('/api/builds/:id/stream', requireAuth, (req, res) => {
   const buildId = req.params.id;

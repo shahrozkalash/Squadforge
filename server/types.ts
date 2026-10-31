@@ -353,13 +353,14 @@ export interface ArchitectureDecision {
 }
 
 export type RequirementStatus = 
+  | 'pending'
   | 'implemented' 
+  | 'verified'
   | 'partially_implemented' 
   | 'unverified' 
   | 'blocked' 
   | 'failed' 
   | 'satisfied' 
-  | 'pending'
   | 'unmet';
 
 export interface RequirementItem {
@@ -371,10 +372,13 @@ export interface RequirementItem {
   satisfied: boolean;
   status?: RequirementStatus;
   satisfiedByFiles?: string[];
+  relevantFiles?: string[];
+  verificationMethod?: 'automated_test_suite' | 'static_ast_and_syntax' | 'browser_runtime_inspection' | 'manual_pending' | string;
   evidence?: string;
   verificationNotes?: string;
   testsExecuted?: Array<string | { name: string; passed: boolean; message?: string }>;
   testResults?: Array<{ name: string; passed: boolean; message?: string }>;
+  remainingLimitations?: string[];
   remainingProblems?: string[];
   deterministicChecksPassed?: boolean;
 }

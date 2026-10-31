@@ -310,26 +310,33 @@ export interface ArchitectureDecision {
 }
 
 export type RequirementStatus = 
+  | 'pending'
   | 'implemented' 
+  | 'verified'
   | 'partially_implemented' 
   | 'unverified' 
   | 'blocked' 
   | 'failed' 
   | 'satisfied' 
-  | 'pending';
+  | 'unmet';
 
 export interface RequirementItem {
   id: string;
   title?: string;
   category?: string;
   description: string;
-  priority: 'must_have' | 'should_have' | 'nice_to_have';
+  priority?: 'must_have' | 'should_have' | 'nice_to_have';
   satisfied: boolean;
   status?: RequirementStatus;
   satisfiedByFiles?: string[];
+  relevantFiles?: string[];
+  verificationMethod?: 'automated_test_suite' | 'static_ast_and_syntax' | 'browser_runtime_inspection' | 'manual_pending' | string;
   evidence?: string;
   verificationNotes?: string;
-  testsExecuted?: Array<{ name: string; passed: boolean; message?: string }>;
+  testsExecuted?: Array<string | { name: string; passed: boolean; message?: string }>;
+  testResults?: Array<{ name: string; passed: boolean; message?: string }>;
+  remainingLimitations?: string[];
+  remainingProblems?: string[];
   deterministicChecksPassed?: boolean;
 }
 

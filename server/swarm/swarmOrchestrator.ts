@@ -1208,10 +1208,18 @@ Output ONLY JSON in this exact schema:
 
       // Create new targeted tasks for missing requirements
       for (const req of missing) {
+        const targetFile = allFiles.find(f => f.path.endsWith('.tsx') || f.path.endsWith('.ts'))?.path || 'src/App.tsx';
+        if (build.userId) {
+          ProjectMemoryService.recordDefect(buildId, build.userId, {
+            description: `Missing requirement: ${req}`,
+            filePaths: [targetFile],
+            severity: 'high'
+          });
+        }
         TaskManager.createNewTask(buildId, {
           title: `Implement Missing Requirement: ${req.slice(0, 50)}`,
-          description: `Verifier indicated requirement is missing or incomplete: ${req}`,
-          filePaths: ['src/core/engine.ts'],
+          description: `Verifier indicated requirement is missing or incomplete: ${req}\nAcceptance Criteria: Implement functional code fulfilling "${req}" in ${targetFile}.`,
+          filePaths: [targetFile],
           priority: 1,
           isFixTask: true,
           assignedRole: 'debugging_specialist',
@@ -1272,10 +1280,25 @@ Output ONLY JSON in this exact schema:
 
       // Spawn targeted fix tasks for failed requirements
       for (const req of failedRequirements) {
+        const targetFiles = req.relevantFiles && req.relevantFiles.length > 0
+          ? req.relevantFiles
+          : (req.satisfiedByFiles && req.satisfiedByFiles.length > 0 ? req.satisfiedByFiles : ['src/App.tsx']);
+
+        if (build.userId) {
+          const defectId = ProjectMemoryService.recordDefect(buildId, build.userId, {
+            description: `Verification defect: ${req.description}`,
+            filePaths: targetFiles,
+            severity: 'high'
+          });
+          if (defectId) {
+            ProjectMemoryService.recordRepairAttempt(buildId, build.userId, defectId, 'Spawned deterministic repair task');
+          }
+        }
+
         TaskManager.createNewTask(buildId, {
           title: `Fix Requirement: ${req.description.slice(0, 50)}`,
-          description: `Deterministic verification failed for: ${req.description}. Evidence: ${req.evidence || 'Missing'}`,
-          filePaths: req.satisfiedByFiles && req.satisfiedByFiles.length > 0 ? req.satisfiedByFiles : ['src/App.tsx'],
+          description: `Deterministic verification failed for: ${req.description}.\nEvidence: ${req.evidence || 'Missing'}\nAcceptance Criteria: Resolve syntax/test defects and verify requirement satisfaction in ${targetFiles.join(', ')}.`,
+          filePaths: targetFiles,
           priority: 1,
           isFixTask: true,
           assignedRole: 'debugging_specialist',

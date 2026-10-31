@@ -26,6 +26,81 @@ export interface DependencyResolutionResult {
 }
 
 /**
+ * Explicitly trusted HTTPS package origins for browser dependencies.
+ * Prevents arbitrary or unverified remote module loading.
+ */
+export const TRUSTED_HTTPS_PACKAGE_ORIGINS: readonly string[] = [
+  'https://esm.sh',
+  'https://cdn.jsdelivr.net',
+  'https://unpkg.com',
+  'https://cdnjs.cloudflare.com',
+  'https://esm.run'
+];
+
+/**
+ * Validates whether a URL strictly uses an explicitly trusted HTTPS origin.
+ */
+export function isTrustedHttpsUrl(urlStr: string): boolean {
+  if (!urlStr || typeof urlStr !== 'string') return false;
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol !== 'https:') return false;
+    const origin = parsed.origin.toLowerCase();
+    return TRUSTED_HTTPS_PACKAGE_ORIGINS.some(trusted => 
+      origin === trusted.toLowerCase() || 
+      origin.endsWith('.' + trusted.replace('https://', ''))
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validates package name and configuration to prevent path traversal,
+ * shell characters, or unsafe configurations.
+ */
+export function validatePackageName(name: string): { valid: boolean; error?: string } {
+  if (!name || typeof name !== 'string') {
+    return { valid: false, error: 'Package name must be a non-empty string' };
+  }
+  const trimmed = name.trim();
+  if (trimmed.includes('\0') || trimmed.includes('\\') || trimmed.includes('..') || /\s/.test(trimmed)) {
+    return { valid: false, error: `Invalid characters or path traversal sequence in package name "${name}"` };
+  }
+  if (
+    trimmed.startsWith('/') || 
+    trimmed.startsWith('http:') || 
+    trimmed.startsWith('https:') || 
+    trimmed.startsWith('file:') || 
+    trimmed.startsWith('data:')
+  ) {
+    return { valid: false, error: `Package name cannot be a path or URL: "${name}"` };
+  }
+  const pkgPattern = /^(@[a-z0-9_.-]+\/)?[a-z0-9_.-]+(\/[a-z0-9_.-]+)*$/i;
+  if (!pkgPattern.test(trimmed)) {
+    return { valid: false, error: `Package name "${name}" does not match valid package name pattern` };
+  }
+  return { valid: true };
+}
+
+/**
+ * Derives a consistent subpath URL respecting custom package base URLs.
+ */
+export function deriveSubpathUrl(baseUrl: string, subpath: string): string {
+  try {
+    const urlObj = new URL(baseUrl);
+    if (urlObj.pathname.endsWith('/+esm')) {
+      urlObj.pathname = urlObj.pathname.replace(/\/(\+esm)$/, `/${subpath}/$1`);
+    } else {
+      urlObj.pathname = urlObj.pathname.replace(/\/+$/, '') + `/${subpath}`;
+    }
+    return urlObj.toString();
+  } catch {
+    return `${baseUrl.replace(/\/+$/, '')}/${subpath}`;
+  }
+}
+
+/**
  * Pinned browser package registry with explicit subpath enforcement and version consistency.
  * Pinned versions strictly match package.json where applicable.
  */
@@ -134,33 +209,47 @@ export const BROWSER_PACKAGE_REGISTRY: Record<string, BrowserPackageConfig> = {
  */
 export const FORBIDDEN_SERVER_MODULES = new Set<string>([
   // Node.js built-ins (bare & node: prefix handled dynamically)
-  'fs', 'node:fs',
-  'path', 'node:path',
-  'os', 'node:os',
-  'crypto', 'node:crypto',
-  'child_process', 'node:child_process',
-  'http', 'node:http',
-  'https', 'node:https',
-  'net', 'node:net',
-  'tls', 'node:tls',
-  'dgram', 'node:dgram',
-  'dns', 'node:dns',
-  'readline', 'node:readline',
-  'stream', 'node:stream',
-  'buffer', 'node:buffer',
-  'util', 'node:util',
-  'url', 'node:url',
-  'vm', 'node:vm',
-  'v8', 'node:v8',
-  'zlib', 'node:zlib',
-  'cluster', 'node:cluster',
-  'worker_threads', 'node:worker_threads',
-  'perf_hooks', 'node:perf_hooks',
+  'assert', 'node:assert',
   'async_hooks', 'node:async_hooks',
+  'buffer', 'node:buffer',
+  'child_process', 'node:child_process',
+  'cluster', 'node:cluster',
+  'console', 'node:console',
+  'crypto', 'node:crypto',
+  'dgram', 'node:dgram',
+  'diagnostics_channel', 'node:diagnostics_channel',
+  'dns', 'node:dns',
+  'domain', 'node:domain',
   'events', 'node:events',
-  'process', 'node:process',
-  'timers', 'node:timers',
+  'fs', 'node:fs',
+  'http', 'node:http',
+  'http2', 'node:http2',
+  'https', 'node:https',
   'inspector', 'node:inspector',
+  'module', 'node:module',
+  'net', 'node:net',
+  'os', 'node:os',
+  'path', 'node:path',
+  'perf_hooks', 'node:perf_hooks',
+  'process', 'node:process',
+  'punycode', 'node:punycode',
+  'querystring', 'node:querystring',
+  'readline', 'node:readline',
+  'repl', 'node:repl',
+  'stream', 'node:stream',
+  'string_decoder', 'node:string_decoder',
+  'test', 'node:test',
+  'timers', 'node:timers',
+  'tls', 'node:tls',
+  'trace_events', 'node:trace_events',
+  'tty', 'node:tty',
+  'url', 'node:url',
+  'util', 'node:util',
+  'v8', 'node:v8',
+  'vm', 'node:vm',
+  'wasi', 'node:wasi',
+  'worker_threads', 'node:worker_threads',
+  'zlib', 'node:zlib',
   // Server-side packages
   'express',
   'cookie-parser',
@@ -185,7 +274,34 @@ export const FORBIDDEN_SERVER_MODULES = new Set<string>([
 export class DependencyResolverService {
   private static customAllowedPackages: Map<string, BrowserPackageConfig> = new Map();
 
+  /**
+   * Registers a custom allowed package with strict security validation.
+   * Only permits explicitly trusted HTTPS package origins.
+   */
   static registerAllowedPackage(name: string, config?: BrowserPackageConfig): void {
+    const nameCheck = validatePackageName(name);
+    if (!nameCheck.valid) {
+      throw new Error(`Invalid package name "${name}": ${nameCheck.error}`);
+    }
+
+    if (config?.url) {
+      if (!isTrustedHttpsUrl(config.url)) {
+        throw new Error(
+          `Untrusted or non-HTTPS package URL for "${name}": "${config.url}". Only trusted HTTPS origins are allowed (${TRUSTED_HTTPS_PACKAGE_ORIGINS.join(', ')}).`
+        );
+      }
+    }
+
+    if (config?.version) {
+      if (!/^[a-zA-Z0-9_.-]+$/.test(config.version)) {
+        throw new Error(`Invalid version format "${config.version}" for package "${name}"`);
+      }
+    }
+
+    if (config?.allowSubpaths !== undefined && typeof config.allowSubpaths !== 'boolean') {
+      throw new Error(`allowSubpaths must be a boolean for package "${name}"`);
+    }
+
     this.customAllowedPackages.set(name, config || { allowSubpaths: true });
   }
 
@@ -204,7 +320,7 @@ export class DependencyResolverService {
     if (!specifier || typeof specifier !== 'string') return false;
     const clean = specifier.trim().toLowerCase();
 
-    // Check node: scheme
+    // Check node: scheme (e.g. node:fs, node:test, node:assert, etc.)
     if (clean.startsWith('node:')) return true;
 
     // Check direct match
@@ -238,6 +354,7 @@ export class DependencyResolverService {
 
   /**
    * Resolves a single import specifier against the browser registry with subpath validation.
+   * Custom package URLs are strictly respected during both exact and subpath resolution.
    */
   static resolveSpecifier(specifier: string): {
     allowed: boolean;
@@ -312,9 +429,14 @@ export class DependencyResolverService {
       };
     }
 
-    // Build consistent versioned ESM url
-    const ver = regConfig.version ? `@${regConfig.version}` : '';
-    const esmUrl = `https://esm.sh/${basePkg}${ver}/${subpath}?dev`;
+    // Respect custom package URL if provided; otherwise derive standard versioned ESM url
+    let esmUrl: string;
+    if (regConfig.url) {
+      esmUrl = deriveSubpathUrl(regConfig.url, subpath);
+    } else {
+      const ver = regConfig.version ? `@${regConfig.version}` : '';
+      esmUrl = `https://esm.sh/${basePkg}${ver}/${subpath}?dev`;
+    }
 
     return {
       allowed: true,
@@ -326,21 +448,46 @@ export class DependencyResolverService {
   }
 
   /**
+   * Sanitizes source code to avoid false positives from comments and ordinary strings.
+   * Strips line and block comments while maintaining code structure.
+   */
+  static stripCommentsAndNonImportStrings(code: string): string {
+    if (!code) return '';
+
+    // Step 1: Strip block comments /* ... */
+    let sanitized = code.replace(/\/\*[\s\S]*?\*\//g, match => {
+      return match.replace(/[^\n\r]/g, ' ');
+    });
+
+    // Step 2: Strip line comments // ...
+    sanitized = sanitized.replace(/\/\/[^\n\r]*/g, match => {
+      return ' '.repeat(match.length);
+    });
+
+    return sanitized;
+  }
+
+  /**
    * Scans source code for all static imports, dynamic imports, re-exports, and require calls.
+   * Immune to false positives from comments and ordinary string literals.
    */
   static parseCodeImports(code: string, sourceFile: string = ''): ScannedImport[] {
     const results: ScannedImport[] = [];
     if (!code) return results;
 
+    const cleanCode = this.stripCommentsAndNonImportStrings(code);
+
     // Regular expressions for static, re-export, dynamic import, and require
-    const staticImportRegex = /(?:^|[;\n])\s*import\s*(?:(?:[\w*\s{},]*)\s*from\s*)?['"]([^'"\n\r]+)['"]/g;
-    const reExportRegex = /(?:^|[;\n])\s*export\s*(?:(?:[\w*\s{},]*)\s*from\s*)['"]([^'"\n\r]+)['"]/g;
+    const staticImportRegex = /(?:^|[;\n\r])\s*import\s*(?:(?:[\w*\s{},]*)\s*from\s*)?['"]([^'"\n\r]+)['"]/g;
+    const reExportRegex = /(?:^|[;\n\r])\s*export\s*(?:(?:[\w*\s{},]*)\s*from\s*)['"]([^'"\n\r]+)['"]/g;
     const dynamicImportRegex = /\bimport\s*\(\s*['"]([^'"\n\r]+)['"]\s*\)/g;
     const requireRegex = /\brequire\s*\(\s*['"]([^'"\n\r]+)['"]\s*\)/g;
 
+    const seenSpecifiers = new Set<string>();
+
     const testAndCollect = (regex: RegExp, type: ScannedImport['type']) => {
       let match: RegExpExecArray | null;
-      while ((match = regex.exec(code)) !== null) {
+      while ((match = regex.exec(cleanCode)) !== null) {
         const specifier = match[1]?.trim();
         if (specifier) {
           // Skip relative and internal absolute file paths
@@ -348,14 +495,22 @@ export class DependencyResolverService {
             continue;
           }
 
+          const dedupKey = `${type}:${specifier}`;
+          if (seenSpecifiers.has(dedupKey)) continue;
+          seenSpecifiers.add(dedupKey);
+
           const resolution = this.resolveSpecifier(specifier);
+          const diagnostic = resolution.allowed 
+            ? undefined 
+            : (resolution.diagnostic || `Rejected dependency "${specifier}"`);
+
           results.push({
             specifier,
             sourceFile,
             type,
             status: resolution.status,
             resolvedUrl: resolution.esmUrl,
-            diagnostic: resolution.diagnostic
+            diagnostic: diagnostic ? (sourceFile ? `${sourceFile}: ${diagnostic}` : diagnostic) : undefined
           });
         }
       }
@@ -372,6 +527,7 @@ export class DependencyResolverService {
   /**
    * Comprehensive dependency resolution across all project files.
    * Produces an accurate import map and returns explicit diagnostics for rejected imports.
+   * Prevents duplicate or conflicting import-map entries.
    */
   static resolveProjectDependencies(files: ProjectFile[]): DependencyResolutionResult {
     const allScannedImports: ScannedImport[] = [];
@@ -421,19 +577,25 @@ export class DependencyResolverService {
             }
           }
         } else {
-          const diag = item.diagnostic || `Unsupported dependency "${item.specifier}" in ${file.path}`;
+          const diag = item.diagnostic || `${file.path}: Unsupported dependency "${item.specifier}"`;
           if (!unsupportedDependencies.includes(diag)) {
             unsupportedDependencies.push(diag);
-            diagnostics.push(`${file.path}: ${diag}`);
+            diagnostics.push(diag);
           }
         }
       }
     }
 
+    // Sort importMap keys deterministically to prevent conflicting or non-deterministic maps
+    const sortedImportMap: Record<string, string> = {};
+    for (const key of Object.keys(importMap).sort()) {
+      sortedImportMap[key] = importMap[key];
+    }
+
     return {
       valid: unsupportedDependencies.length === 0,
-      importMap,
-      externalList: Array.from(externalList),
+      importMap: sortedImportMap,
+      externalList: Array.from(externalList).sort(),
       unsupportedDependencies,
       diagnostics,
       scannedImports: allScannedImports

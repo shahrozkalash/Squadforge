@@ -224,7 +224,7 @@ export class HonestVerificationService {
 
     // 6. Connect each requirement to real files, tests, and evidence
     const verifiedRequirements = this.verifyRequirements(build, files, execResult, previewResult);
-    const implementedCount = verifiedRequirements.filter(r => r.status === 'implemented').length;
+    const implementedCount = verifiedRequirements.filter(r => r.status === 'implemented' || r.status === 'verified').length;
     const failedReqCount = verifiedRequirements.filter(r => r.status === 'failed').length;
     const blockedReqCount = verifiedRequirements.filter(r => r.status === 'blocked').length;
 
@@ -384,16 +384,19 @@ export class HonestVerificationService {
       let evidence: string;
       let deterministicChecksPassed = false;
       let notes = '';
+      let verificationMethod: string = 'manual_pending';
 
       if (topMatchedFilePaths.length === 0) {
         status = 'failed';
         evidence = 'No implementation files found in project workspace addressing this requirement.';
         notes = 'Missing implementation evidence.';
+        verificationMethod = 'manual_pending';
         remainingProblems.push('No implementation files found in project workspace addressing this requirement.');
       } else if (failedTests.length > 0) {
         status = 'failed';
         evidence = `Implementation in ${topMatchedFilePaths.join(', ')}, but automated test(s) failed: ${failedTests.map((t: any) => t.name).join(', ')}.`;
         notes = 'Failing unit test suite.';
+        verificationMethod = 'automated_test_suite';
         for (const ft of failedTests) {
           remainingProblems.push(`Failing test "${ft.name}": ${ft.message || 'Assertion failed'}`);
         }
@@ -404,27 +407,32 @@ export class HonestVerificationService {
         );
 
         if (syntaxErrorsInFiles.length > 0) {
-          status = 'failed';
+          status = 'blocked';
           evidence = `Implementation file ${syntaxErrorsInFiles[0].filePath} has syntax error: ${syntaxErrorsInFiles[0].message}`;
           notes = 'Syntax check failure.';
+          verificationMethod = 'static_ast_and_syntax';
           for (const se of syntaxErrorsInFiles) {
             remainingProblems.push(`Syntax error in ${se.filePath}: ${se.message}`);
           }
         } else {
           deterministicChecksPassed = true;
           if (relevantTests.length > 0) {
+            // Tests executed and passed cleanly -> genuine verified / implemented status
             status = 'implemented';
             evidence = `Verified in ${topMatchedFilePaths.join(', ')}. All ${relevantTests.length} relevant test(s) passed cleanly.`;
             notes = 'Fully implemented and verified with automated test suite.';
+            verificationMethod = 'automated_test_suite';
           } else if (topMatchedFilePaths.length > 0) {
-            // Files exist and passed syntax validation
+            // Files exist and passed syntax validation, but no automated tests ran specifically
             status = 'implemented';
             evidence = `Implemented in ${topMatchedFilePaths.join(', ')}. Code syntax and AST verified cleanly.`;
             notes = 'Implemented and statically verified.';
+            verificationMethod = 'static_ast_and_syntax';
           } else {
             status = 'unverified';
             evidence = 'Files found but insufficient structural evidence to confirm implementation.';
             notes = 'Unverified requirement.';
+            verificationMethod = 'manual_pending';
             remainingProblems.push('Insufficient structural evidence to confirm complete implementation.');
           }
         }
@@ -432,17 +440,21 @@ export class HonestVerificationService {
 
       const verifiedItem: import('./types.js').RequirementItem = {
         id: item.id,
+        title: (item as any).title,
         category: item.category,
         description: item.description,
         priority: (item as any).priority || 'should_have',
-        satisfied: status === 'implemented',
+        satisfied: (status as import('./types.js').RequirementStatus) === 'verified' || status === 'implemented',
         status,
+        relevantFiles: topMatchedFilePaths,
+        satisfiedByFiles: topMatchedFilePaths,
+        verificationMethod,
         evidence,
         testsExecuted: relevantTests,
         testResults,
+        remainingLimitations: remainingProblems,
         remainingProblems,
         deterministicChecksPassed,
-        satisfiedByFiles: topMatchedFilePaths,
         verificationNotes: notes
       };
 
@@ -451,10 +463,13 @@ export class HonestVerificationService {
       // Keep ProjectMemory synchronized with deterministic status
       try {
         ProjectMemoryService.updateRequirement(build.id, build.userId, item.id, {
-          status: status === 'implemented' ? 'satisfied' : 'unmet',
+          satisfied: (status as import('./types.js').RequirementStatus) === 'verified' || status === 'implemented',
+          status: status === 'implemented' || (status as import('./types.js').RequirementStatus) === 'verified' ? 'satisfied' : 'unmet',
           evidence,
           testsExecuted: relevantTests,
-          deterministicChecksPassed
+          deterministicChecksPassed,
+          files: topMatchedFilePaths,
+          notes
         });
       } catch {
         // Graceful fallback if memory record not yet registered

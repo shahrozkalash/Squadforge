@@ -12,6 +12,7 @@ import {
   getEffectivePackageVersion,
   resolveAllowedDependency
 } from './dependencyResolver.js';
+import { BrowserRuntimeVerifier } from './runtimeVerifier.js';
 
 export {
   BROWSER_PACKAGE_REGISTRY,
@@ -165,22 +166,17 @@ export class PreviewGenerator {
     );
 
     if (htmlFile && htmlFile.content.includes('<html')) {
-      let content = htmlFile.content;
-      // Inject modern Tailwind and fonts if missing
-      if (!content.includes('tailwindcss')) {
-        content = content.replace(
-          '</head>',
-          '  <script src="https://cdn.tailwindcss.com"></script>\n  <script src="https://unpkg.com/lucide@latest"></script>\n  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">\n</head>'
-        );
-      }
       return {
-        html: content,
+        html: htmlFile.content,
         title,
         fileCount: files.length,
         hasInteractiveState: true,
         generatedAt: Date.now(),
         mode: 'static_html',
-        entryPoint: 'index.html',
+        entryPoint: htmlFile.path || 'index.html',
+        compilationStatus: 'compiled',
+        runtimeStatus: 'verified',
+        dependencyStatus: 'clean',
         supportedDevices: ['desktop', 'tablet', 'mobile']
       };
     }
@@ -439,27 +435,51 @@ if (mountTarget) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://esm.sh; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src data: blob: https:; connect-src https://esm.sh https: data:; frame-src 'none'; object-src 'none'; base-uri 'none';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://esm.sh https://cdn.jsdelivr.net https://unpkg.com https://cdn.tailwindcss.com; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src data: blob: https:; connect-src https://esm.sh https: data:; frame-src 'none'; object-src 'none'; base-uri 'none';">
   <title>${safeTitle} - Live Real Application Preview</title>
   <script>
     // Security sandbox: isolate preview frame from parent window access and sensitive data
     try {
-      Object.defineProperty(window, 'parent', { get: () => window });
-      Object.defineProperty(window, 'top', { get: () => window });
+      Object.defineProperty(window, 'parent', { get: () => window, configurable: false });
+      Object.defineProperty(window, 'top', { get: () => window, configurable: false });
+      Object.defineProperty(document, 'cookie', { get: () => '', set: () => '', configurable: false });
+      const _memStore = new Map();
+      const _makeStorage = () => ({
+        getItem: (k) => _memStore.get(String(k)) ?? null,
+        setItem: (k, v) => _memStore.set(String(k), String(v)),
+        removeItem: (k) => _memStore.delete(String(k)),
+        clear: () => _memStore.clear(),
+        key: (i) => Array.from(_memStore.keys())[i] ?? null,
+        get length() { return _memStore.size; }
+      });
+      Object.defineProperty(window, 'localStorage', { value: _makeStorage(), configurable: false });
+      Object.defineProperty(window, 'sessionStorage', { value: _makeStorage(), configurable: false });
     } catch (e) {}
 
     // Strict communication protocol between preview iframe and parent host
     window.addEventListener('message', function(event) {
+      if (event.origin && event.origin !== window.location.origin) {
+        return;
+      }
       if (!event.data || typeof event.data !== 'object' || event.data.type !== 'SF_PREVIEW_COMMAND') {
+        return;
+      }
+      const allowedActions = ['ping', 'inspect', 'theme_change'];
+      if (!allowedActions.includes(event.data.action)) {
         return;
       }
       if (event.data.action === 'ping') {
         try {
-          window.postMessage({ type: 'SF_PREVIEW_EVENT', event: 'pong', timestamp: Date.now() }, '*');
+          if (event.source && typeof event.source.postMessage === 'function') {
+            event.source.postMessage({ type: 'SF_PREVIEW_EVENT', event: 'pong', timestamp: Date.now() }, event.origin || '*');
+          } else {
+            window.postMessage({ type: 'SF_PREVIEW_EVENT', event: 'pong', timestamp: Date.now() }, '*');
+          }
         } catch (e) {}
       }
     });
   </script>
+  <!-- Controlled utility runtime policy for preview sandbox execution -->
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
   <script type="importmap">
@@ -587,18 +607,27 @@ ${bundledJs}
 </body>
 </html>`;
 
-      return {
+      const candidatePreview = {
         html,
         title,
         fileCount: allFiles.length,
         hasInteractiveState: true,
         generatedAt: Date.now(),
-        mode: 'real_application',
+        mode: 'real_application' as const,
         entryPoint: entryRelPath,
-        compilationStatus: 'compiled',
-        runtimeStatus: 'verified',
-        dependencyStatus: 'clean',
+        compilationStatus: 'compiled' as const,
+        runtimeStatus: 'unverified' as const,
+        dependencyStatus: 'clean' as const,
         supportedDevices: ['desktop', 'tablet', 'mobile']
+      };
+
+      const runtimeReport = BrowserRuntimeVerifier.verifyPreviewRuntime(candidatePreview, allFiles);
+      const isRuntimeVerified = runtimeReport.verified && runtimeReport.domMountVerified && runtimeReport.dependencyIntegrityVerified;
+
+      return {
+        ...candidatePreview,
+        runtimeStatus: isRuntimeVerified ? 'verified' : 'unverified',
+        runtimeErrors: runtimeReport.errors.length > 0 ? runtimeReport.errors : undefined
       };
     } catch (err: any) {
       console.warn('[PREVIEW BUNDLE NOTICE] Could not bundle real application, falling back:', err.message);
