@@ -209,6 +209,13 @@ describe('Task State Machine, Dependencies & Retry Exhaustion', () => {
   });
 
   test('Successful task marks completed and clears active errors', () => {
+    db.setFile(buildId, {
+      path: 'src/success.ts',
+      content: 'export const success = true;',
+      version: 1,
+      history: []
+    });
+
     const task = TaskManager.createNewTask(buildId, {
       title: 'Successful Task',
       description: 'Completes cleanly',
@@ -224,6 +231,13 @@ describe('Task State Machine, Dependencies & Retry Exhaustion', () => {
   });
 
   test('Dependency-aware scheduling blocks child tasks until prerequisites complete', () => {
+    db.setFile(buildId, {
+      path: 'src/db/schema.ts',
+      content: 'export const schema = {};',
+      version: 1,
+      history: []
+    });
+
     const parentTask = TaskManager.createNewTask(buildId, {
       title: 'Database Schema Design',
       description: 'Create initial database schema',

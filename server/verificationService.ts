@@ -328,10 +328,10 @@ export class HonestVerificationService {
 
     if (build.status === 'stopped' || build.status === 'failed') {
       verdict = 'failed';
-    } else if (inProgressTasks > 0) {
-      verdict = 'in_progress';
     } else if (!hasFiles || !compilationIsPassing || failedTasks > 0 || testReport.failed > 0 || !secPassed || failedReqCount > 0 || knownDefects.length > 0) {
       verdict = 'failed';
+    } else if (inProgressTasks > 0) {
+      verdict = 'in_progress';
     } else if (
       compilationIsPassing &&
       runtimeIsPassing &&

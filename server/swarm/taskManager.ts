@@ -326,7 +326,9 @@ export class TaskManager {
       details: verification.errors.length > 0 ? verification.errors.join('; ') : undefined,
       command: taskResult?.executionEvidence?.command,
       exitCode: taskResult?.executionEvidence?.exitCode,
-      durationMs: taskResult?.executionEvidence?.durationMs
+      durationMs: taskResult?.executionEvidence?.durationMs,
+      output: taskResult?.executionEvidence?.output,
+      executionSource: taskResult?.executionEvidence?.executionSource
     };
 
     const updatedHistory = [...(task.verificationHistory || []), newHistoryEntry];

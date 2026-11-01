@@ -18,7 +18,8 @@ export type AgentRole =
   | 'qa_testing_specialist'
   | 'debugging_specialist'
   | 'security_specialist'
-  | 'devops_release_specialist';
+  | 'devops_release_specialist'
+  | 'fullstack_developer';
 
 export interface AgentSpec {
   role: AgentRole;

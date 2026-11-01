@@ -393,10 +393,12 @@ export class IntegrationAgent {
       onImportAnalyzed();
       const targetFile = this.findMatchingFile(resolvedPath, filesByCleanPath);
       const cleanTarget = resolvedPath.replace(/^\/+/, '');
+      const targetCanonical = targetFile ? targetFile.path.replace(/^\/+/, '') : cleanTarget;
 
-      if (importGraph.has(cleanSourcePath)) {
-        importGraph.get(cleanSourcePath)!.add(cleanTarget.replace(/\.(tsx|ts|jsx|js|mjs|cjs)$/, ''));
+      if (!importGraph.has(cleanSourcePath)) {
+        importGraph.set(cleanSourcePath, new Set());
       }
+      importGraph.get(cleanSourcePath)!.add(targetCanonical);
 
       if (!targetFile) {
         issues.push({

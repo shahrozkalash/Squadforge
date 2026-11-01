@@ -18,7 +18,8 @@ export type AgentRole =
   | 'qa_testing_specialist'
   | 'debugging_specialist'
   | 'security_specialist'
-  | 'devops_release_specialist';
+  | 'devops_release_specialist'
+  | 'fullstack_developer';
 
 export interface AgentSpec {
   role: AgentRole;
@@ -182,6 +183,8 @@ export interface Task {
     command?: string;
     exitCode?: number;
     durationMs?: number;
+    output?: string;
+    executionSource?: string;
   }>;
   taskResult?: AgentTaskResult;
 }
@@ -189,8 +192,17 @@ export interface Task {
 export interface TaskExecutionEvidence {
   command?: string;
   exitCode?: number;
+  startedAt?: number;
+  completedAt?: number;
   durationMs?: number;
   output?: string;
+  executionSource?: string;
+  testResults?: Array<{
+    name: string;
+    passed: boolean;
+    status: 'passed' | 'failed' | 'skipped' | 'not_run';
+    error?: string;
+  }>;
   filesVerified?: Array<{ path: string; exists: boolean; modified: boolean }>;
   verifiedAt: number;
 }
@@ -601,7 +613,7 @@ export interface PatchEdit {
 }
 
 export interface PatchAction {
-  action: 'patch_file';
+  action?: 'patch_file';
   path: string;
   edits: PatchEdit[];
   taskId?: string;

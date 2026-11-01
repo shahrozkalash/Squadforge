@@ -12,6 +12,7 @@ export type DiffLineType = 'unchanged' | 'added' | 'deleted' | 'modified' | 'rev
 
 export interface DiffLine {
   id: string;
+  lineId: string;
   type: DiffLineType;
   oldLineNumber?: number;
   newLineNumber?: number;
@@ -149,7 +150,7 @@ export type DiffHunkRaw =
  * Tokenizes the code while strictly preserving string and template literal contents.
  * Normalizes surrounding whitespace and optional trailing statement semicolons.
  */
-export function normalizeCodeForComparison(line: string): string {
+export function normalizeCodeForComparison(line: string, ignoreComments: boolean = true): string {
   if (!line || !line.trim()) return '';
 
   try {
@@ -159,10 +160,11 @@ export function normalizeCodeForComparison(line: string): string {
 
     while ((match = regex.exec(line)) !== null) {
       const raw = match[0];
-      if (raw.startsWith('//')) {
-        tokens.push(`__CMT__${raw.slice(2).trim().replace(/\s+/g, ' ')}`);
-      } else if (raw.startsWith('/*')) {
-        tokens.push(`__CMT__${raw.slice(2, -2).trim().replace(/\s+/g, ' ')}`);
+      if (raw.startsWith('//') || raw.startsWith('/*')) {
+        if (!ignoreComments) {
+          const content = raw.startsWith('//') ? raw.slice(2) : raw.slice(2, -2);
+          tokens.push(`__CMT__${content.trim().replace(/\s+/g, ' ')}`);
+        }
       } else if (raw.startsWith('"') || raw.startsWith("'")) {
         // Content inside string without outer quotes
         tokens.push(`__STR__${raw.slice(1, -1)}`);
@@ -209,33 +211,11 @@ export function isFormattingOnlyChange(oldStr: string, newStr: string): boolean 
 
 /**
  * Computes Longest Common Subsequence (LCS) matrix for two line arrays.
- * Retained for backwards compatibility, with memory protection on huge line counts.
+ * Retained for backwards compatibility. Returns the complete dynamic programming matrix.
  */
 export function computeLCS(a: string[], b: string[]): number[][] {
   const m = a.length;
   const n = b.length;
-
-  // Protect against massive memory allocations on unbounded matrices
-  if (m * n > 4000000) {
-    const dp: number[][] = Array.from({ length: 2 }, () => new Array(n + 1).fill(0));
-    let prev = 0;
-    let curr = 1;
-    for (let i = 0; i < m; i++) {
-      for (let j = 0; j < n; j++) {
-        if (a[i] === b[j]) {
-          dp[curr][j + 1] = dp[prev][j] + 1;
-        } else {
-          dp[curr][j + 1] = Math.max(dp[prev][j + 1], dp[curr][j]);
-        }
-      }
-      prev = curr;
-      curr = 1 - curr;
-    }
-    // Return a dummy matrix where dp[m][n] has the length
-    const resultMatrix = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
-    resultMatrix[m][n] = dp[prev][n];
-    return resultMatrix;
-  }
 
   const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = 0; i < m; i++) {
@@ -252,27 +232,55 @@ export function computeLCS(a: string[], b: string[]): number[][] {
 }
 
 /**
+ * Memory-efficient O(min(m, n)) calculation of LCS length without unbounded matrix allocations.
+ */
+export function computeLCSLength(a: string[], b: string[]): number {
+  const m = a.length;
+  const n = b.length;
+  if (m === 0 || n === 0) return 0;
+  let prev = new Int32Array(n + 1);
+  let curr = new Int32Array(n + 1);
+  for (let i = 0; i < m; i++) {
+    for (let j = 0; j < n; j++) {
+      if (a[i] === b[j]) {
+        curr[j + 1] = prev[j] + 1;
+      } else {
+        curr[j + 1] = Math.max(prev[j + 1], curr[j]);
+      }
+    }
+    const temp = prev;
+    prev = curr;
+    curr = temp;
+    curr.fill(0);
+  }
+  return prev[n];
+}
+
+/**
  * Computes difference using Myers diff algorithm with adaptive selection:
+ * - Accepts either newline-delimited strings or pre-split string arrays
  * - Prefix & suffix line trimming (eliminates 90%+ of work on typical file edits)
  * - Fast path for identical sequences
  * - Memory-efficient O(ND) Myers algorithm
  * - Bounded search for very large files to prevent catastrophic memory usage
  */
-export function computeMyersDiff(a: string[], b: string[]): DiffHunkRaw[] {
-  const n = a.length;
-  const m = b.length;
+export function computeMyersDiff(a: string | string[], b: string | string[]): DiffHunkRaw[] {
+  const linesA = typeof a === 'string' ? (a.length === 0 ? [] : a.split('\n')) : a;
+  const linesB = typeof b === 'string' ? (b.length === 0 ? [] : b.split('\n')) : b;
+  const n = linesA.length;
+  const m = linesB.length;
 
   if (n === 0 && m === 0) return [];
   if (n === 0) {
-    return b.map((text, idx) => ({ type: 'add', newLine: idx + 1, text }));
+    return linesB.map((text, idx) => ({ type: 'add', newLine: idx + 1, text }));
   }
   if (m === 0) {
-    return a.map((text, idx) => ({ type: 'delete', oldLine: idx + 1, text }));
+    return linesA.map((text, idx) => ({ type: 'delete', oldLine: idx + 1, text }));
   }
 
   // 1. Common prefix trimming
   let prefix = 0;
-  while (prefix < n && prefix < m && a[prefix] === b[prefix]) {
+  while (prefix < n && prefix < m && linesA[prefix] === linesB[prefix]) {
     prefix++;
   }
 
@@ -281,7 +289,7 @@ export function computeMyersDiff(a: string[], b: string[]): DiffHunkRaw[] {
   while (
     suffix < n - prefix &&
     suffix < m - prefix &&
-    a[n - 1 - suffix] === b[m - 1 - suffix]
+    linesA[n - 1 - suffix] === linesB[m - 1 - suffix]
   ) {
     suffix++;
   }
@@ -292,7 +300,7 @@ export function computeMyersDiff(a: string[], b: string[]): DiffHunkRaw[] {
       type: 'unchanged',
       oldLine: i + 1,
       newLine: i + 1,
-      text: a[i],
+      text: linesA[i],
     });
   }
 
@@ -304,12 +312,12 @@ export function computeMyersDiff(a: string[], b: string[]): DiffHunkRaw[] {
       type: 'unchanged',
       oldLine: aIdx + 1,
       newLine: bIdx + 1,
-      text: a[aIdx],
+      text: linesA[aIdx],
     });
   }
 
-  const midA = a.slice(prefix, n - suffix);
-  const midB = b.slice(prefix, m - suffix);
+  const midA = linesA.slice(prefix, n - suffix);
+  const midB = linesB.slice(prefix, m - suffix);
   const midN = midA.length;
   const midM = midB.length;
   let midHunks: DiffHunkRaw[] = [];
@@ -757,6 +765,7 @@ export function computeAgentDiff(
 
       unifiedLines.push({
         id: `u-${rowId}`,
+        lineId: `line-${rowId}`,
         type: 'unchanged',
         oldLineNumber: current.oldLine,
         newLineNumber: current.newLine,
@@ -823,6 +832,7 @@ export function computeAgentDiff(
 
           unifiedLines.push({
             id: `u-del-${rowId}`,
+            lineId: `line-del-${rowId}`,
             type: 'deleted',
             oldLineNumber: del.oldLine,
             content: del.text,
@@ -835,6 +845,7 @@ export function computeAgentDiff(
 
           unifiedLines.push({
             id: `u-add-${rowId}`,
+            lineId: `line-add-${rowId}`,
             type: 'added',
             newLineNumber: add.newLine,
             content: add.text,
@@ -878,6 +889,7 @@ export function computeAgentDiff(
 
           unifiedLines.push({
             id: `u-${rowId}`,
+            lineId: `line-${rowId}`,
             type: 'deleted',
             oldLineNumber: del.oldLine,
             content: del.text,
@@ -909,6 +921,7 @@ export function computeAgentDiff(
 
           unifiedLines.push({
             id: `u-${rowId}`,
+            lineId: `line-${rowId}`,
             type: changeType,
             newLineNumber: add.newLine,
             content: add.text,

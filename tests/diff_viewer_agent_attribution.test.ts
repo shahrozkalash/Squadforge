@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert';
 import {
   computeLCS,
+  computeMyersDiff,
   computeHistoricalBlame,
   computeAgentDiff,
   getAgentMeta,
@@ -138,5 +139,75 @@ describe('Diff Engine & Agent Attribution', () => {
 
     const qaMeta = getAgentMeta('qa_engineer');
     assert.ok(qaMeta.badgeClass.includes('teal'));
+  });
+
+  it('property-based reconstruction invariants: additions + unchanged = new, deletions + unchanged = old', () => {
+    const testCases: Array<{ name: string; oldText: string; newText: string }> = [
+      { name: 'empty to non-empty', oldText: '', newText: 'line1\nline2\nline3' },
+      { name: 'non-empty to empty', oldText: 'line1\nline2\nline3', newText: '' },
+      { name: 'both empty', oldText: '', newText: '' },
+      { name: 'identical content', oldText: 'a\nb\nc', newText: 'a\nb\nc' },
+      { name: 'insertions at beginning', oldText: 'b\nc', newText: 'a\nb\nc' },
+      { name: 'insertions at end', oldText: 'a\nb', newText: 'a\nb\nc' },
+      { name: 'repeated identical lines', oldText: 'repeat\nrepeat\nrepeat\nfoo', newText: 'repeat\nbar\nrepeat\nrepeat' },
+      { name: 'multiline replacement', oldText: 'function oldFn() {\n  return 1;\n}', newText: 'function newFn() {\n  const x = 2;\n  return x * 2;\n}' }
+    ];
+
+    // Add 20 randomized test cases
+    const vocabulary = ['apple', 'banana', 'cherry', 'date', 'elderberry', 'fig', 'grape', 'const x = 1;', '{', '}', ''];
+    for (let seed = 0; seed < 20; seed++) {
+      const oldLen = (seed * 3) % 15;
+      const newLen = (seed * 5 + 2) % 18;
+      const oldLines: string[] = [];
+      const newLines: string[] = [];
+      for (let i = 0; i < oldLen; i++) {
+        oldLines.push(vocabulary[(seed + i * 2) % vocabulary.length]);
+      }
+      for (let j = 0; j < newLen; j++) {
+        newLines.push(vocabulary[(seed * 3 + j) % vocabulary.length]);
+      }
+      testCases.push({
+        name: `randomized_seed_${seed}`,
+        oldText: oldLines.join('\n'),
+        newText: newLines.join('\n')
+      });
+    }
+
+    for (const tc of testCases) {
+      const oldLines = tc.oldText ? tc.oldText.split('\n') : [];
+      const newLines = tc.newText ? tc.newText.split('\n') : [];
+
+      const rawHunks = computeMyersDiff(oldLines, newLines);
+
+      // Invariant 1: unchanged + add reconstructs new file in exact order
+      const reconstructedNew = rawHunks
+        .filter(h => h.type === 'unchanged' || h.type === 'add')
+        .map(h => h.text);
+      assert.deepStrictEqual(
+        reconstructedNew,
+        newLines,
+        `Reconstructed new file does not match target in test case "${tc.name}"`
+      );
+
+      // Invariant 2: unchanged + delete reconstructs old file in exact order
+      const reconstructedOld = rawHunks
+        .filter(h => h.type === 'unchanged' || h.type === 'delete')
+        .map(h => h.text);
+      assert.deepStrictEqual(
+        reconstructedOld,
+        oldLines,
+        `Reconstructed old file does not match baseline in test case "${tc.name}"`
+      );
+
+      // Invariant 3: Line numbers remain valid positive integers
+      for (const h of rawHunks) {
+        if (h.type === 'unchanged' || h.type === 'delete') {
+          assert.ok(h.oldLine >= 1 && h.oldLine <= oldLines.length, `oldLine ${h.oldLine} out of bounds in "${tc.name}"`);
+        }
+        if (h.type === 'unchanged' || h.type === 'add') {
+          assert.ok(h.newLine >= 1 && h.newLine <= newLines.length, `newLine ${h.newLine} out of bounds in "${tc.name}"`);
+        }
+      }
+    }
   });
 });

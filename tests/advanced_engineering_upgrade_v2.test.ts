@@ -49,6 +49,8 @@ describe('SquadForge Advanced Engineering Upgrade V2 Test Suite', () => {
       updatedAt: Date.now()
     };
     db.saveBuild(testBuild);
+    db.tasks.delete(testBuildId);
+    db.files.delete(testBuildId);
   });
 
   describe('1. Upgraded Diff Engine & Syntax-Aware Formatting Detection', () => {

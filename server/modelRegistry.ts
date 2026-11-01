@@ -120,6 +120,18 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
       'Prepare environment configurations and setup documentation',
       'Prepare Git feature branch and pull request when authorized'
     ]
+  },
+  fullstack_developer: {
+    role: 'fullstack_developer',
+    title: 'Fullstack Developer Agent',
+    description: 'Implements cohesive end-to-end features bridging frontend views, client state, and backend API routes.',
+    assignedModelId: 'gemini',
+    responsibilities: [
+      'Implement full-stack vertical slices and features',
+      'Ensure tight coupling and contracts between frontend and backend',
+      'Author component and API integration logic',
+      'Validate end-to-end user workflows'
+    ]
   }
 };
 
