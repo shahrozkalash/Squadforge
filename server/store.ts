@@ -1260,15 +1260,39 @@ export class PersistentDatabase {
     return list.find(t => t.id === taskId);
   }
 
-  addTask(buildId: string, task: Task): Task {
-    let list = this.tasks.get(buildId);
-    if (!list) {
-      list = [];
-      this.tasks.set(buildId, list);
-    }
-    list.push(task);
-    this.broadcast(buildId, 'task_added', task);
+  public mapDbRowToTask(t: any): Task {
+    return {
+      id: t.id,
+      buildId: t.build_id,
+      title: t.title,
+      description: t.description,
+      filePaths: t.file_paths ? JSON.parse(t.file_paths) : [],
+      priority: t.priority as any,
+      status: t.status as any,
+      claimedBy: t.claimed_by || null,
+      leaseExpiresAt: t.lease_expires_at || null,
+      createdAt: t.created_at,
+      completedAt: t.completed_at || undefined,
+      error: t.error || undefined,
+      isFixTask: Boolean(t.is_fix_task),
+      retryCount: t.retry_count || 0,
+      maxRetries: t.max_retries || 3,
+      lastError: t.last_error || undefined,
+      dependencies: t.dependencies ? JSON.parse(t.dependencies) : undefined,
+      assignedRole: t.assigned_role || undefined,
+      milestone: t.milestone || undefined,
+      complexity: t.complexity || undefined,
+      tokenBudget: t.token_budget || undefined,
+      actualTokensUsed: t.actual_tokens_used || 0,
+      estimatedCost: t.estimated_cost || 0.0,
+      isPaused: Boolean(t.is_paused),
+      pausedReason: t.paused_reason || undefined,
+      executionLogs: t.execution_logs ? JSON.parse(t.execution_logs) : undefined
+    };
+  }
 
+  addTask(buildId: string, task: Task): Task {
+    // 1. Database write MUST happen BEFORE cache mutation
     try {
       this.dbManager.db.prepare(`
         INSERT OR REPLACE INTO tasks (
@@ -1291,7 +1315,17 @@ export class PersistentDatabase {
       );
     } catch (err: any) {
       this.handleDatabaseWriteError('addTask', err);
+      throw err;
     }
+
+    // 2. Only mutate in-memory cache and broadcast after successful persistence
+    let list = this.tasks.get(buildId);
+    if (!list) {
+      list = [];
+      this.tasks.set(buildId, list);
+    }
+    list.push(task);
+    this.broadcast(buildId, 'task_added', task);
 
     return task;
   }
@@ -1304,18 +1338,23 @@ export class PersistentDatabase {
     const updated = { ...current, ...updates };
 
     try {
-      this.dbManager.db.prepare(`
+      // Conditional database update scoped to id and build_id
+      const res = this.dbManager.db.prepare(`
         UPDATE tasks SET
           status = ?, claimed_by = ?, lease_expires_at = ?, completed_at = ?,
           error = ?, retry_count = ?, last_error = ?, is_paused = ?, paused_reason = ?,
           actual_tokens_used = ?, estimated_cost = ?
-        WHERE id = ?
+        WHERE id = ? AND build_id = ?
       `).run(
         updated.status, updated.claimedBy || null, updated.leaseExpiresAt || null,
         updated.completedAt || null, updated.error || null, updated.retryCount || 0,
         updated.lastError || null, updated.isPaused ? 1 : 0, updated.pausedReason || null,
-        updated.actualTokensUsed || 0, updated.estimatedCost || 0.0, updated.id
+        updated.actualTokensUsed || 0, updated.estimatedCost || 0.0, taskId, buildId
       );
+
+      if (res.changes === 0) {
+        return null;
+      }
 
       // Only mutate in-memory cache and broadcast if database write succeeded
       list[index] = updated;
@@ -1330,32 +1369,50 @@ export class PersistentDatabase {
   }
 
   claimTaskAtomic(buildId: string, taskId: string, modelId: string, leaseExpiresAt: number): Task | null {
-    const list = this.getTasks(buildId);
-    const index = list.findIndex(t => t.id === taskId);
-    if (index === -1) return null;
-    const task = list[index];
-    if (task.isPaused || (task.status !== 'pending' && task.status !== 'open' && task.status !== 'retrying')) {
-      return null;
-    }
+    if (!buildId || !taskId || !modelId) return null;
+    const now = this.getTime();
 
     try {
+      // Atomic conditional update in SQLite:
+      // Validates task ID, build ID, pause state (is_paused = 0), and that status is open/pending/retrying
+      // OR status is in_progress/claimed/working with an expired lease.
       const res = this.dbManager.db.prepare(`
-        UPDATE tasks SET status = 'in_progress', claimed_by = ?, lease_expires_at = ?
-        WHERE id = ? AND is_paused = 0 AND (status IN ('pending', 'open', 'retrying'))
-      `).run(modelId, leaseExpiresAt, taskId);
+        UPDATE tasks SET 
+          status = 'in_progress', 
+          claimed_by = ?, 
+          lease_expires_at = ?
+        WHERE id = ? 
+          AND build_id = ? 
+          AND is_paused = 0 
+          AND (
+            status IN ('pending', 'open', 'retrying')
+            OR (status IN ('in_progress', 'claimed', 'working') AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
+          )
+      `).run(modelId, leaseExpiresAt, taskId, buildId, now);
 
       if (res.changes === 0) {
-        // Lost race condition in database
+        // Lost race condition in database or conditions not satisfied
         return null;
       }
 
-      const updated: Task = {
-        ...task,
-        status: 'in_progress',
-        claimedBy: modelId,
-        leaseExpiresAt
-      };
-      list[index] = updated;
+      // Mutate in-memory cache ONLY AFTER database update succeeded
+      const list = this.getTasks(buildId);
+      const index = list.findIndex(t => t.id === taskId);
+      let updated: Task;
+      if (index !== -1) {
+        updated = {
+          ...list[index],
+          status: 'in_progress',
+          claimedBy: modelId,
+          leaseExpiresAt
+        };
+        list[index] = updated;
+      } else {
+        const row = this.dbManager.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
+        updated = this.mapDbRowToTask(row);
+        list.push(updated);
+      }
+
       this.tasks.set(buildId, list);
       this.broadcast(buildId, 'task_updated', updated);
       return updated;
@@ -1371,46 +1428,30 @@ export class PersistentDatabase {
     modelId: string, 
     updates: Partial<Task>
   ): { success: boolean; task?: Task; error?: string } {
-    const list = this.getTasks(buildId);
-    const index = list.findIndex(t => t.id === taskId);
-    if (index === -1) {
-      return { success: false, error: 'Task not found' };
+    if (!buildId || !taskId || !modelId) {
+      return { success: false, error: 'buildId, taskId, and modelId are required' };
     }
-    const currentTask = list[index];
-
-    // Prevent duplicate completion events
-    if (currentTask.status === 'completed' || currentTask.status === 'done') {
-      return { success: false, error: 'Task is already completed' };
-    }
-
-    // Validate worker ownership to prevent stale workers from completing tasks
-    if (currentTask.claimedBy && currentTask.claimedBy !== modelId) {
-      return { 
-        success: false, 
-        error: `Stale worker rejected: Task ${taskId} is currently claimed by ${currentTask.claimedBy}, not ${modelId}` 
-      };
-    }
-
-    // Validate lease expiration
     const now = this.getTime();
-    if (currentTask.leaseExpiresAt && currentTask.leaseExpiresAt < now) {
-      return { 
-        success: false, 
-        error: `Stale lease rejected: Worker ${modelId} lease expired at ${new Date(currentTask.leaseExpiresAt).toISOString()}` 
-      };
-    }
-
     const updatedStatus = updates.status || 'completed';
     const updatedCompletedAt = updatedStatus === 'completed' ? (updates.completedAt || now) : null;
 
     try {
-      // Atomic conditional update in SQLite: only completes if claimed_by matches, not already completed, and lease active
+      // Ownership validation and state transition occur in the SAME conditional database update.
+      // Validates ownership (claimed_by = ?), build_id, active uncompleted status, and non-expired lease.
       const res = this.dbManager.db.prepare(`
         UPDATE tasks SET
-          status = ?, claimed_by = ?, lease_expires_at = NULL, completed_at = ?,
-          error = ?, retry_count = ?, last_error = ?,
-          actual_tokens_used = ?, estimated_cost = ?
+          status = ?, 
+          claimed_by = ?, 
+          lease_expires_at = NULL, 
+          completed_at = ?,
+          error = ?, 
+          retry_count = ?, 
+          last_error = ?,
+          actual_tokens_used = ?, 
+          estimated_cost = ?
         WHERE id = ? 
+          AND build_id = ?
+          AND is_paused = 0
           AND status IN ('pending', 'in_progress', 'claimed', 'working', 'retrying')
           AND (claimed_by = ? OR claimed_by IS NULL)
           AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
@@ -1419,31 +1460,72 @@ export class PersistentDatabase {
         updatedStatus === 'completed' ? modelId : null,
         updatedCompletedAt,
         updates.error || null,
-        updates.retryCount || currentTask.retryCount || 0,
+        updates.retryCount ?? 0,
         updates.lastError || null,
-        updates.actualTokensUsed || currentTask.actualTokensUsed || 0,
-        updates.estimatedCost || currentTask.estimatedCost || 0.0,
+        updates.actualTokensUsed ?? 0,
+        updates.estimatedCost ?? 0.0,
         taskId,
+        buildId,
         modelId,
         now
       );
 
       if (res.changes === 0) {
+        // Did not update. Query database directly (do NOT rely exclusively on in-memory state)
+        const row = this.dbManager.db.prepare(
+          'SELECT status, claimed_by, lease_expires_at, is_paused FROM tasks WHERE id = ? AND build_id = ?'
+        ).get(taskId, buildId) as any;
+
+        if (!row) {
+          return { success: false, error: `Task not found` };
+        }
+        if (row.is_paused) {
+          return { success: false, error: `Task ${taskId} is currently paused` };
+        }
+        if (row.status === 'completed' || row.status === 'done') {
+          return { success: false, error: 'Task is already completed' };
+        }
+        if (row.status === 'failed' || row.status === 'cancelled') {
+          return { success: false, error: `Task cannot be completed because current status is ${row.status}` };
+        }
+        if (row.claimed_by && row.claimed_by !== modelId) {
+          return { 
+            success: false, 
+            error: `Stale worker rejected: Task ${taskId} is currently claimed by ${row.claimed_by}, not ${modelId}` 
+          };
+        }
+        if (row.lease_expires_at && row.lease_expires_at < now) {
+          return { 
+            success: false, 
+            error: `Stale lease rejected: Worker ${modelId} lease expired at ${new Date(row.lease_expires_at).toISOString()}` 
+          };
+        }
         return { 
           success: false, 
-          error: `Task completion rejected: Task was modified, reassigned, or expired in database` 
+          error: 'Task completion rejected: Task state, ownership, or lease condition not satisfied' 
         };
       }
 
-      const updated: Task = {
-        ...currentTask,
-        ...updates,
-        status: updatedStatus,
-        leaseExpiresAt: null,
-        completedAt: updatedCompletedAt || undefined
-      };
+      // Successful DB update! Mutate in-memory cache and broadcast
+      const list = this.getTasks(buildId);
+      const index = list.findIndex(t => t.id === taskId);
+      let updated: Task;
+      if (index !== -1) {
+        updated = {
+          ...list[index],
+          ...updates,
+          status: updatedStatus,
+          claimedBy: updatedStatus === 'completed' ? modelId : null,
+          leaseExpiresAt: null,
+          completedAt: updatedCompletedAt || undefined
+        };
+        list[index] = updated;
+      } else {
+        const row = this.dbManager.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
+        updated = this.mapDbRowToTask(row);
+        list.push(updated);
+      }
 
-      list[index] = updated;
       this.tasks.set(buildId, list);
       this.broadcast(buildId, 'task_updated', updated);
 
@@ -1451,6 +1533,58 @@ export class PersistentDatabase {
     } catch (err: any) {
       this.handleDatabaseWriteError('completeTaskAtomic', err);
       return { success: false, error: err.message || 'Database error during task completion' };
+    }
+  }
+
+  failTaskAtomic(
+    buildId: string,
+    taskId: string,
+    modelId: string,
+    error: string
+  ): { success: boolean; task?: Task; error?: string } {
+    const now = this.getTime();
+    try {
+      const res = this.dbManager.db.prepare(`
+        UPDATE tasks SET
+          status = 'failed',
+          claimed_by = NULL,
+          lease_expires_at = NULL,
+          error = ?,
+          last_error = ?
+        WHERE id = ?
+          AND build_id = ?
+          AND status IN ('pending', 'in_progress', 'claimed', 'working', 'retrying')
+          AND (claimed_by = ? OR claimed_by IS NULL OR (lease_expires_at IS NOT NULL AND lease_expires_at < ?))
+      `).run(error, error, taskId, buildId, modelId, now);
+
+      if (res.changes === 0) {
+        return { success: false, error: `Cannot fail task ${taskId}: task not found, already completed, or claimed by another active worker` };
+      }
+
+      const list = this.getTasks(buildId);
+      const index = list.findIndex(t => t.id === taskId);
+      let updated: Task;
+      if (index !== -1) {
+        updated = {
+          ...list[index],
+          status: 'failed',
+          claimedBy: null,
+          leaseExpiresAt: null,
+          error,
+          lastError: error
+        };
+        list[index] = updated;
+      } else {
+        const row = this.dbManager.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
+        updated = this.mapDbRowToTask(row);
+        list.push(updated);
+      }
+      this.tasks.set(buildId, list);
+      this.broadcast(buildId, 'task_updated', updated);
+      return { success: true, task: updated };
+    } catch (err: any) {
+      this.handleDatabaseWriteError('failTaskAtomic', err);
+      return { success: false, error: err.message || 'Database error during failTask' };
     }
   }
 
@@ -1518,6 +1652,230 @@ export class PersistentDatabase {
       }
     }
     return existed;
+  }
+
+  // --- Atomic File Lease Management ---
+
+  acquireFileLeasesAtomic(
+    buildId: string, 
+    modelId: string, 
+    filePaths: string[], 
+    durationMs: number
+  ): { success: boolean; lockedBy?: string; acquiredPaths: string[]; error?: string } {
+    if (!buildId || !modelId || !filePaths || filePaths.length === 0) {
+      return { success: false, acquiredPaths: [], error: 'buildId, modelId, and filePaths are required' };
+    }
+    const now = this.getTime();
+    const sortedPaths = [...new Set(filePaths)].sort();
+    const expiry = now + durationMs;
+
+    // 1. Clean expired leases in database and memory
+    try {
+      this.dbManager.db.prepare(`
+        UPDATE project_files 
+        SET lease_owner = NULL, lease_expires_at = NULL 
+        WHERE build_id = ? AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+      `).run(buildId, now);
+      
+      const fileMap = this.getFilesMap(buildId);
+      for (const file of fileMap.values()) {
+        if (file.leaseExpiresAt && file.leaseExpiresAt <= now) {
+          file.leaseOwner = null;
+          file.leaseExpiresAt = null;
+        }
+      }
+    } catch (err: any) {
+      this.handleDatabaseWriteError('sweepExpiredFileLeases', err);
+    }
+
+    return this.dbManager.transaction(() => {
+      // 2. Validate that NO requested file is actively leased by another model
+      for (const p of sortedPaths) {
+        const row = this.dbManager.db.prepare(
+          'SELECT lease_owner, lease_expires_at FROM project_files WHERE build_id = ? AND path = ?'
+        ).get(buildId, p) as any;
+
+        if (row && row.lease_owner && row.lease_owner !== modelId) {
+          if (row.lease_expires_at && row.lease_expires_at > now) {
+            // Cannot acquire: file is actively held by another agent.
+            // Returning early rolls back the transaction, guaranteeing zero partial acquisitions.
+            return { success: false, lockedBy: row.lease_owner, acquiredPaths: [] };
+          }
+        }
+      }
+
+      // 3. Grant leases atomically in database (upserting placeholder if file doesn't exist yet)
+      const acquired: string[] = [];
+      for (const p of sortedPaths) {
+        const fileId = `${buildId}:${p}`;
+        this.dbManager.db.prepare(`
+          INSERT INTO project_files (
+            id, build_id, path, content, version, owner_model,
+            lease_owner, lease_expires_at, created_at, updated_at
+          ) VALUES (?, ?, ?, '', 0, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET 
+            lease_owner = excluded.lease_owner,
+            lease_expires_at = excluded.lease_expires_at,
+            updated_at = excluded.updated_at
+        `).run(fileId, buildId, p, modelId, modelId, expiry, now, now);
+
+        acquired.push(p);
+      }
+
+      // 4. Update in-memory file objects
+      for (const p of acquired) {
+        let file = this.getFile(buildId, p);
+        if (!file) {
+          file = {
+            path: p,
+            content: '',
+            version: 0,
+            ownerModel: modelId,
+            history: [],
+            leaseOwner: modelId,
+            leaseExpiresAt: expiry,
+            createdAt: now,
+            updatedAt: now
+          };
+          this.getFilesMap(buildId).set(p, file);
+        } else {
+          file.leaseOwner = modelId;
+          file.leaseExpiresAt = expiry;
+          file.updatedAt = now;
+        }
+      }
+
+      return { success: true, acquiredPaths: acquired };
+    });
+  }
+
+  renewFileLeasesAtomic(
+    buildId: string,
+    modelId: string,
+    filePaths: string[],
+    durationMs: number
+  ): { success: boolean; error?: string; renewedPaths: string[] } {
+    if (!buildId || !modelId || !filePaths || filePaths.length === 0) {
+      return { success: false, error: 'buildId, modelId, and filePaths are required', renewedPaths: [] };
+    }
+    const now = this.getTime();
+    const sortedPaths = [...new Set(filePaths)].sort();
+    const expiry = now + durationMs;
+
+    return this.dbManager.transaction(() => {
+      // 1. Verify all files exist, are currently owned by modelId, and have not expired
+      for (const p of sortedPaths) {
+        const row = this.dbManager.db.prepare(
+          'SELECT lease_owner, lease_expires_at FROM project_files WHERE build_id = ? AND path = ?'
+        ).get(buildId, p) as any;
+
+        if (!row) {
+          return { success: false, error: `File ${p} not found`, renewedPaths: [] };
+        }
+        if (!row.lease_owner || row.lease_owner !== modelId) {
+          return { success: false, error: `Cannot renew lease: File ${p} is not leased by ${modelId}. Active lease held by another model or not held: ${row.lease_owner || 'none'}`, renewedPaths: [] };
+        }
+        if (!row.lease_expires_at || row.lease_expires_at <= now) {
+          return { success: false, error: `Cannot renew lease: Lease for file ${p} has already expired`, renewedPaths: [] };
+        }
+      }
+
+      // 2. Perform database renewal
+      const renewed: string[] = [];
+      for (const p of sortedPaths) {
+        const res = this.dbManager.db.prepare(`
+          UPDATE project_files 
+          SET lease_expires_at = ?, updated_at = ?
+          WHERE build_id = ? AND path = ? AND lease_owner = ? AND lease_expires_at > ?
+        `).run(expiry, now, buildId, p, modelId, now);
+
+        if (res.changes > 0) {
+          renewed.push(p);
+        }
+      }
+
+      // 3. Update in-memory cache
+      for (const p of renewed) {
+        const file = this.getFile(buildId, p);
+        if (file) {
+          file.leaseExpiresAt = expiry;
+        }
+      }
+
+      return { success: true, renewedPaths: renewed };
+    });
+  }
+
+  releaseFileLeasesAtomic(
+    buildId: string,
+    modelId: string,
+    filePaths: string[]
+  ): { success: boolean; error?: string; releasedPaths: string[] } {
+    if (!buildId || !modelId || !filePaths) {
+      return { success: false, error: 'buildId, modelId, and filePaths are required', releasedPaths: [] };
+    }
+    const now = this.getTime();
+    const sortedPaths = [...new Set(filePaths)].sort();
+    const releasedPaths: string[] = [];
+
+    return this.dbManager.transaction(() => {
+      for (const p of sortedPaths) {
+        const row = this.dbManager.db.prepare(
+          'SELECT lease_owner, lease_expires_at FROM project_files WHERE build_id = ? AND path = ?'
+        ).get(buildId, p) as any;
+
+        if (!row) continue;
+
+        // If active lease is held by another model, reject release
+        if (row.lease_owner && row.lease_owner !== modelId && (!row.lease_expires_at || row.lease_expires_at > now)) {
+          return {
+            success: false,
+            error: `Cannot release lease on ${p}: Active lease is held by ${row.lease_owner}, not ${modelId}`,
+            releasedPaths
+          };
+        }
+
+        if (row.lease_owner !== modelId) {
+          return {
+            success: false,
+            error: `Cannot release lease on ${p}: Lease is not held by ${modelId}`,
+            releasedPaths
+          };
+        }
+
+        this.dbManager.db.prepare(`
+          UPDATE project_files 
+          SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
+          WHERE build_id = ? AND path = ? AND lease_owner = ?
+        `).run(now, buildId, p, modelId);
+        releasedPaths.push(p);
+
+        const file = this.getFile(buildId, p);
+        if (file) {
+          file.leaseOwner = null;
+          file.leaseExpiresAt = null;
+        }
+      }
+
+      return { success: true, releasedPaths };
+    });
+  }
+
+  getFileLease(buildId: string, filePath: string): { modelId: string; expiresAt: number } | null {
+    const now = this.getTime();
+    const file = this.getFile(buildId, filePath);
+    if (file && file.leaseOwner && file.leaseExpiresAt && file.leaseExpiresAt > now) {
+      return { modelId: file.leaseOwner, expiresAt: file.leaseExpiresAt };
+    }
+    try {
+      const row = this.dbManager.db.prepare(
+        'SELECT lease_owner, lease_expires_at FROM project_files WHERE build_id = ? AND path = ?'
+      ).get(buildId, filePath) as any;
+      if (row && row.lease_owner && row.lease_expires_at && row.lease_expires_at > now) {
+        return { modelId: row.lease_owner, expiresAt: row.lease_expires_at };
+      }
+    } catch {}
+    return null;
   }
 
   // --- Events ---

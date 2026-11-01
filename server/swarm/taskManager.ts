@@ -382,10 +382,10 @@ export class TaskManager {
     // Separate task status (completed) from honest verification output
     const isVerificationFailed = verification.errors.length > 0 || !verification.filesVerified;
     
-    db.updateTask(buildId, taskId, {
+    // Execute atomic completion with database ownership and lease validation
+    const completeRes = db.completeTaskAtomic(buildId, taskId, modelId, {
       status: isVerificationFailed ? 'failed' : 'completed',
       completedAt: isVerificationFailed ? undefined : now,
-      leaseExpiresAt: null,
       error: isVerificationFailed ? verification.errors.join('; ') : undefined,
       taskResult: result,
       verificationOutput: {
@@ -398,6 +398,19 @@ export class TaskManager {
       },
       verificationHistory: updatedHistory
     });
+
+    if (!completeRes.success) {
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'task_rejected',
+        taskId,
+        modelId,
+        details: `${modelId} completion rejected for "${task.title}": ${completeRes.error}`
+      });
+      return;
+    }
 
     // If this was a fix task, only mark defect resolved if verification succeeded
     if (task.isFixTask && verification.verified) {
@@ -450,13 +463,8 @@ export class TaskManager {
     const task = db.getTask(buildId, taskId);
     if (!task) return;
 
-    db.updateTask(buildId, taskId, {
-      status: 'failed',
-      claimedBy: null,
-      leaseExpiresAt: null,
-      error,
-      lastError: error
-    });
+    const res = db.failTaskAtomic(buildId, taskId, modelId, error);
+    if (!res.success) return;
 
     db.addEvent({
       id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,

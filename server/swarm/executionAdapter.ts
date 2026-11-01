@@ -67,6 +67,7 @@ export interface TypeCheckReport {
   syntaxErrors?: TypeDiagnostic[];
   configErrors?: TypeDiagnostic[];
   typeErrors?: TypeDiagnostic[];
+  missingDependencies?: string[];
   totalChecked: number;
   skipReason?: string;
   durationMs?: number;
@@ -684,6 +685,66 @@ export class ExecutionAdapter {
       files = Array.isArray(buildIdOrFiles) ? buildIdOrFiles : [];
     }
 
+    const startTime = Date.now();
+
+    // Check project size and file size limits
+    let totalProjectBytes = 0;
+    for (const file of files) {
+      const byteLength = Buffer.byteLength(file.content, 'utf-8');
+      if (byteLength > this.MAX_FILE_SIZE_BYTES) {
+        const sizeErr: TypeDiagnostic = {
+          filePath: file.path,
+          line: 1,
+          column: 1,
+          code: 'TS_SIZE_LIMIT',
+          message: `File ${file.path} exceeds size limit (${byteLength} bytes > ${this.MAX_FILE_SIZE_BYTES} max)`,
+          category: 'error'
+        };
+        return {
+          status: 'failed',
+          passed: false,
+          diagnostics: [sizeErr],
+          errors: [sizeErr],
+          warnings: [],
+          syntaxErrors: [],
+          configErrors: [],
+          typeErrors: [sizeErr],
+          missingDependencies: [],
+          totalChecked: 0,
+          durationMs: Date.now() - startTime,
+          command: 'tsc --noEmit',
+          exitCode: 1
+        };
+      }
+      totalProjectBytes += byteLength;
+    }
+
+    if (totalProjectBytes > this.MAX_TOTAL_PROJECT_BYTES) {
+      const projSizeErr: TypeDiagnostic = {
+        filePath: 'project',
+        line: 1,
+        column: 1,
+        code: 'TS_PROJECT_SIZE_LIMIT',
+        message: `Total project size exceeds limit (${totalProjectBytes} bytes > ${this.MAX_TOTAL_PROJECT_BYTES} max)`,
+        category: 'error'
+      };
+      return {
+        status: 'failed',
+        passed: false,
+        diagnostics: [projSizeErr],
+        errors: [projSizeErr],
+        warnings: [],
+        syntaxErrors: [],
+        configErrors: [],
+        typeErrors: [projSizeErr],
+        missingDependencies: [],
+        totalChecked: 0,
+        durationMs: Date.now() - startTime,
+        command: 'tsc --noEmit',
+        exitCode: 1
+      };
+    }
+
     const tsFiles = files.filter(f => 
       /\.(ts|tsx)$/.test(f.path) && 
       !f.path.endsWith('.d.ts')
@@ -702,17 +763,17 @@ export class ExecutionAdapter {
         syntaxErrors: [],
         configErrors: [],
         typeErrors: [],
+        missingDependencies: [],
         totalChecked: 0,
         skipReason: 'No TypeScript (.ts, .tsx) source files found in workspace',
         command: 'tsc --noEmit'
       };
     }
 
-    const startTime = Date.now();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `squadforge_typecheck_${buildId}_`));
 
     try {
-      // 1. Write project files to isolated sandbox workspace
+      // 1. Write project files to isolated sandbox workspace with path sanitization
       for (const file of files) {
         const { valid, cleanPath } = this.sanitizeFilePath(file.path);
         if (!valid) continue;
@@ -726,7 +787,7 @@ export class ExecutionAdapter {
         const hostNodeModules = path.resolve(process.cwd(), 'node_modules');
         const sandboxNodeModules = path.join(tempDir, 'node_modules');
         if (fs.existsSync(hostNodeModules) && !fs.existsSync(sandboxNodeModules)) {
-          fs.symlinkSync(hostNodeModules, sandboxNodeModules, 'junction');
+          fs.symlinkSync(hostNodeModules, sandboxNodeModules, process.platform === 'win32' ? 'junction' : 'dir');
         }
       } catch {
         // Controlled environment continues without symlink if unsupported
@@ -758,6 +819,7 @@ export class ExecutionAdapter {
             syntaxErrors: [],
             configErrors: [cfgErr],
             typeErrors: [],
+            missingDependencies: [],
             totalChecked: 0,
             durationMs: Date.now() - startTime,
             command: 'tsc --noEmit',
@@ -765,7 +827,16 @@ export class ExecutionAdapter {
           };
         }
 
-        const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, tempDir);
+        // Prevent recursive scanning into node_modules during tsconfig parsing
+        const rawConfig = configFile.config || {};
+        const existingExclude = Array.isArray(rawConfig.exclude) ? rawConfig.exclude : [];
+        const safeExclude = Array.from(new Set([...existingExclude, 'node_modules', 'dist', 'build', '.git']));
+        const safeConfig = {
+          ...rawConfig,
+          exclude: safeExclude
+        };
+
+        const parsedConfig = ts.parseJsonConfigFileContent(safeConfig, ts.sys, tempDir);
         if (parsedConfig.errors.length > 0) {
           for (const err of parsedConfig.errors) {
             const isErr = err.category === ts.DiagnosticCategory.Error;
@@ -790,6 +861,7 @@ export class ExecutionAdapter {
               syntaxErrors: [],
               configErrors: fatalConfigErrors,
               typeErrors: [],
+              missingDependencies: [],
               totalChecked: 0,
               durationMs: Date.now() - startTime,
               command: 'tsc --noEmit',
@@ -799,13 +871,16 @@ export class ExecutionAdapter {
         }
 
         compilerOptions = {
+          skipLibCheck: parsedConfig.options.skipLibCheck !== undefined ? parsedConfig.options.skipLibCheck : true,
           ...parsedConfig.options,
           noEmit: true
         };
 
-        // Ensure baseUrl is resolved relative to tempDir if paths are configured
+        // Ensure baseUrl is resolved relative to tempDir
         if (compilerOptions.paths && !compilerOptions.baseUrl) {
           compilerOptions.baseUrl = tempDir;
+        } else if (compilerOptions.baseUrl) {
+          compilerOptions.baseUrl = path.resolve(tempDir, compilerOptions.baseUrl);
         }
 
         if (parsedConfig.fileNames && parsedConfig.fileNames.length > 0) {
@@ -844,6 +919,7 @@ export class ExecutionAdapter {
           syntaxErrors: [],
           configErrors: [],
           typeErrors: [],
+          missingDependencies: [],
           totalChecked: 0,
           skipReason: 'No resolved TypeScript source files found on disk',
           command: 'tsc --noEmit'
@@ -896,9 +972,25 @@ export class ExecutionAdapter {
 
       const typeErrors: TypeDiagnostic[] = [];
       const warnings: TypeDiagnostic[] = [];
+      const missingDependenciesSet = new Set<string>();
+
       for (const d of semanticDiags) {
         const item = formatDiag(d);
         if (!item) continue;
+
+        // Check for missing module/package imports: TS2307, TS2792, TS7016
+        const missingMatch = item.message.match(/(?:Cannot find module|Could not find a declaration file for module)\s+['"]([^'"./][^'"]*)['"]/i);
+        if (missingMatch && [2307, 2792, 7016].includes(d.code)) {
+          let pkg = missingMatch[1];
+          if (pkg.startsWith('@')) {
+            const parts = pkg.split('/');
+            pkg = parts.slice(0, 2).join('/');
+          } else {
+            pkg = pkg.split('/')[0];
+          }
+          missingDependenciesSet.add(pkg);
+        }
+
         if (item.category === 'error') {
           typeErrors.push(item);
         } else if (item.category === 'warning') {
@@ -916,6 +1008,7 @@ export class ExecutionAdapter {
         }
       }
 
+      const missingDependencies = Array.from(missingDependenciesSet);
       const errors = [...configErrors.filter(c => c.category === 'error'), ...syntaxErrors, ...typeErrors];
       const allDiagnostics = [...configErrors, ...syntaxErrors, ...typeErrors, ...warnings];
       const durationMs = Date.now() - startTime;
@@ -930,6 +1023,7 @@ export class ExecutionAdapter {
         syntaxErrors,
         configErrors: configErrors.filter(c => c.category === 'error'),
         typeErrors,
+        missingDependencies,
         totalChecked: rootFileNames.length,
         durationMs,
         command: 'tsc --noEmit',
@@ -955,6 +1049,7 @@ export class ExecutionAdapter {
         syntaxErrors: [],
         configErrors: [],
         typeErrors: [],
+        missingDependencies: [],
         totalChecked: tsFiles.length,
         durationMs: Date.now() - startTime,
         command: 'tsc --noEmit',

@@ -26,28 +26,26 @@ export class MergeManager {
   // Sequential mutex queue per build so patches are processed strictly one at a time in order
   private static patchQueues: Map<string, Promise<any>> = new Map();
 
+  // Cache of recently applied patches for duplicate prevention: buildId -> patchSignature -> { timestamp, result }
+  private static recentAppliedPatches: Map<string, Map<string, { timestamp: number; result: PatchResult }>> = new Map();
+
   /**
-   * Enqueues patch operations sequentially with automatic cleanup of idle queues
+   * Enqueues patch operations sequentially with automatic cleanup of idle queues.
+   * Chaining handles previous failures gracefully so failed operations do not leave permanent locks
+   * or corrupt subsequent merges.
    */
   static enqueuePatch<T>(buildId: string, operation: () => Promise<T>): Promise<T> {
     const previousPromise = this.patchQueues.get(buildId) || Promise.resolve();
-    const currentPromise = previousPromise.then(
-      async () => {
-        try {
-          return await operation();
-        } finally {
-          if (this.patchQueues.get(buildId) === currentPromise) {
-            this.patchQueues.delete(buildId);
-          }
-        }
-      },
-      async (err) => {
+    const executeNext = () => operation();
+
+    const currentPromise = previousPromise
+      .then(executeNext, executeNext)
+      .finally(() => {
         if (this.patchQueues.get(buildId) === currentPromise) {
           this.patchQueues.delete(buildId);
         }
-        throw err;
-      }
-    );
+      });
+
     this.patchQueues.set(buildId, currentPromise);
     return currentPromise;
   }
@@ -73,94 +71,50 @@ export class MergeManager {
   }
 
   /**
-   * Requests an exclusive lease on one or multiple files.
+   * Requests an exclusive lease on one or multiple files atomically.
    * If multiple files are requested, they MUST be acquired in alphabetical path order
-   * to strictly avoid deadlocks. Automatically sweeps expired leases first.
+   * to strictly avoid deadlocks. If ANY requested file cannot be acquired, all temporary
+   * acquisitions are completely rolled back and released.
    */
   static acquireFileLeases(
     buildId: string, 
     modelId: string, 
     filePaths: string[],
     durationMs: number = this.FILE_LEASE_DURATION_MS
-  ): { success: boolean; lockedBy?: string; acquiredPaths?: string[] } {
-    const sortedPaths = [...filePaths].sort(); // Alphabetical order to prevent deadlocks
-    const now = Date.now();
-
-    // 1. Clean expired leases first so abandoned locks do not block new work
-    this.cleanExpiredLeases(buildId);
-
-    // 2. Check if any file is actively leased by another model
-    for (const p of sortedPaths) {
-      const file = db.getFile(buildId, p);
-      if (file && file.leaseOwner && file.leaseOwner !== modelId) {
-        if (file.leaseExpiresAt && file.leaseExpiresAt > now) {
-          return { success: false, lockedBy: file.leaseOwner };
-        }
-      }
+  ): { success: boolean; lockedBy?: string; acquiredPaths: string[]; error?: string } {
+    const res = db.acquireFileLeasesAtomic(buildId, modelId, filePaths, durationMs);
+    
+    if (res.success && res.acquiredPaths.length > 0) {
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'file_leased',
+        modelId,
+        details: `${modelId} acquired refactor lease on: ${res.acquiredPaths.join(', ')} (${Math.round(durationMs / 1000)}s)`
+      });
     }
 
-    // 3. Grant lease
-    const acquiredPaths: string[] = [];
-    for (const p of sortedPaths) {
-      const file = db.getFile(buildId, p);
-      if (file) {
-        file.leaseOwner = modelId;
-        file.leaseExpiresAt = now + durationMs;
-        db.setFile(buildId, file);
-        acquiredPaths.push(p);
-      }
-    }
-
-    db.addEvent({
-      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      buildId,
-      timestamp: now,
-      type: 'file_leased',
-      modelId,
-      details: `${modelId} acquired refactor lease on: ${sortedPaths.join(', ')} (${Math.round(durationMs / 1000)}s)`
-    });
-
-    return { success: true, acquiredPaths };
+    return { 
+      success: res.success, 
+      lockedBy: res.lockedBy, 
+      acquiredPaths: res.acquiredPaths,
+      error: res.error 
+    };
   }
 
   /**
-   * Renews existing file leases held by modelId, extending their expiry
+   * Renews existing file leases held by modelId, extending their expiry.
+   * Validates that modelId holds active leases on all specified files and has not expired.
+   * An agent cannot renew another agent's lease or an expired lease.
    */
   static renewFileLeases(
     buildId: string, 
     modelId: string, 
     filePaths: string[], 
     durationMs: number = this.FILE_LEASE_DURATION_MS
-  ): { success: boolean; error?: string; renewedPaths?: string[] } {
-    const sortedPaths = [...filePaths].sort();
-    const now = Date.now();
-    const renewedPaths: string[] = [];
-
-    // Verify all leases are currently held and active for modelId
-    for (const p of sortedPaths) {
-      const file = db.getFile(buildId, p);
-      if (!file) {
-        return { success: false, error: `File ${p} not found` };
-      }
-      if (!file.leaseOwner || file.leaseOwner !== modelId) {
-        return { success: false, error: `Cannot renew lease: File ${p} is not leased by ${modelId}` };
-      }
-      if (!file.leaseExpiresAt || file.leaseExpiresAt <= now) {
-        return { success: false, error: `Cannot renew lease: Lease for file ${p} has already expired` };
-      }
-    }
-
-    for (const p of sortedPaths) {
-      const file = db.getFile(buildId, p);
-      if (file) {
-        file.leaseOwner = modelId;
-        file.leaseExpiresAt = now + durationMs;
-        db.setFile(buildId, file);
-        renewedPaths.push(p);
-      }
-    }
-
-    return { success: true, renewedPaths };
+  ): { success: boolean; error?: string; renewedPaths: string[] } {
+    return db.renewFileLeasesAtomic(buildId, modelId, filePaths, durationMs);
   }
 
   /**
@@ -170,57 +124,25 @@ export class MergeManager {
    * 1. Mutual Exclusion: In-process Promise serialization (`patchQueues` Map keyed by buildId) ensures
    *    patches, creations, deletions, and batch actions are executed sequentially per build.
    * 2. Storage Consistency: SQLite in Write-Ahead-Logging (WAL) mode provides single-writer transactional safety.
-   * 3. File Leases: In-memory and SQLite-backed lease expiration timestamps (`leaseOwner`, `leaseExpiresAt`).
+   * 3. File Leases: SQLite transaction-backed atomic lease acquisition, renewal, and release.
    * 
-   * DISTRIBUTED DEPLOYMENT LIMITATIONS:
-   * If SquadForge is scaled horizontally across multiple instances, nodes, or serverless containers:
-   * - In-memory `patchQueues` are local to a single Node process and will NOT coordinate across instances.
-   * - Lease sweeps and in-memory caches will experience split-brain conditions without centralized coordination.
-   * - Horizontally scaled deployments REQUIRE an external distributed lock coordinator, such as:
-   *   - Redis distributed locking via Redlock algorithm (or `redsync`), or
-   *   - PostgreSQL transactional advisory locks (`pg_advisory_xact_lock`), or
-   *   - Consul/Etcd distributed KV mutexes.
-   * Currently, SquadForge guarantees strict atomic safety and lease exclusivity within single-node multi-threaded
-   * or asynchronous swarm execution environments.
+   * CRITICAL DISTRIBUTED DEPLOYMENT LIMITATIONS:
+   * The current in-memory queue and lease coordination is single-process only. It does NOT claim multi-instance
+   * or distributed locking safety. If SquadForge is scaled horizontally across multiple Node.js instances:
+   * - In-memory `patchQueues` are local to each process and will not synchronize across instances.
+   * - True distributed deployment requires external coordination (e.g., Redis Redlock, Postgres advisory locks).
    */
 
   /**
-   * Releases file leases held by a model with owner validation and expired lease sweeping
+   * Releases file leases held by a model with owner validation and atomic database safety.
+   * An agent cannot release another agent's lease.
    */
   static releaseFileLeases(
     buildId: string, 
     modelId: string, 
     filePaths: string[]
   ): { success: boolean; error?: string; releasedPaths: string[] } {
-    const sortedPaths = [...filePaths].sort();
-    const releasedPaths: string[] = [];
-
-    // Sweeps expired leases first
-    this.cleanExpiredLeases(buildId);
-
-    for (const p of sortedPaths) {
-      const file = db.getFile(buildId, p);
-      if (!file) continue;
-
-      // If active lease is owned by another model, reject release
-      const now = Date.now();
-      if (file.leaseOwner && file.leaseOwner !== modelId && (!file.leaseExpiresAt || file.leaseExpiresAt > now)) {
-        return {
-          success: false,
-          error: `Cannot release lease on ${p}: Active lease is held by ${file.leaseOwner}, not ${modelId}`,
-          releasedPaths
-        };
-      }
-
-      if (file.leaseOwner === modelId) {
-        file.leaseOwner = null;
-        file.leaseExpiresAt = null;
-        db.setFile(buildId, file);
-        releasedPaths.push(p);
-      }
-    }
-
-    return { success: true, releasedPaths };
+    return db.releaseFileLeasesAtomic(buildId, modelId, filePaths);
   }
 
   /**
@@ -367,24 +289,58 @@ export class MergeManager {
       };
     }
 
-    // Check if file is leased by someone else
+    // Check lease ownership and expiration
     const now = Date.now();
-    if (file.leaseOwner && file.leaseOwner !== modelId && file.leaseExpiresAt && file.leaseExpiresAt > now) {
-      const error = `File is currently locked under refactor lease by ${file.leaseOwner}. Lease expires in ${Math.round((file.leaseExpiresAt - now) / 1000)}s.`;
-      db.addEvent({
-        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        buildId,
-        timestamp: now,
-        type: 'patch_rejected',
-        modelId,
-        filePath: cleanPath,
-        details: `Rejected patch from ${modelId}: File leased by ${file.leaseOwner}`
-      });
+    if (file.leaseOwner) {
+      if (file.leaseOwner !== modelId && file.leaseExpiresAt && file.leaseExpiresAt > now) {
+        const error = `File is currently locked under refactor lease by ${file.leaseOwner}. Lease expires in ${Math.round((file.leaseExpiresAt - now) / 1000)}s.`;
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected patch from ${modelId}: File leased by ${file.leaseOwner}`
+        });
+        return {
+          success: false,
+          filePath: cleanPath,
+          error,
+          currentContent: file.content
+        };
+      }
+      if (file.leaseOwner === modelId && file.leaseExpiresAt && file.leaseExpiresAt <= now) {
+        const error = `Stale lease rejected: Lease for file ${cleanPath} expired ${Math.round((now - file.leaseExpiresAt) / 1000)}s ago. Renew your lease before applying edits.`;
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected patch from ${modelId}: Lease expired`
+        });
+        return {
+          success: false,
+          filePath: cleanPath,
+          error,
+          currentContent: file.content
+        };
+      }
+    }
+
+    // Duplicate patch prevention (idempotent handling of retried edits)
+    const patchSignature = `${modelId}::${cleanPath}::${action.expectedVersion !== undefined ? `v${action.expectedVersion}::` : ''}${JSON.stringify(action.edits)}`;
+    let buildPatches = this.recentAppliedPatches.get(buildId);
+    if (!buildPatches) {
+      buildPatches = new Map();
+      this.recentAppliedPatches.set(buildId, buildPatches);
+    }
+    const recent = buildPatches.get(patchSignature);
+    if (recent && (now - recent.timestamp) < 15000 && recent.result.success) {
       return {
-        success: false,
-        filePath: cleanPath,
-        error,
-        currentContent: file.content
+        ...recent.result
       };
     }
 
@@ -509,12 +465,15 @@ export class MergeManager {
       details: `${modelId} patched ${cleanPath} (v${newVersionNum})`
     });
 
-    return {
+    const patchResult: PatchResult = {
       success: true,
       filePath: cleanPath,
       version: newVersionNum,
       currentContent: content
     };
+
+    buildPatches.set(patchSignature, { timestamp: now, result: patchResult });
+    return patchResult;
   }
 
   /**
