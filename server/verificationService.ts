@@ -111,6 +111,12 @@ export class HonestVerificationService {
       }
     }
 
+    if (typeReport.missingDependencies && typeReport.missingDependencies.length > 0) {
+      for (const dep of typeReport.missingDependencies) {
+        knownDefects.push(`Missing dependency: Package "${dep}" is required by source code but not installed or declared.`);
+      }
+    }
+
     // Security audit check
     const secPassed = execResult.securityAudit.passed;
     checks.push({
@@ -165,8 +171,9 @@ export class HonestVerificationService {
       reasonIfSkipped: buildReport.status === 'skipped' ? 'No standalone bundle entry point identified' : undefined
     });
 
-    if (!buildReport.passed && buildReport.status === 'failed') {
-      for (const err of buildReport.errors) {
+    if (!buildReport.passed || buildReport.status === 'failed') {
+      const errList = (buildReport.errors && buildReport.errors.length > 0) ? buildReport.errors : ['Bundle compilation error'];
+      for (const err of errList) {
         knownDefects.push(`Production build error: ${err}`);
       }
     }
@@ -395,6 +402,12 @@ export class HonestVerificationService {
     } else if (hasTsFiles && typeStatus === 'failed') {
       verdict = 'failed';
       verdictExplanation = `Verification failed: ${typeReport.errors.length} TypeScript type error(s) detected.`;
+    } else if (buildReport.status === 'failed' || buildReport.passed === false) {
+      verdict = 'failed';
+      verdictExplanation = `Verification failed: Production build failed (${buildReport.errors?.join('; ') || 'Bundle compilation error'}).`;
+    } else if (typeReport.missingDependencies && typeReport.missingDependencies.length > 0) {
+      verdict = 'failed';
+      verdictExplanation = `Verification failed: Missing required dependencies: ${typeReport.missingDependencies.join(', ')}.`;
     } else if (!secPassed) {
       verdict = 'failed';
       verdictExplanation = 'Verification failed: Security audit detected critical security findings or hardcoded secrets.';

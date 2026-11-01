@@ -398,6 +398,16 @@ export class ExecutionAdapter {
         errors.push(`Invalid package.json: ${err.message}`);
       }
     }
+
+    const tsconfigFile = files.find(f => f.path === 'tsconfig.json');
+    if (tsconfigFile) {
+      try {
+        JSON.parse(tsconfigFile.content);
+      } catch (err: any) {
+        errors.push(`Invalid tsconfig.json: ${err.message}`);
+      }
+    }
+
     return errors;
   }
 
@@ -505,7 +515,17 @@ export class ExecutionAdapter {
       const failed = testDetails.filter(t => !t.passed && t.status !== 'skipped').length;
       const skipped = testDetails.filter(t => t.status === 'skipped').length;
 
-      const overallStatus = runResult.status === 0 && failed === 0 ? 'passed' : 'failed';
+      let overallStatus: 'passed' | 'failed' | 'skipped';
+      if (failed > 0 || runResult.status !== 0) {
+        overallStatus = 'failed';
+      } else if (passed > 0) {
+        overallStatus = 'passed';
+      } else if (skipped > 0 || testDetails.length === 0) {
+        // Skipped tests are NEVER treated as passed
+        overallStatus = 'skipped';
+      } else {
+        overallStatus = 'failed';
+      }
 
       return {
         status: overallStatus,
@@ -552,11 +572,11 @@ export class ExecutionAdapter {
 
     for (const line of lines) {
       // TAP / node:test format: 'ok 1 - test description' or 'not ok 2 - test description'
-      const okMatch = line.match(/^\s*(ok|not ok)\s+\d+\s+-\s+(.+?)(?:\s+#\s+skip)?$/i);
+      const okMatch = line.match(/^\s*(ok|not ok)\s+\d+\s+-\s+(.+?)(?:\s+#\s+(?:skip|todo).*)?$/i);
       if (okMatch) {
         const isOk = okMatch[1].toLowerCase() === 'ok';
         const name = okMatch[2].trim();
-        const isSkipped = line.includes('# skip');
+        const isSkipped = /#\s*(?:skip|todo)/i.test(line);
 
         results.push({
           name,
@@ -570,15 +590,16 @@ export class ExecutionAdapter {
     // Fallback: if TAP parser didn't catch individual tests, extract test('...') declarations
     if (results.length === 0) {
       for (const tf of testFiles) {
-        const matches = tf.content.matchAll(/(?:test|it)\s*\(\s*['"]([^'"]+)['"]/g);
+        const matches = tf.content.matchAll(/(?:test|it)(?:\.(skip|only))?\s*\(\s*['"]([^'"]+)['"]/g);
         for (const m of matches) {
-          const name = m[1];
+          const isSkipped = m[1] === 'skip';
+          const name = m[2];
           const hasError = stdout.includes(name) && (stdout.includes('fail') || stderr.includes('Error'));
           results.push({
             name,
-            passed: !hasError,
-            status: hasError ? 'failed' : 'passed',
-            message: hasError ? 'Execution failure reported in test output' : undefined
+            passed: !hasError && !isSkipped,
+            status: isSkipped ? 'skipped' : (hasError ? 'failed' : 'passed'),
+            message: isSkipped ? 'Test marked as skipped' : (hasError ? 'Execution failure reported in test output' : undefined)
           });
         }
       }
@@ -892,6 +913,7 @@ export class ExecutionAdapter {
           target: ts.ScriptTarget.ES2022,
           module: ts.ModuleKind.ESNext,
           moduleResolution: ts.ModuleResolutionKind.Bundler,
+          allowImportingTsExtensions: true,
           jsx: ts.JsxEmit.ReactJSX,
           skipLibCheck: true,
           noEmit: true,
@@ -1008,11 +1030,71 @@ export class ExecutionAdapter {
         }
       }
 
+      // Explicitly detect 3rd-party dependencies imported in source files that are not declared or installed
+      const packageJsonFile = files.find(f => f.path === 'package.json');
+      let declaredDeps = new Set<string>();
+      if (packageJsonFile) {
+        try {
+          const pkgObj = JSON.parse(packageJsonFile.content);
+          declaredDeps = new Set([
+            ...Object.keys(pkgObj.dependencies || {}),
+            ...Object.keys(pkgObj.devDependencies || {}),
+            ...Object.keys(pkgObj.peerDependencies || {})
+          ]);
+        } catch {}
+      }
+
+      const nodeBuiltins = new Set([
+        'fs', 'fs/promises', 'path', 'os', 'crypto', 'http', 'https', 'stream', 'events',
+        'util', 'buffer', 'child_process', 'cluster', 'dgram', 'dns', 'net', 'readline',
+        'tls', 'url', 'zlib', 'assert', 'assert/strict', 'test', 'node:test', 'node:assert', 'node:assert/strict'
+      ]);
+
+      for (const file of files) {
+        if (!/\.(ts|tsx|js|jsx)$/.test(file.path)) continue;
+        const importMatches = file.content.matchAll(/(?:import|from|require)\s*\(?['"]([^'"\r\n]+)['"]\)?/g);
+        for (const match of importMatches) {
+          const importPath = match[1];
+          if (importPath.startsWith('.') || importPath.startsWith('/') || importPath.startsWith('node:')) {
+            continue;
+          }
+          let pkgName = importPath;
+          if (pkgName.startsWith('@')) {
+            pkgName = pkgName.split('/').slice(0, 2).join('/');
+          } else {
+            pkgName = pkgName.split('/')[0];
+          }
+
+          if (nodeBuiltins.has(pkgName) || nodeBuiltins.has(importPath)) {
+            continue;
+          }
+
+          const inSandboxOrHost = fs.existsSync(path.join(tempDir, 'node_modules', pkgName)) ||
+                                  fs.existsSync(path.resolve(process.cwd(), 'node_modules', pkgName));
+
+          if (!inSandboxOrHost && !declaredDeps.has(pkgName)) {
+            missingDependenciesSet.add(pkgName);
+            const alreadyHasError = typeErrors.some(e => e.message.includes(pkgName));
+            if (!alreadyHasError) {
+              const missingDiag: TypeDiagnostic = {
+                filePath: file.path,
+                line: 1,
+                column: 1,
+                code: 'TS2307_MISSING_DEPENDENCY',
+                message: `Missing dependency: Cannot find module '${pkgName}' or its corresponding type declarations. Package is imported but not installed or declared in package.json.`,
+                category: 'error'
+              };
+              typeErrors.push(missingDiag);
+            }
+          }
+        }
+      }
+
       const missingDependencies = Array.from(missingDependenciesSet);
       const errors = [...configErrors.filter(c => c.category === 'error'), ...syntaxErrors, ...typeErrors];
       const allDiagnostics = [...configErrors, ...syntaxErrors, ...typeErrors, ...warnings];
       const durationMs = Date.now() - startTime;
-      const passed = errors.length === 0;
+      const passed = errors.length === 0 && missingDependencies.length === 0;
 
       return {
         status: passed ? 'passed' : 'failed',
@@ -1129,12 +1211,24 @@ export class ExecutionAdapter {
     const hasTsFiles = files.some(f => f.path.endsWith('.ts') || f.path.endsWith('.tsx'));
     const typePassed = hasTsFiles ? (typeCheckReport.status === 'passed') : true;
 
+    const hasTestFiles = files.some(f => 
+      f.path.includes('.test.') || 
+      f.path.includes('.spec.') || 
+      f.path.startsWith('tests/')
+    );
+
+    const testPassed = hasTestFiles 
+      ? (testReport.status === 'passed' && testReport.passed > 0 && testReport.failed === 0)
+      : (testReport.status !== 'failed');
+
+    const buildPassed = (buildReport.status === 'passed' || buildReport.status === 'skipped') && buildReport.passed !== false;
+
     const passed = syntaxErrors.length === 0 && 
                    typePassed &&
                    securityAudit.passed && 
                    configErrors.length === 0 &&
-                   testReport.status !== 'failed' && 
-                   (buildReport.status === 'passed' || buildReport.status === 'skipped');
+                   testPassed && 
+                   buildPassed;
 
     const summary = passed
       ? `All verification checks passed (${files.length} files, ${typeCheckReport.totalChecked} TS files checked, ${testReport.passed} tests passed, security score: ${securityAudit.score}/100)`

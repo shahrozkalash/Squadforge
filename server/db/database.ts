@@ -486,6 +486,36 @@ export class DatabaseManager {
             db.exec('ALTER TABLE builds ADD COLUMN preview_entry_point TEXT;');
           }
         }
+      },
+      {
+        id: 6,
+        name: '006_coordination_and_patch_integrity',
+        up: (db: DatabaseSync) => {
+          // Distributed coordination locks table across processes
+          db.exec(`
+            CREATE TABLE IF NOT EXISTS coordination_locks (
+              lock_key TEXT PRIMARY KEY,
+              owner_id TEXT NOT NULL,
+              acquired_at INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_coordination_locks_expires_at ON coordination_locks(expires_at);
+          `);
+
+          // Ensure project_files has content_hash column
+          const pfCols = db.prepare('PRAGMA table_info(project_files)').all() as Array<{ name: string }>;
+          const pfColNames = new Set(pfCols.map(c => c.name));
+          if (!pfColNames.has('content_hash')) {
+            db.exec('ALTER TABLE project_files ADD COLUMN content_hash TEXT;');
+          }
+
+          // Ensure file_versions has content_hash column
+          const fvCols = db.prepare('PRAGMA table_info(file_versions)').all() as Array<{ name: string }>;
+          const fvColNames = new Set(fvCols.map(c => c.name));
+          if (!fvColNames.has('content_hash')) {
+            db.exec('ALTER TABLE file_versions ADD COLUMN content_hash TEXT;');
+          }
+        }
       }
     ];
 
@@ -510,17 +540,75 @@ export class DatabaseManager {
   }
 
   /**
-   * Helper to execute in a database transaction
+   * Helper to execute in an immediate database transaction (serializes concurrent writes across processes)
    */
   transaction<T>(fn: () => T): T {
-    this.db.exec('BEGIN TRANSACTION;');
+    this.db.exec('BEGIN IMMEDIATE;');
     try {
       const result = fn();
       this.db.exec('COMMIT;');
       return result;
     } catch (err) {
-      this.db.exec('ROLLBACK;');
+      try {
+        this.db.exec('ROLLBACK;');
+      } catch {}
       throw err;
+    }
+  }
+
+  /**
+   * Acquires a database-backed coordination lock for distributed multi-process safety
+   */
+  acquireCoordinationLock(lockKey: string, ownerId: string, durationMs: number = 30000): boolean {
+    const now = Date.now();
+    const expiry = now + durationMs;
+
+    try {
+      // First clean up expired locks
+      this.cleanExpiredCoordinationLocks(now);
+
+      const res = this.db.prepare(`
+        INSERT INTO coordination_locks (lock_key, owner_id, acquired_at, expires_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(lock_key) DO UPDATE SET
+          owner_id = excluded.owner_id,
+          acquired_at = excluded.acquired_at,
+          expires_at = excluded.expires_at
+        WHERE expires_at < ?
+      `).run(lockKey, ownerId, now, expiry, now);
+
+      return res.changes > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Releases a database-backed coordination lock owned by ownerId
+   */
+  releaseCoordinationLock(lockKey: string, ownerId: string): boolean {
+    try {
+      const res = this.db.prepare(`
+        DELETE FROM coordination_locks
+        WHERE lock_key = ? AND owner_id = ?
+      `).run(lockKey, ownerId);
+      return res.changes > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Cleans expired coordination locks
+   */
+  cleanExpiredCoordinationLocks(now: number = Date.now()): number {
+    try {
+      const res = this.db.prepare(`
+        DELETE FROM coordination_locks WHERE expires_at < ?
+      `).run(now);
+      return res.changes;
+    } catch {
+      return 0;
     }
   }
 }

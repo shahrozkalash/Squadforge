@@ -232,8 +232,15 @@ export class PreviewGenerator {
       const cssFiles = allFiles.filter(f => f.path.endsWith('.css'));
       const combinedCss = cssFiles.map(f => f.content).join('\n');
 
-      // Scan and resolve project dependencies via centralized DependencyResolverService
-      const depResult = DependencyResolverService.resolveProjectDependencies(allFiles);
+      // Scan and resolve project dependencies for client browser files
+      const clientFiles = allFiles.filter(f => 
+        !f.path.startsWith('tests/') &&
+        !f.path.includes('.test.') &&
+        !f.path.includes('.spec.') &&
+        !f.path.startsWith('server/') &&
+        f.path !== 'server.ts'
+      );
+      const depResult = DependencyResolverService.resolveProjectDependencies(clientFiles);
 
       if (!depResult.valid) {
         const fallbackDiagnostic = `Dependency resolution rejected: ${depResult.unsupportedDependencies.join('; ')}`;

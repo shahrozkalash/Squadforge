@@ -75,6 +75,13 @@ export class TaskManager {
   }
 
   /**
+   * Alias for claimTask to support worker concurrency interfaces
+   */
+  static claimNextTask(buildId: string, modelId: string, strengths: ModelStrength[] = [], agentRole?: AgentRole): Task | null {
+    return this.claimTask(buildId, modelId, strengths, agentRole);
+  }
+
+  /**
    * Atomically claims an open task for a specific model based on its role and strengths.
    * Atomic lock prevents two models from ever claiming the same task.
    */
@@ -307,10 +314,10 @@ export class TaskManager {
    * Marks a task as completed while honestly recording verification evidence,
    * avoiding fabricated test results, and updating verification history.
    */
-  static completeTask(buildId: string, taskId: string, modelId: string, taskResult?: import('../types.js').AgentTaskResult): void {
+  static completeTask(buildId: string, taskId: string, modelId: string, taskResult?: import('../types.js').AgentTaskResult): { success: boolean; error?: string } {
     const now = Date.now();
     const task = db.getTask(buildId, taskId);
-    if (!task) return;
+    if (!task) return { success: false, error: 'Task not found' };
 
     // Run honest verification check on files and tests
     const verification = this.verifyTaskExecution(buildId, taskId, modelId, taskResult);
@@ -409,7 +416,7 @@ export class TaskManager {
         modelId,
         details: `${modelId} completion rejected for "${task.title}": ${completeRes.error}`
       });
-      return;
+      return completeRes;
     }
 
     // If this was a fix task, only mark defect resolved if verification succeeded
@@ -453,18 +460,20 @@ export class TaskManager {
       currentTaskId: null,
       lastActionSummary: `${isVerificationFailed ? 'Failed' : 'Completed'}: ${task.title}`
     });
+
+    return { success: !isVerificationFailed, error: isVerificationFailed ? verification.errors.join('; ') : undefined };
   }
 
   /**
    * Marks a task as failed when retries are exhausted or unrecoverable error occurs
    */
-  static failTask(buildId: string, taskId: string, modelId: string, error: string): void {
+  static failTask(buildId: string, taskId: string, modelId: string, error: string): { success: boolean; error?: string } {
     const now = Date.now();
     const task = db.getTask(buildId, taskId);
-    if (!task) return;
+    if (!task) return { success: false, error: 'Task not found' };
 
     const res = db.failTaskAtomic(buildId, taskId, modelId, error);
-    if (!res.success) return;
+    if (!res.success) return res;
 
     db.addEvent({
       id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -482,6 +491,34 @@ export class TaskManager {
       error,
       lastActionSummary: `Failed on task: ${task.title}`
     });
+
+    return { success: true };
+  }
+
+  /**
+   * Resets a failed task for clean retry and reassignment
+   */
+  static retryTask(buildId: string, taskId: string): { success: boolean; error?: string } {
+    const task = db.getTask(buildId, taskId);
+    if (!task) return { success: false, error: 'Task not found' };
+
+    db.updateTask(buildId, taskId, {
+      status: 'pending',
+      claimedBy: null,
+      leaseExpiresAt: null,
+      lastError: undefined
+    });
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'task_released',
+      taskId,
+      details: `Task "${task.title}" reset to open board for retry.`
+    });
+
+    return { success: true };
   }
 
   /**

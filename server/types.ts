@@ -243,6 +243,7 @@ export interface FileVersion {
   taskId?: string;
   changeType?: 'added' | 'removed' | 'modified' | 'reverted' | 'merged' | 'recreated';
   isFormattingOnly?: boolean;
+  contentHash?: string;
 }
 
 export interface ProjectFile {
@@ -259,6 +260,7 @@ export interface ProjectFile {
   isRenamed?: boolean;
   isDeleted?: boolean;
   isRecreated?: boolean;
+  contentHash?: string;
 }
 
 export type EventType = 
@@ -621,6 +623,7 @@ export interface PatchAction {
   taskId?: string;
   commitMessage?: string;
   expectedVersion?: number;
+  expectedContentHash?: string;
 }
 
 export interface CreateFileAction {

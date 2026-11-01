@@ -102,19 +102,28 @@ export class IntegrationAgent {
         ? file.path.substring(0, file.path.lastIndexOf('/')) 
         : '';
 
-      // 1. Scan external browser module dependencies
-      const scannedImports = DependencyResolverService.parseCodeImports(content, file.path);
-      for (const imp of scannedImports) {
-        if (imp.status !== 'allowed') {
-          issues.push({
-            type: 'missing_dependency',
-            sourceFile: file.path,
-            identifier: imp.specifier,
-            message: imp.diagnostic || `File "${file.path}" requires unsupported or unresolvable dependency "${imp.specifier}".`,
-            severity: 'error',
-            evidence: `Import statement: ${imp.type} "${imp.specifier}"`,
-            suggestedCorrection: `Install or configure package "${imp.specifier}" in browser registry or mock with local implementation.`
-          });
+      // 1. Scan external browser module dependencies (skip server and test files which legitimately run in Node)
+      const isServerOrTestFile = 
+        file.path.startsWith('tests/') || 
+        file.path.includes('.test.') || 
+        file.path.includes('.spec.') || 
+        file.path.startsWith('server/') || 
+        file.path === 'server.ts';
+
+      if (!isServerOrTestFile) {
+        const scannedImports = DependencyResolverService.parseCodeImports(content, file.path);
+        for (const imp of scannedImports) {
+          if (imp.status !== 'allowed') {
+            issues.push({
+              type: 'missing_dependency',
+              sourceFile: file.path,
+              identifier: imp.specifier,
+              message: imp.diagnostic || `File "${file.path}" requires unsupported or unresolvable dependency "${imp.specifier}".`,
+              severity: 'error',
+              evidence: `Import statement: ${imp.type} "${imp.specifier}"`,
+              suggestedCorrection: `Install or configure package "${imp.specifier}" in browser registry or mock with local implementation.`
+            });
+          }
         }
       }
 

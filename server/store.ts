@@ -45,6 +45,20 @@ interface ClientSSEListener {
 const DATA_FILE = path.resolve(process.cwd(), '.squadforge_data.json');
 const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+export function safeJsonParse<T>(value: any, fallback: T): T {
+  if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value === 'object') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+export function computeContentHash(content: string): string {
+  return crypto.createHash('sha256').update(content || '', 'utf-8').digest('hex');
+}
+
 export class PersistentDatabase {
   public dbManager: DatabaseManager;
 
@@ -79,6 +93,10 @@ export class PersistentDatabase {
 
   constructor(dbPath?: string) {
     this.dbManager = DatabaseManager.getInstance(dbPath);
+    this.initializeStorage();
+  }
+
+  public initialize(): void {
     this.initializeStorage();
   }
 
@@ -161,6 +179,21 @@ export class PersistentDatabase {
     const sqlite = this.dbManager.db;
     const now = this.getTime();
 
+    // Clean expired leases on startup to recover safely after process restart
+    try {
+      sqlite.prepare(`
+        UPDATE tasks SET status = 'pending', claimed_by = NULL, lease_expires_at = NULL
+        WHERE status IN ('in_progress', 'claimed', 'working') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+      `).run(now);
+      sqlite.prepare(`
+        UPDATE project_files SET lease_owner = NULL, lease_expires_at = NULL
+        WHERE lease_expires_at IS NOT NULL AND lease_expires_at <= ?
+      `).run(now);
+      this.dbManager.cleanExpiredCoordinationLocks(now);
+    } catch {
+      // Best-effort startup cleanup
+    }
+
     // 1. Users
     const userRows = sqlite.prepare('SELECT * FROM users').all() as any[];
     for (const u of userRows) {
@@ -176,7 +209,7 @@ export class PersistentDatabase {
         costLimitPerBuild: u.cost_limit_per_build,
         tokenLimitPerBuild: u.token_limit_per_build,
         routingPreference: u.routing_preference || 'quality',
-        enabledModelIds: u.enabled_model_ids ? JSON.parse(u.enabled_model_ids) : [],
+        enabledModelIds: safeJsonParse<string[]>(u.enabled_model_ids, []),
         createdAt: u.created_at,
         updatedAt: u.updated_at || undefined
       };
@@ -245,7 +278,7 @@ export class PersistentDatabase {
         createdAt: b.created_at,
         updatedAt: b.updated_at,
         completedAt: b.completed_at || undefined,
-        selectedModels: b.selected_models ? JSON.parse(b.selected_models) : [],
+        selectedModels: safeJsonParse<string[]>(b.selected_models, []),
         autoPushGithub: Boolean(b.auto_push_github),
         totalTokens: b.total_tokens || 0,
         totalCost: b.total_cost || 0.0,
@@ -255,11 +288,11 @@ export class PersistentDatabase {
         patchesAppliedCount: b.patches_applied_count || 0,
         error: b.error || undefined,
         failureReason: b.failure_reason || undefined,
-        techStack: b.tech_stack ? JSON.parse(b.tech_stack) : undefined,
-        milestones: b.milestones ? JSON.parse(b.milestones) : undefined,
-        testReport: b.test_report ? JSON.parse(b.test_report) : undefined,
-        securityAudit: b.security_audit ? JSON.parse(b.security_audit) : undefined,
-        verificationReport: b.verification_report ? JSON.parse(b.verification_report) : undefined,
+        techStack: safeJsonParse<any>(b.tech_stack, undefined),
+        milestones: safeJsonParse<any>(b.milestones, undefined),
+        testReport: safeJsonParse<any>(b.test_report, undefined),
+        securityAudit: safeJsonParse<any>(b.security_audit, undefined),
+        verificationReport: safeJsonParse<any>(b.verification_report, undefined),
         verificationFeedback: b.verification_feedback || undefined,
         verificationAttempts: b.verification_attempts || 0,
         maxVerificationAttempts: b.max_verification_attempts || 3,
@@ -268,13 +301,13 @@ export class PersistentDatabase {
         gitBranch: b.github_branch || undefined,
         pullRequestUrl: b.github_pr_url || undefined,
         projectType: b.project_type || 'fullstack',
-        architectureDecisions: b.architecture_decisions ? JSON.parse(b.architecture_decisions) : undefined,
-        requirementsChecklist: b.requirements_checklist ? JSON.parse(b.requirements_checklist) : undefined,
-        revisions: b.revisions ? JSON.parse(b.revisions) : undefined,
+        architectureDecisions: safeJsonParse<any>(b.architecture_decisions, undefined),
+        requirementsChecklist: safeJsonParse<any>(b.requirements_checklist, undefined),
+        revisions: safeJsonParse<any>(b.revisions, undefined),
         livePreviewHtml: b.live_preview_html || undefined,
         previewMode: b.preview_mode || undefined,
         previewDiagnostic: b.preview_diagnostic || undefined,
-        previewRuntimeErrors: b.preview_runtime_errors ? JSON.parse(b.preview_runtime_errors) : undefined,
+        previewRuntimeErrors: safeJsonParse<any>(b.preview_runtime_errors, undefined),
         previewEntryPoint: b.preview_entry_point || undefined
       };
       this.builds.set(build.id, build);
@@ -283,34 +316,7 @@ export class PersistentDatabase {
     // 7. Tasks
     const taskRows = sqlite.prepare('SELECT * FROM tasks').all() as any[];
     for (const t of taskRows) {
-      const task: Task = {
-        id: t.id,
-        buildId: t.build_id,
-        title: t.title,
-        description: t.description,
-        filePaths: t.file_paths ? JSON.parse(t.file_paths) : [],
-        priority: t.priority as any,
-        status: t.status as any,
-        claimedBy: t.claimed_by || null,
-        leaseExpiresAt: t.lease_expires_at || null,
-        createdAt: t.created_at,
-        completedAt: t.completed_at || undefined,
-        error: t.error || undefined,
-        isFixTask: Boolean(t.is_fix_task),
-        retryCount: t.retry_count || 0,
-        maxRetries: t.max_retries || 3,
-        lastError: t.last_error || undefined,
-        dependencies: t.dependencies ? JSON.parse(t.dependencies) : undefined,
-        assignedRole: t.assigned_role || undefined,
-        milestone: t.milestone || undefined,
-        complexity: t.complexity || undefined,
-        tokenBudget: t.token_budget || undefined,
-        actualTokensUsed: t.actual_tokens_used || 0,
-        estimatedCost: t.estimated_cost || 0.0,
-        isPaused: Boolean(t.is_paused),
-        pausedReason: t.paused_reason || undefined,
-        executionLogs: t.execution_logs ? JSON.parse(t.execution_logs) : undefined
-      };
+      const task: Task = this.mapDbRowToTask(t);
       let list = this.tasks.get(task.buildId);
       if (!list) {
         list = [];
@@ -328,7 +334,8 @@ export class PersistentDatabase {
         content: v.content,
         authorModel: v.author_model,
         timestamp: v.timestamp,
-        commitMessage: v.commit_message || undefined
+        commitMessage: v.commit_message || undefined,
+        contentHash: v.content_hash || computeContentHash(v.content)
       }));
 
       const projFile: ProjectFile = {
@@ -340,7 +347,8 @@ export class PersistentDatabase {
         leaseOwner: f.lease_owner || null,
         leaseExpiresAt: f.lease_expires_at || null,
         createdAt: f.created_at,
-        updatedAt: f.updated_at
+        updatedAt: f.updated_at,
+        contentHash: f.content_hash || computeContentHash(f.content)
       };
 
       let buildFiles = this.files.get(f.build_id);
@@ -1174,9 +1182,6 @@ export class PersistentDatabase {
   }
 
   saveBuild(build: Build): Build {
-    this.builds.set(build.id, build);
-    this.broadcast(build.id, 'build_updated', build);
-
     // Ensure referenced user exists in users table to satisfy foreign key constraint integrity
     if (build.userId) {
       try {
@@ -1198,6 +1203,7 @@ export class PersistentDatabase {
       }
     }
 
+    // 1. Database write MUST happen BEFORE cache mutation
     try {
       this.dbManager.db.prepare(`
         INSERT OR REPLACE INTO builds (
@@ -1236,7 +1242,12 @@ export class PersistentDatabase {
       );
     } catch (err: any) {
       this.handleDatabaseWriteError('saveBuild', err);
+      throw err;
     }
+
+    // 2. Only mutate in-memory cache and broadcast after DB write succeeds
+    this.builds.set(build.id, build);
+    this.broadcast(build.id, 'build_updated', build);
 
     return build;
   }
@@ -1255,9 +1266,16 @@ export class PersistentDatabase {
     return this.tasks.get(buildId) || [];
   }
 
-  getTask(buildId: string, taskId: string): Task | undefined {
-    const list = this.getTasks(buildId);
-    return list.find(t => t.id === taskId);
+  getTask(buildIdOrTaskId: string, taskIdMaybe?: string): Task | undefined {
+    if (taskIdMaybe) {
+      const list = this.getTasks(buildIdOrTaskId);
+      return list.find(t => t.id === taskIdMaybe);
+    }
+    for (const list of this.tasks.values()) {
+      const found = list.find(t => t.id === buildIdOrTaskId);
+      if (found) return found;
+    }
+    return undefined;
   }
 
   public mapDbRowToTask(t: any): Task {
@@ -1266,7 +1284,7 @@ export class PersistentDatabase {
       buildId: t.build_id,
       title: t.title,
       description: t.description,
-      filePaths: t.file_paths ? JSON.parse(t.file_paths) : [],
+      filePaths: safeJsonParse<string[]>(t.file_paths, []),
       priority: t.priority as any,
       status: t.status as any,
       claimedBy: t.claimed_by || null,
@@ -1278,7 +1296,7 @@ export class PersistentDatabase {
       retryCount: t.retry_count || 0,
       maxRetries: t.max_retries || 3,
       lastError: t.last_error || undefined,
-      dependencies: t.dependencies ? JSON.parse(t.dependencies) : undefined,
+      dependencies: safeJsonParse<string[] | undefined>(t.dependencies, undefined),
       assignedRole: t.assigned_role || undefined,
       milestone: t.milestone || undefined,
       complexity: t.complexity || undefined,
@@ -1287,7 +1305,7 @@ export class PersistentDatabase {
       estimatedCost: t.estimated_cost || 0.0,
       isPaused: Boolean(t.is_paused),
       pausedReason: t.paused_reason || undefined,
-      executionLogs: t.execution_logs ? JSON.parse(t.execution_logs) : undefined
+      executionLogs: safeJsonParse<any[] | undefined>(t.execution_logs, undefined)
     };
   }
 
@@ -1436,8 +1454,41 @@ export class PersistentDatabase {
     const updatedCompletedAt = updatedStatus === 'completed' ? (updates.completedAt || now) : null;
 
     try {
-      // Ownership validation and state transition occur in the SAME conditional database update.
-      // Validates ownership (claimed_by = ?), build_id, active uncompleted status, and non-expired lease.
+      // 1. Authoritative Database Pre-check for strict ownership diagnostics
+      const row = this.dbManager.db.prepare(
+        'SELECT status, claimed_by, lease_expires_at, is_paused, retry_count FROM tasks WHERE id = ? AND build_id = ?'
+      ).get(taskId, buildId) as any;
+
+      if (!row) {
+        return { success: false, error: 'Task not found' };
+      }
+      if (row.is_paused) {
+        return { success: false, error: `Task ${taskId} is currently paused` };
+      }
+      if (row.status === 'completed' || row.status === 'done') {
+        return { success: false, error: 'Task is already completed' };
+      }
+      if (row.status === 'failed' || row.status === 'cancelled') {
+        return { success: false, error: `Task cannot be completed because current status is ${row.status}` };
+      }
+      if (!row.claimed_by || row.status === 'pending') {
+        return { success: false, error: 'Cannot complete unclaimed task: Task must be claimed before completion' };
+      }
+      if (row.claimed_by !== modelId) {
+        return { 
+          success: false, 
+          error: `Stale worker rejected: Task ${taskId} is currently claimed by ${row.claimed_by}, not ${modelId}` 
+        };
+      }
+      if (row.lease_expires_at && row.lease_expires_at < now) {
+        return { 
+          success: false, 
+          error: `Stale lease rejected: Worker ${modelId} lease expired at ${new Date(row.lease_expires_at).toISOString()}` 
+        };
+      }
+
+      // 2. Ownership validation and state transition occur in the SAME conditional database update.
+      // Strictly enforces: active status, claimed_by = modelId, lease_expires_at not expired.
       const res = this.dbManager.db.prepare(`
         UPDATE tasks SET
           status = ?, 
@@ -1452,15 +1503,15 @@ export class PersistentDatabase {
         WHERE id = ? 
           AND build_id = ?
           AND is_paused = 0
-          AND status IN ('pending', 'in_progress', 'claimed', 'working', 'retrying')
-          AND (claimed_by = ? OR claimed_by IS NULL)
+          AND status IN ('in_progress', 'claimed', 'working', 'retrying')
+          AND claimed_by = ?
           AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
       `).run(
         updatedStatus,
         updatedStatus === 'completed' ? modelId : null,
         updatedCompletedAt,
         updates.error || null,
-        updates.retryCount ?? 0,
+        updates.retryCount ?? row.retry_count ?? 0,
         updates.lastError || null,
         updates.actualTokensUsed ?? 0,
         updates.estimatedCost ?? 0.0,
@@ -1471,35 +1522,6 @@ export class PersistentDatabase {
       );
 
       if (res.changes === 0) {
-        // Did not update. Query database directly (do NOT rely exclusively on in-memory state)
-        const row = this.dbManager.db.prepare(
-          'SELECT status, claimed_by, lease_expires_at, is_paused FROM tasks WHERE id = ? AND build_id = ?'
-        ).get(taskId, buildId) as any;
-
-        if (!row) {
-          return { success: false, error: `Task not found` };
-        }
-        if (row.is_paused) {
-          return { success: false, error: `Task ${taskId} is currently paused` };
-        }
-        if (row.status === 'completed' || row.status === 'done') {
-          return { success: false, error: 'Task is already completed' };
-        }
-        if (row.status === 'failed' || row.status === 'cancelled') {
-          return { success: false, error: `Task cannot be completed because current status is ${row.status}` };
-        }
-        if (row.claimed_by && row.claimed_by !== modelId) {
-          return { 
-            success: false, 
-            error: `Stale worker rejected: Task ${taskId} is currently claimed by ${row.claimed_by}, not ${modelId}` 
-          };
-        }
-        if (row.lease_expires_at && row.lease_expires_at < now) {
-          return { 
-            success: false, 
-            error: `Stale lease rejected: Worker ${modelId} lease expired at ${new Date(row.lease_expires_at).toISOString()}` 
-          };
-        }
         return { 
           success: false, 
           error: 'Task completion rejected: Task state, ownership, or lease condition not satisfied' 
@@ -1521,8 +1543,8 @@ export class PersistentDatabase {
         };
         list[index] = updated;
       } else {
-        const row = this.dbManager.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
-        updated = this.mapDbRowToTask(row);
+        const fullRow = this.dbManager.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
+        updated = this.mapDbRowToTask(fullRow);
         list.push(updated);
       }
 
@@ -1542,8 +1564,44 @@ export class PersistentDatabase {
     modelId: string,
     error: string
   ): { success: boolean; task?: Task; error?: string } {
+    if (!buildId || !taskId || !modelId) {
+      return { success: false, error: 'buildId, taskId, and modelId are required' };
+    }
     const now = this.getTime();
     try {
+      // 1. Authoritative DB check
+      const row = this.dbManager.db.prepare(
+        'SELECT status, claimed_by, lease_expires_at FROM tasks WHERE id = ? AND build_id = ?'
+      ).get(taskId, buildId) as any;
+
+      if (!row) {
+        return { success: false, error: 'Task not found' };
+      }
+      if (row.status === 'failed') {
+        return { success: false, error: 'Task is already failed' };
+      }
+      if (row.status === 'completed' || row.status === 'done') {
+        return { success: false, error: 'Cannot fail task: Task is already completed' };
+      }
+      if (row.status === 'cancelled') {
+        return { success: false, error: 'Cannot fail task: Task is already cancelled' };
+      }
+
+      // Check worker ownership: only owning worker or system supervisor can fail the task
+      const isSystem = modelId === 'system';
+      if (!isSystem) {
+        if (!row.claimed_by || row.status === 'pending') {
+          return { success: false, error: 'Cannot fail unclaimed task: Only claiming worker or system can fail tasks' };
+        }
+        if (row.claimed_by !== modelId) {
+          return { success: false, error: `Cannot fail task: Task is currently owned by ${row.claimed_by}, not ${modelId}` };
+        }
+        if (row.lease_expires_at && row.lease_expires_at < now) {
+          return { success: false, error: `Stale lease rejected: Worker ${modelId} lease expired at ${new Date(row.lease_expires_at).toISOString()}` };
+        }
+      }
+
+      // 2. Atomic conditional database update: prevents duplicate failure transitions
       const res = this.dbManager.db.prepare(`
         UPDATE tasks SET
           status = 'failed',
@@ -1554,8 +1612,11 @@ export class PersistentDatabase {
         WHERE id = ?
           AND build_id = ?
           AND status IN ('pending', 'in_progress', 'claimed', 'working', 'retrying')
-          AND (claimed_by = ? OR claimed_by IS NULL OR (lease_expires_at IS NOT NULL AND lease_expires_at < ?))
-      `).run(error, error, taskId, buildId, modelId, now);
+          AND (
+            (? = 'system')
+            OR (claimed_by = ? AND (lease_expires_at IS NULL OR lease_expires_at >= ?))
+          )
+      `).run(error, error, taskId, buildId, modelId, modelId, now);
 
       if (res.changes === 0) {
         return { success: false, error: `Cannot fail task ${taskId}: task not found, already completed, or claimed by another active worker` };
@@ -1575,8 +1636,8 @@ export class PersistentDatabase {
         };
         list[index] = updated;
       } else {
-        const row = this.dbManager.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
-        updated = this.mapDbRowToTask(row);
+        const fullRow = this.dbManager.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
+        updated = this.mapDbRowToTask(fullRow);
         list.push(updated);
       }
       this.tasks.set(buildId, list);
@@ -1585,6 +1646,80 @@ export class PersistentDatabase {
     } catch (err: any) {
       this.handleDatabaseWriteError('failTaskAtomic', err);
       return { success: false, error: err.message || 'Database error during failTask' };
+    }
+  }
+
+  cancelTaskAtomic(
+    buildId: string,
+    taskId: string,
+    modelId: string,
+    reason: string
+  ): { success: boolean; task?: Task; error?: string } {
+    if (!buildId || !taskId || !modelId) {
+      return { success: false, error: 'buildId, taskId, and modelId are required' };
+    }
+    const now = this.getTime();
+    try {
+      const row = this.dbManager.db.prepare(
+        'SELECT status, claimed_by, lease_expires_at FROM tasks WHERE id = ? AND build_id = ?'
+      ).get(taskId, buildId) as any;
+
+      if (!row) {
+        return { success: false, error: 'Task not found' };
+      }
+      if (row.status === 'cancelled') {
+        return { success: false, error: 'Task is already cancelled' };
+      }
+      if (row.status === 'completed' || row.status === 'done') {
+        return { success: false, error: 'Cannot cancel task: Task is already completed' };
+      }
+
+      const isSystem = modelId === 'system';
+      if (!isSystem && row.claimed_by && row.claimed_by !== modelId) {
+        return { success: false, error: `Cannot cancel task: Task is currently owned by ${row.claimed_by}, not ${modelId}` };
+      }
+
+      const res = this.dbManager.db.prepare(`
+        UPDATE tasks SET
+          status = 'cancelled',
+          claimed_by = NULL,
+          lease_expires_at = NULL,
+          error = ?,
+          last_error = ?
+        WHERE id = ?
+          AND build_id = ?
+          AND status NOT IN ('completed', 'done', 'cancelled')
+          AND (? = 'system' OR claimed_by = ? OR claimed_by IS NULL)
+      `).run(reason, reason, taskId, buildId, modelId, modelId);
+
+      if (res.changes === 0) {
+        return { success: false, error: `Cannot cancel task ${taskId}: task condition not satisfied` };
+      }
+
+      const list = this.getTasks(buildId);
+      const index = list.findIndex(t => t.id === taskId);
+      let updated: Task;
+      if (index !== -1) {
+        updated = {
+          ...list[index],
+          status: 'cancelled',
+          claimedBy: null,
+          leaseExpiresAt: null,
+          error: reason,
+          lastError: reason
+        };
+        list[index] = updated;
+      } else {
+        const fullRow = this.dbManager.db.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as any;
+        updated = this.mapDbRowToTask(fullRow);
+        list.push(updated);
+      }
+      this.tasks.set(buildId, list);
+      this.broadcast(buildId, 'task_updated', updated);
+      return { success: true, task: updated };
+    } catch (err: any) {
+      this.handleDatabaseWriteError('cancelTaskAtomic', err);
+      return { success: false, error: err.message || 'Database error during cancelTask' };
     }
   }
 
@@ -1608,48 +1743,64 @@ export class PersistentDatabase {
   }
 
   setFile(buildId: string, file: ProjectFile): ProjectFile {
+    const fileId = `${buildId}:${file.path}`;
+    const now = this.getTime();
+    const contentHash = computeContentHash(file.content);
+    file.contentHash = contentHash;
+
+    const latestVer = file.history[file.history.length - 1];
+    if (latestVer) {
+      latestVer.contentHash = computeContentHash(latestVer.content);
+    }
+
+    // 1. Database write MUST happen BEFORE cache mutation
+    try {
+      this.dbManager.transaction(() => {
+        this.dbManager.db.prepare(`
+          INSERT OR REPLACE INTO project_files (
+            id, build_id, path, content, version, owner_model,
+            lease_owner, lease_expires_at, created_at, updated_at, content_hash
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          fileId, buildId, file.path, file.content, file.version, file.ownerModel || 'system',
+          file.leaseOwner || null, file.leaseExpiresAt || null, file.createdAt || now, file.updatedAt || now, contentHash
+        );
+
+        if (latestVer) {
+          this.dbManager.db.prepare(`
+            INSERT INTO file_versions (file_id, build_id, path, version, content, author_model, commit_message, timestamp, content_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(fileId, buildId, file.path, latestVer.version, latestVer.content, latestVer.authorModel, latestVer.commitMessage || null, latestVer.timestamp, latestVer.contentHash || contentHash);
+        }
+      });
+    } catch (err: any) {
+      this.handleDatabaseWriteError('setFile', err);
+      throw err;
+    }
+
+    // 2. Only mutate in-memory cache and broadcast after DB transaction succeeds
     const files = this.getFilesMap(buildId);
     files.set(file.path, file);
     this.broadcast(buildId, 'file_updated', file);
-
-    try {
-      const fileId = `${buildId}:${file.path}`;
-      this.dbManager.db.prepare(`
-        INSERT OR REPLACE INTO project_files (
-          id, build_id, path, content, version, owner_model,
-          lease_owner, lease_expires_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        fileId, buildId, file.path, file.content, file.version, file.ownerModel || 'system',
-        file.leaseOwner || null, file.leaseExpiresAt || null, file.createdAt || Date.now(), file.updatedAt || Date.now()
-      );
-
-      // Latest version in file_versions
-      const latestVer = file.history[file.history.length - 1];
-      if (latestVer) {
-        this.dbManager.db.prepare(`
-          INSERT INTO file_versions (file_id, build_id, path, version, content, author_model, commit_message, timestamp)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(fileId, buildId, file.path, latestVer.version, latestVer.content, latestVer.authorModel, latestVer.commitMessage || null, latestVer.timestamp);
-      }
-    } catch (err: any) {
-      this.handleDatabaseWriteError('setFile', err);
-    }
 
     return file;
   }
 
   deleteFile(buildId: string, filePath: string): boolean {
+    const fileId = `${buildId}:${filePath}`;
+    // 1. Database delete first
+    try {
+      this.dbManager.db.prepare('DELETE FROM project_files WHERE id = ?').run(fileId);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('deleteFile', err);
+      throw err;
+    }
+
+    // 2. Mutate cache and broadcast after DB delete
     const files = this.getFilesMap(buildId);
     const existed = files.delete(filePath);
     if (existed) {
       this.broadcast(buildId, 'file_deleted', { path: filePath });
-      try {
-        const fileId = `${buildId}:${filePath}`;
-        this.dbManager.db.prepare('DELETE FROM project_files WHERE id = ?').run(fileId);
-      } catch (err: any) {
-        this.handleDatabaseWriteError('deleteFile', err);
-      }
     }
     return existed;
   }
@@ -1816,9 +1967,9 @@ export class PersistentDatabase {
     }
     const now = this.getTime();
     const sortedPaths = [...new Set(filePaths)].sort();
-    const releasedPaths: string[] = [];
 
     return this.dbManager.transaction(() => {
+      // Pass 1: Strict validation of ALL requested files before making any mutations
       for (const p of sortedPaths) {
         const row = this.dbManager.db.prepare(
           'SELECT lease_owner, lease_expires_at FROM project_files WHERE build_id = ? AND path = ?'
@@ -1831,7 +1982,7 @@ export class PersistentDatabase {
           return {
             success: false,
             error: `Cannot release lease on ${p}: Active lease is held by ${row.lease_owner}, not ${modelId}`,
-            releasedPaths
+            releasedPaths: []
           };
         }
 
@@ -1839,17 +1990,27 @@ export class PersistentDatabase {
           return {
             success: false,
             error: `Cannot release lease on ${p}: Lease is not held by ${modelId}`,
-            releasedPaths
+            releasedPaths: []
           };
         }
+      }
 
-        this.dbManager.db.prepare(`
+      // Pass 2: Database updates
+      const releasedPaths: string[] = [];
+      for (const p of sortedPaths) {
+        const res = this.dbManager.db.prepare(`
           UPDATE project_files 
           SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ?
           WHERE build_id = ? AND path = ? AND lease_owner = ?
         `).run(now, buildId, p, modelId);
-        releasedPaths.push(p);
 
+        if (res.changes > 0) {
+          releasedPaths.push(p);
+        }
+      }
+
+      // Pass 3: In-memory cache update strictly after database updates succeed
+      for (const p of releasedPaths) {
         const file = this.getFile(buildId, p);
         if (file) {
           file.leaseOwner = null;

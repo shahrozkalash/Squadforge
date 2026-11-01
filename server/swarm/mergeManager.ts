@@ -34,12 +34,38 @@ export class MergeManager {
    * Chaining handles previous failures gracefully so failed operations do not leave permanent locks
    * or corrupt subsequent merges.
    */
-  static enqueuePatch<T>(buildId: string, operation: () => Promise<T>): Promise<T> {
+  /**
+   * Enqueues patch operations sequentially with automatic cleanup of idle queues.
+   * Uses both in-memory Promise queue and SQLite database-backed coordination locks
+   * to ensure serialized, conflict-free patch application across multiple processes.
+   */
+  static async enqueuePatch<T>(buildId: string, operation: () => Promise<T>): Promise<T> {
     const previousPromise = this.patchQueues.get(buildId) || Promise.resolve();
-    const executeNext = () => operation();
+    const lockKey = `build_patch_${buildId}`;
+    const ownerId = `${process.pid}_${Math.random().toString(36).substring(2, 8)}`;
+
+    const executeWithCoordination = async (): Promise<T> => {
+      // 1. Acquire database-backed coordination lock
+      const startTime = Date.now();
+      let acquired = false;
+      while (!acquired && (Date.now() - startTime) < 10000) {
+        acquired = db.dbManager.acquireCoordinationLock(lockKey, ownerId, 30000);
+        if (!acquired) {
+          await new Promise(r => setTimeout(r, 25));
+        }
+      }
+
+      try {
+        return await operation();
+      } finally {
+        if (acquired) {
+          db.dbManager.releaseCoordinationLock(lockKey, ownerId);
+        }
+      }
+    };
 
     const currentPromise = previousPromise
-      .then(executeNext, executeNext)
+      .then(executeWithCoordination, executeWithCoordination)
       .finally(() => {
         if (this.patchQueues.get(buildId) === currentPromise) {
           this.patchQueues.delete(buildId);
@@ -289,11 +315,24 @@ export class MergeManager {
       };
     }
 
-    // Check lease ownership and expiration
+    // Query authoritative database state immediately before applying patch
     const now = Date.now();
-    if (file.leaseOwner) {
-      if (file.leaseOwner !== modelId && file.leaseExpiresAt && file.leaseExpiresAt > now) {
-        const error = `File is currently locked under refactor lease by ${file.leaseOwner}. Lease expires in ${Math.round((file.leaseExpiresAt - now) / 1000)}s.`;
+    let dbRow: any = null;
+    try {
+      dbRow = db.dbManager.db.prepare(
+        'SELECT lease_owner, lease_expires_at, version, content, content_hash FROM project_files WHERE build_id = ? AND path = ?'
+      ).get(buildId, cleanPath) as any;
+    } catch {
+      // Fallback to in-memory state if db unavailable
+    }
+
+    // Validate lease ownership and expiration
+    const leaseOwner = dbRow ? dbRow.lease_owner : file.leaseOwner;
+    const leaseExpiresAt = dbRow ? dbRow.lease_expires_at : file.leaseExpiresAt;
+
+    if (leaseOwner) {
+      if (leaseOwner !== modelId && leaseExpiresAt && leaseExpiresAt > now) {
+        const error = `File is currently locked under refactor lease by ${leaseOwner}. Lease expires in ${Math.round((leaseExpiresAt - now) / 1000)}s.`;
         db.addEvent({
           id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
           buildId,
@@ -301,7 +340,7 @@ export class MergeManager {
           type: 'patch_rejected',
           modelId,
           filePath: cleanPath,
-          details: `Rejected patch from ${modelId}: File leased by ${file.leaseOwner}`
+          details: `Rejected patch from ${modelId}: File leased by ${leaseOwner}`
         });
         return {
           success: false,
@@ -310,8 +349,8 @@ export class MergeManager {
           currentContent: file.content
         };
       }
-      if (file.leaseOwner === modelId && file.leaseExpiresAt && file.leaseExpiresAt <= now) {
-        const error = `Stale lease rejected: Lease for file ${cleanPath} expired ${Math.round((now - file.leaseExpiresAt) / 1000)}s ago. Renew your lease before applying edits.`;
+      if (leaseOwner === modelId && leaseExpiresAt && leaseExpiresAt <= now) {
+        const error = `Stale lease rejected: Lease for file ${cleanPath} expired ${Math.round((now - leaseExpiresAt) / 1000)}s ago. Renew your lease before applying edits.`;
         db.addEvent({
           id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
           buildId,
@@ -345,8 +384,9 @@ export class MergeManager {
     }
 
     // Version freshness check to prevent stale agents from overwriting newer changes
-    if (action.expectedVersion !== undefined && file.version !== action.expectedVersion) {
-      const error = `Version conflict: Expected file version v${action.expectedVersion}, but ${cleanPath} is currently at v${file.version}. File was modified concurrently.`;
+    const authoritativeVersion = dbRow ? dbRow.version : file.version;
+    if (action.expectedVersion !== undefined && authoritativeVersion !== action.expectedVersion) {
+      const error = `Version conflict: Expected file version v${action.expectedVersion}, but ${cleanPath} is currently at v${authoritativeVersion}. File was modified concurrently.`;
       db.addEvent({
         id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         buildId,
@@ -354,7 +394,28 @@ export class MergeManager {
         type: 'patch_rejected',
         modelId,
         filePath: cleanPath,
-        details: `Rejected patch from ${modelId}: Version mismatch (expected v${action.expectedVersion}, got v${file.version})`
+        details: `Rejected patch from ${modelId}: Version mismatch (expected v${action.expectedVersion}, got v${authoritativeVersion})`
+      });
+      return {
+        success: false,
+        filePath: cleanPath,
+        error,
+        currentContent: file.content
+      };
+    }
+
+    // Content hash check to detect conflicting concurrent edits
+    const authoritativeHash = dbRow?.content_hash || file.contentHash;
+    if (action.expectedContentHash && authoritativeHash && authoritativeHash !== action.expectedContentHash) {
+      const error = `Content hash conflict: Expected hash ${action.expectedContentHash}, but ${cleanPath} has hash ${authoritativeHash}. File was modified concurrently.`;
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'patch_rejected',
+        modelId,
+        filePath: cleanPath,
+        details: `Rejected patch from ${modelId}: Content hash mismatch`
       });
       return {
         success: false,
@@ -496,20 +557,26 @@ export class MergeManager {
       return { success: false, filePath: cleanPath, error: `File ${cleanPath} does not exist.` };
     }
 
-    // Check if file is leased by another model
+    // Check if file is leased by another model or if caller's lease is expired
     const now = Date.now();
-    if (existing.leaseOwner && existing.leaseOwner !== modelId && existing.leaseExpiresAt && existing.leaseExpiresAt > now) {
-      const error = `Cannot delete file: Locked under active lease by ${existing.leaseOwner}.`;
-      db.addEvent({
-        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        buildId,
-        timestamp: now,
-        type: 'patch_rejected',
-        modelId,
-        filePath: cleanPath,
-        details: `Rejected delete from ${modelId}: File leased by ${existing.leaseOwner}`
-      });
-      return { success: false, filePath: cleanPath, error };
+    if (existing.leaseOwner) {
+      if (existing.leaseOwner !== modelId && existing.leaseExpiresAt && existing.leaseExpiresAt > now) {
+        const error = `Cannot delete file: Locked under active lease by ${existing.leaseOwner}.`;
+        db.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected delete from ${modelId}: File leased by ${existing.leaseOwner}`
+        });
+        return { success: false, filePath: cleanPath, error };
+      }
+      if (existing.leaseOwner === modelId && existing.leaseExpiresAt && existing.leaseExpiresAt <= now) {
+        const error = `Cannot delete file: Lease for ${cleanPath} expired. Renew lease before deleting.`;
+        return { success: false, filePath: cleanPath, error };
+      }
     }
 
     db.deleteFile(buildId, cleanPath);
