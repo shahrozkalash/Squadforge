@@ -210,4 +210,117 @@ describe('Diff Engine & Agent Attribution', () => {
       }
     }
   });
+
+  it('handles empty files, trailing newlines, and exact boundary insertions/deletions', () => {
+    // 1. Both empty
+    const emptyDiff = computeMyersDiff('', '');
+    assert.strictEqual(emptyDiff.length, 0);
+
+    // 2. Old empty, new has content
+    const addDiff = computeMyersDiff('', 'line1\nline2');
+    assert.strictEqual(addDiff.length, 2);
+    assert.strictEqual(addDiff[0].type, 'add');
+    assert.strictEqual(addDiff[1].type, 'add');
+
+    // 3. Old has content, new empty
+    const delDiff = computeMyersDiff('line1\nline2', '');
+    assert.strictEqual(delDiff.length, 2);
+    assert.strictEqual(delDiff[0].type, 'delete');
+    assert.strictEqual(delDiff[1].type, 'delete');
+
+    // 4. Trailing newline differences
+    const withTrailing = 'alpha\nbeta\n';
+    const withoutTrailing = 'alpha\nbeta';
+    const trailingDiff = computeMyersDiff(withTrailing, withoutTrailing);
+    assert.ok(trailingDiff.length >= 2);
+    const lastHunk = trailingDiff[trailingDiff.length - 1];
+    assert.strictEqual(lastHunk.type, 'delete');
+    assert.strictEqual(lastHunk.text, '');
+
+    // 5. Boundary insertions at line 1 and last line
+    const base = 'line2\nline3';
+    const boundaryAdd = 'line1\nline2\nline3\nline4';
+    const bDiff = computeMyersDiff(base, boundaryAdd);
+    assert.strictEqual(bDiff[0].type, 'add');
+    assert.strictEqual(bDiff[0].text, 'line1');
+    assert.strictEqual(bDiff[bDiff.length - 1].type, 'add');
+    assert.strictEqual(bDiff[bDiff.length - 1].text, 'line4');
+  });
+
+  it('normalizes Windows CRLF and Unicode line breaks without treating them as content edits', () => {
+    const windowsText = 'const x = 1;\r\nconst y = 2;\r\n';
+    const linuxText = 'const x = 1;\nconst y = 2;\n';
+    const diff = computeMyersDiff(windowsText, linuxText);
+    // After normalization, all lines match
+    assert.ok(diff.every(h => h.type === 'unchanged'), 'Windows vs Linux line endings should normalize to unchanged');
+  });
+
+  it('correctly handles repeated identical lines without confusion', () => {
+    const oldCode = ['}', '}', '}', 'return null;', '}', '}'];
+    const newCode = ['}', '}', 'const active = true;', '}', 'return null;', '}', '}'];
+    const hunks = computeMyersDiff(oldCode, newCode);
+    const added = hunks.find(h => h.type === 'add');
+    assert.ok(added);
+    assert.strictEqual(added?.text, 'const active = true;');
+  });
+
+  it('generates unique and deterministic line IDs for all lines in diff', () => {
+    const oldText = 'alpha\nbeta\nbeta\ngamma';
+    const newText = 'alpha\nbeta_modified\nbeta\ngamma\ndelta';
+    const diff = computeAgentDiff(oldText, newText);
+
+    const lineIds = diff.lines.map(l => l.lineId);
+    const uniqueIds = new Set(lineIds);
+    assert.strictEqual(uniqueIds.size, lineIds.length, 'Every lineId in diff must be strictly unique');
+
+    // Run again to verify determinism
+    const diff2 = computeAgentDiff(oldText, newText);
+    const lineIds2 = diff2.lines.map(l => l.lineId);
+    assert.deepStrictEqual(lineIds, lineIds2, 'lineIds must be stable and deterministic');
+  });
+
+  it('differentiates comment-only changes from semantic code changes', () => {
+    const oldCode = 'const val = calculate(); // calculate total items';
+    const newCode = 'const val = calculate(); // calculate all items';
+    const result = computeAgentDiff(oldCode, newCode);
+
+    assert.strictEqual(result.summary.commentOnlyChanges >= 1, true);
+    const modifiedLine = result.lines.find(l => l.type === 'added');
+    assert.strictEqual(modifiedLine?.isCommentOnly, true);
+  });
+
+  it('verifies lossless reconstruction of old and new files from diffLines and hunks', () => {
+    const original = 'import React from "react";\n\nexport function Component() {\n  const [count, setCount] = React.useState(0);\n  return <button>Click {count}</button>;\n}';
+    const modified = 'import React from "react";\nimport { useState } from "react";\n\nexport function Component() {\n  const [count, setCount] = useState(0);\n  const [title] = useState("Counter");\n  return <div><h1>{title}</h1><button>Click {count}</button></div>;\n}';
+
+    const result = computeAgentDiff(original, modified);
+    
+    // Test reconstruction
+    const reconstructedOld = result.lines
+      .filter(l => l.type === 'unchanged' || l.type === 'deleted')
+      .map(l => l.content)
+      .join('\n');
+    assert.strictEqual(reconstructedOld, original, 'Old file reconstructed from diffLines must match original');
+
+    const reconstructedNew = result.lines
+      .filter(l => l.type === 'unchanged' || l.type === 'added' || l.type === 'reverted' || l.type === 'merged')
+      .map(l => l.content)
+      .join('\n');
+    assert.strictEqual(reconstructedNew, modified, 'New file reconstructed from diffLines must match modified');
+  });
+
+  it('computeLCS is backward compatible and throws explicit error for excessive matrices', () => {
+    // Normal input works
+    const matrix = computeLCS(['a', 'b'], ['a', 'c']);
+    assert.strictEqual(matrix[2][2], 1);
+
+    // Oversized input throws explicit error instead of silent truncation or memory crash
+    const hugeA = new Array(6000).fill('line');
+    const hugeB = new Array(6000).fill('line');
+    // 6001 * 6001 = 36,012,001 > 25,000,000 limit
+    assert.throws(
+      () => computeLCS(hugeA, hugeB),
+      /exceeds safe memory limit/
+    );
+  });
 });

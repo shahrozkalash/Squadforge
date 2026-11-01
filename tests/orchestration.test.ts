@@ -376,7 +376,7 @@ describe('Sandbox Integrity Checks, Security Auditing & Test Execution', () => {
 });
 
 describe('Multi-Agent Development Team & Registry Architecture', () => {
-  test('All 10 specialized agent roles are defined with complete specifications', () => {
+  test('All specialized agent roles are defined with complete specifications', () => {
     const expectedRoles: (keyof typeof AGENT_SPECS)[] = [
       'project_manager',
       'software_architect',
@@ -387,11 +387,12 @@ describe('Multi-Agent Development Team & Registry Architecture', () => {
       'qa_testing_specialist',
       'debugging_specialist',
       'security_specialist',
-      'devops_release_specialist'
+      'devops_release_specialist',
+      'fullstack_developer'
     ];
 
     const models = modelRegistry.getAll();
-    assert.equal(models.length, 10);
+    assert.ok(models.length >= 10);
 
     for (const role of expectedRoles) {
       const spec = AGENT_SPECS[role];

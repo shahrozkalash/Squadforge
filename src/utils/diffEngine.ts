@@ -25,6 +25,7 @@ export interface DiffLine {
   version?: number;
   timestamp?: number;
   isFormattingOnly?: boolean;
+  isCommentOnly?: boolean;
   changeCategory?: 'added' | 'removed' | 'modified' | 'reverted' | 'merged';
   overlappingAgents?: string[];
 }
@@ -36,6 +37,7 @@ export interface SplitDiffRow {
     content: string;
     type: 'unchanged' | 'deleted' | 'modified' | 'reverted';
     isFormattingOnly?: boolean;
+    isCommentOnly?: boolean;
     taskId?: string;
   };
   right?: {
@@ -47,6 +49,7 @@ export interface SplitDiffRow {
     version?: number;
     timestamp?: number;
     isFormattingOnly?: boolean;
+    isCommentOnly?: boolean;
     taskId?: string;
   };
 }
@@ -59,6 +62,7 @@ export interface AgentDiffStat {
   totalChanges: number;
   percentage: number;
   formattingOnlyCount?: number;
+  commentOnlyCount?: number;
 }
 
 export interface OverlappingEdit {
@@ -84,6 +88,8 @@ export interface DiffResult {
     formattingOnlyChanges: number;
     formattingOnlyCount: number;
     isCompletelyFormattingOnly: boolean;
+    commentOnlyChanges: number;
+    isCompletelyCommentOnly: boolean;
     agentStats: AgentDiffStat[];
   };
   overlappingEdits?: OverlappingEdit[];
@@ -155,7 +161,7 @@ export function normalizeCodeForComparison(line: string, ignoreComments: boolean
 
   try {
     const tokens: string[] = [];
-    const regex = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|===|!==|<=|>=|=>|\+\+|--|&&|\|\||\?\?|\+=|-=|\*=|\/=|[\w$]+|[^\s\w$])/g;
+    const regex = /(\/\/[^\n\r]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|===|!==|<=|>=|=>|\+\+|--|&&|\|\||\?\?|\+=|-=|\*=|\/=|[\w$]+|[^\s\w$])/g;
     let match: RegExpExecArray | null;
 
     while ((match = regex.exec(line)) !== null) {
@@ -166,7 +172,7 @@ export function normalizeCodeForComparison(line: string, ignoreComments: boolean
           tokens.push(`__CMT__${content.trim().replace(/\s+/g, ' ')}`);
         }
       } else if (raw.startsWith('"') || raw.startsWith("'")) {
-        // Content inside string without outer quotes
+        // Content inside string without outer quotes, strictly preserving all internal whitespace
         tokens.push(`__STR__${raw.slice(1, -1)}`);
       } else if (raw.startsWith('`')) {
         tokens.push(`__TMPL__${raw.slice(1, -1)}`);
@@ -205,17 +211,59 @@ export function isFormattingOnlyChange(oldStr: string, newStr: string): boolean 
   return normalizeCodeForComparison(oldStr) === normalizeCodeForComparison(newStr);
 }
 
+/**
+ * Checks whether the change between two lines is exclusively within comments,
+ * leaving executable code completely identical.
+ */
+export function isCommentOnlyChange(oldStr: string, newStr: string): boolean {
+  if (oldStr === newStr) return false;
+  const oldWithoutComments = normalizeCodeForComparison(oldStr, true);
+  const newWithoutComments = normalizeCodeForComparison(newStr, true);
+  if (oldWithoutComments !== newWithoutComments) return false;
+
+  const oldWithComments = normalizeCodeForComparison(oldStr, false);
+  const newWithComments = normalizeCodeForComparison(newStr, false);
+  return oldWithComments !== newWithComments;
+}
+
+/**
+ * Checks if a line contains only comments or whitespace (no executable code).
+ */
+export function isPureCommentLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return /^\/\//.test(trimmed) || /^\/\*[\s\S]*\*\/$/.test(trimmed) || /^\*/.test(trimmed);
+}
+
 // ---------------------------------------------------------------------------
 // 2. Memory-Efficient Myers Diff Algorithm with Adaptive Selection
 // ---------------------------------------------------------------------------
 
 /**
+ * Maximum safe matrix cell count (rows * cols) for full 2D DP matrix allocation.
+ * 25 million numbers ≈ 100-200MB memory in V8.
+ */
+export const MAX_LCS_MATRIX_CELLS = 25_000_000;
+
+/**
  * Computes Longest Common Subsequence (LCS) matrix for two line arrays.
  * Retained for backwards compatibility. Returns the complete dynamic programming matrix.
+ * Throws an explicit descriptive Error if the requested matrix would exceed safe memory thresholds,
+ * rather than silently returning an incomplete or truncated matrix.
+ * For memory-safe length calculation, use computeLCSLength() or computeMyersDiff().
  */
 export function computeLCS(a: string[], b: string[]): number[][] {
   const m = a.length;
   const n = b.length;
+  const totalCells = (m + 1) * (n + 1);
+
+  if (totalCells > MAX_LCS_MATRIX_CELLS) {
+    throw new Error(
+      `computeLCS: Requested matrix of size ${m + 1}x${n + 1} (${totalCells.toLocaleString()} cells) ` +
+      `exceeds safe memory limit of ${MAX_LCS_MATRIX_CELLS.toLocaleString()} cells. ` +
+      `Use computeLCSLength() for O(min(m, n)) memory calculation or computeMyersDiff() for diff generation.`
+    );
+  }
 
   const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
   for (let i = 0; i < m; i++) {
@@ -257,16 +305,43 @@ export function computeLCSLength(a: string[], b: string[]): number {
 }
 
 /**
+ * Normalizes input text or arrays by unifying Windows CRLF, Mac CR, and Unicode line breaks
+ */
+export function normalizeInputLines(input: string | string[]): string[] {
+  if (typeof input === 'string') {
+    if (input.length === 0) return [];
+    const normalized = input.replace(/\r\n/g, '\n').replace(/[\r\u2028\u2029]/g, '\n');
+    return normalized.split('\n');
+  }
+  return input.map(line => 
+    typeof line === 'string'
+      ? line.replace(/\r\n/g, '\n').replace(/[\r\u2028\u2029]/g, '\n')
+      : String(line)
+  );
+}
+
+/**
  * Computes difference using Myers diff algorithm with adaptive selection:
  * - Accepts either newline-delimited strings or pre-split string arrays
+ * - Normalizes Windows CRLF and Unicode line endings
  * - Prefix & suffix line trimming (eliminates 90%+ of work on typical file edits)
- * - Fast path for identical sequences
- * - Memory-efficient O(ND) Myers algorithm
- * - Bounded search for very large files to prevent catastrophic memory usage
+ * - Fast path for identical sequences and boundary operations
+ * - Memory-efficient O(ND) Myers algorithm with bounded depth
  */
 export function computeMyersDiff(a: string | string[], b: string | string[]): DiffHunkRaw[] {
-  const linesA = typeof a === 'string' ? (a.length === 0 ? [] : a.split('\n')) : a;
-  const linesB = typeof b === 'string' ? (b.length === 0 ? [] : b.split('\n')) : b;
+  return computeMyersDiffBounded(a, b, 10000);
+}
+
+/**
+ * Memory-bounded Myers diff computation with customizable maximum search depth.
+ */
+export function computeMyersDiffBounded(
+  a: string | string[], 
+  b: string | string[], 
+  maxDepth: number = 5000
+): DiffHunkRaw[] {
+  const linesA = normalizeInputLines(a);
+  const linesB = normalizeInputLines(b);
   const n = linesA.length;
   const m = linesB.length;
 
@@ -341,7 +416,7 @@ export function computeMyersDiff(a: string | string[], b: string | string[]): Di
   } else {
     // Myers O(ND) algorithm with memory protection
     const max = midN + midM;
-    const effectiveMax = Math.min(max, 10000);
+    const effectiveMax = Math.min(max, Math.max(100, maxDepth));
     const v = new Int32Array(2 * effectiveMax + 1);
     const offset = effectiveMax;
     v[offset + 1] = 0;
@@ -438,6 +513,68 @@ export function computeMyersDiff(a: string | string[], b: string | string[]): Di
   }
 
   return [...prefixHunks, ...midHunks, ...suffixHunks];
+}
+
+/**
+ * Reconstructs original and modified texts from raw diff hunks with complete fidelity.
+ */
+export function reconstructFromHunks(hunks: DiffHunkRaw[]): {
+  oldLines: string[];
+  newLines: string[];
+  oldContent: string;
+  newContent: string;
+} {
+  const oldLines: string[] = [];
+  const newLines: string[] = [];
+
+  for (const hunk of hunks) {
+    if (hunk.type === 'unchanged') {
+      oldLines.push(hunk.text);
+      newLines.push(hunk.text);
+    } else if (hunk.type === 'delete') {
+      oldLines.push(hunk.text);
+    } else if (hunk.type === 'add') {
+      newLines.push(hunk.text);
+    }
+  }
+
+  return {
+    oldLines,
+    newLines,
+    oldContent: oldLines.join('\n'),
+    newContent: newLines.join('\n')
+  };
+}
+
+/**
+ * Reconstructs original and modified texts from structured DiffLine results.
+ */
+export function reconstructFromDiffLines(lines: DiffLine[]): {
+  oldLines: string[];
+  newLines: string[];
+  oldContent: string;
+  newContent: string;
+} {
+  const oldLines: string[] = [];
+  const newLines: string[] = [];
+
+  for (const line of lines) {
+    if (line.type === 'unchanged') {
+      oldLines.push(line.content);
+      newLines.push(line.content);
+    } else if (line.type === 'deleted') {
+      oldLines.push(line.content);
+    } else if (line.type === 'added' || line.type === 'reverted' || line.type === 'merged') {
+      newLines.push(line.content);
+    }
+  }
+
+  return {
+    oldLines,
+    newLines,
+    oldContent: oldLines.join('\n'),
+    newContent: newLines.join('\n')
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -740,20 +877,21 @@ export function computeAgentDiff(
   let modifications = 0;
   let unchanged = 0;
   let formattingOnlyCount = 0;
-  const agentChangeMap = new Map<string, { additions: number; deletions: number; modifications: number; formattingOnly: number }>();
+  let commentOnlyCount = 0;
+  const agentChangeMap = new Map<string, { additions: number; deletions: number; modifications: number; formattingOnly: number; commentOnly: number }>();
 
-  const trackAgentChange = (agent: string, type: 'add' | 'delete' | 'modify', isFmt: boolean = false) => {
+  const trackAgentChange = (agent: string, type: 'add' | 'delete' | 'modify', isFmt: boolean = false, isCmt: boolean = false) => {
     const key = agent || 'swarm_agent';
-    const entry = agentChangeMap.get(key) || { additions: 0, deletions: 0, modifications: 0, formattingOnly: 0 };
+    const entry = agentChangeMap.get(key) || { additions: 0, deletions: 0, modifications: 0, formattingOnly: 0, commentOnly: 0 };
     if (type === 'add') entry.additions++;
     else if (type === 'delete') entry.deletions++;
     else if (type === 'modify') entry.modifications++;
     if (isFmt) entry.formattingOnly++;
+    if (isCmt) entry.commentOnly++;
     agentChangeMap.set(key, entry);
   };
 
   let idx = 0;
-  let lineKey = 0;
 
   while (idx < rawHunks.length) {
     const current = rawHunks[idx];
@@ -761,7 +899,7 @@ export function computeAgentDiff(
     if (current.type === 'unchanged') {
       unchanged++;
       const blame = current.newLine ? blameLookup.get(current.newLine) : undefined;
-      const rowId = `row-${lineKey++}-${hashLine(current.text)}`;
+      const rowId = `u-${current.oldLine}-${current.newLine}-${hashLine(current.text)}`;
 
       unifiedLines.push({
         id: `u-${rowId}`,
@@ -816,7 +954,6 @@ export function computeAgentDiff(
       for (let p = 0; p < maxPair; p++) {
         const del = delGroup[p];
         const add = addGroup[p];
-        const rowId = `mod-${lineKey++}-${del ? hashLine(del.text) : ''}-${add ? hashLine(add.text) : ''}`;
 
         if (del && add) {
           // Paired modification
@@ -824,11 +961,14 @@ export function computeAgentDiff(
           const blame = add.newLine ? blameLookup.get(add.newLine) : undefined;
           const author = blame?.author || options?.defaultTargetAgent || 'swarm_agent';
           const isFmt = isFormattingOnlyChange(del.text, add.text);
+          const isCmt = isCommentOnlyChange(del.text, add.text);
           const isRev = checkGenuineRevert(add.text, options?.history, options?.newVersion ?? 999);
-          const changeType: DiffLineType = isRev ? 'reverted' : options?.isMerged ? 'merged' : 'modified';
 
           if (isFmt) formattingOnlyCount++;
-          trackAgentChange(author, 'modify', isFmt);
+          if (isCmt) commentOnlyCount++;
+          trackAgentChange(author, 'modify', isFmt, isCmt);
+
+          const rowId = `mod-${del.oldLine}-${add.newLine}-${hashLine(del.text + '::' + add.text)}`;
 
           unifiedLines.push({
             id: `u-del-${rowId}`,
@@ -839,6 +979,7 @@ export function computeAgentDiff(
             author: options?.defaultOldAgent,
             version: options?.oldVersion,
             isFormattingOnly: isFmt,
+            isCommentOnly: isCmt,
             changeCategory: 'removed',
             taskId: options?.taskId,
           });
@@ -857,6 +998,7 @@ export function computeAgentDiff(
             commitMessage: blame?.commitMessage ?? options?.commitMessage,
             timestamp: blame?.timestamp ?? options?.timestamp,
             isFormattingOnly: isFmt,
+            isCommentOnly: isCmt,
             changeCategory: isRev ? 'reverted' : options?.isMerged ? 'merged' : 'modified',
           });
 
@@ -867,6 +1009,7 @@ export function computeAgentDiff(
               content: del.text,
               type: 'modified',
               isFormattingOnly: isFmt,
+              isCommentOnly: isCmt,
               taskId: options?.taskId,
             },
             right: {
@@ -878,6 +1021,7 @@ export function computeAgentDiff(
               commitMessage: blame?.commitMessage ?? options?.commitMessage,
               timestamp: blame?.timestamp ?? options?.timestamp,
               isFormattingOnly: isFmt,
+              isCommentOnly: isCmt,
               taskId: blame?.taskId || options?.taskId,
             },
           });
@@ -885,7 +1029,11 @@ export function computeAgentDiff(
           // Pure deletion
           deletions++;
           const author = options?.defaultOldAgent || options?.defaultTargetAgent || 'swarm_agent';
-          trackAgentChange(author, 'delete');
+          const isCmt = isPureCommentLine(del.text);
+          if (isCmt) commentOnlyCount++;
+          trackAgentChange(author, 'delete', false, isCmt);
+
+          const rowId = `del-${del.oldLine}-${hashLine(del.text)}`;
 
           unifiedLines.push({
             id: `u-${rowId}`,
@@ -895,6 +1043,7 @@ export function computeAgentDiff(
             content: del.text,
             author: options?.defaultOldAgent,
             version: options?.oldVersion,
+            isCommentOnly: isCmt,
             changeCategory: 'removed',
             taskId: options?.taskId,
           });
@@ -905,6 +1054,7 @@ export function computeAgentDiff(
               lineNumber: del.oldLine || 0,
               content: del.text,
               type: 'deleted',
+              isCommentOnly: isCmt,
               taskId: options?.taskId,
             },
             right: undefined,
@@ -916,8 +1066,12 @@ export function computeAgentDiff(
           const author = blame?.author || options?.defaultTargetAgent || 'swarm_agent';
           const isRev = checkGenuineRevert(add.text, options?.history, options?.newVersion ?? 999);
           const changeType: DiffLineType = isRev ? 'reverted' : options?.isMerged ? 'merged' : 'added';
+          const isCmt = isPureCommentLine(add.text);
+          if (isCmt) commentOnlyCount++;
 
-          trackAgentChange(author, 'add');
+          trackAgentChange(author, 'add', false, isCmt);
+
+          const rowId = `add-${add.newLine}-${hashLine(add.text)}`;
 
           unifiedLines.push({
             id: `u-${rowId}`,
@@ -931,6 +1085,7 @@ export function computeAgentDiff(
             version: blame?.version ?? options?.newVersion,
             commitMessage: blame?.commitMessage ?? options?.commitMessage,
             timestamp: blame?.timestamp ?? options?.timestamp,
+            isCommentOnly: isCmt,
             changeCategory: isRev ? 'reverted' : options?.isMerged ? 'merged' : 'added',
           });
 
@@ -945,6 +1100,7 @@ export function computeAgentDiff(
               version: blame?.version ?? options?.newVersion,
               commitMessage: blame?.commitMessage ?? options?.commitMessage,
               timestamp: blame?.timestamp ?? options?.timestamp,
+              isCommentOnly: isCmt,
               taskId: blame?.taskId || options?.taskId,
             },
           });
@@ -955,6 +1111,7 @@ export function computeAgentDiff(
 
   const totalChanges = additions + deletions + modifications;
   const isCompletelyFormattingOnly = totalChanges > 0 && modifications > 0 && additions === 0 && deletions === 0 && formattingOnlyCount === modifications;
+  const isCompletelyCommentOnly = totalChanges > 0 && commentOnlyCount === totalChanges;
 
   const agentStats: AgentDiffStat[] = Array.from(agentChangeMap.entries()).map(([agent, stats]) => {
     const changes = stats.additions + stats.deletions + stats.modifications;
@@ -966,6 +1123,7 @@ export function computeAgentDiff(
       totalChanges: changes,
       percentage: totalChanges > 0 ? Math.round((changes / totalChanges) * 100) : 0,
       formattingOnlyCount: stats.formattingOnly,
+      commentOnlyCount: stats.commentOnly,
     };
   }).sort((a, b) => b.totalChanges - a.totalChanges);
 
@@ -985,6 +1143,8 @@ export function computeAgentDiff(
       formattingOnlyChanges: formattingOnlyCount,
       formattingOnlyCount,
       isCompletelyFormattingOnly,
+      commentOnlyChanges: commentOnlyCount,
+      isCompletelyCommentOnly,
       agentStats,
     },
     overlappingEdits,
@@ -1077,90 +1237,142 @@ export function computeFileRevisionTimeline(
 /**
  * Maps an agent or model identifier to a standardized UI display role, avatar, and color theme.
  */
-export function getAgentMeta(agentName?: string): {
+export interface AgentDiffMeta {
   displayName: string;
+  name: string;
   badgeClass: string;
+  badge: string;
   borderClass: string;
+  lineHighlight: string;
   bgGlowClass: string;
   roleIcon: string;
-} {
+  dot: string;
+}
+
+export function getAgentMeta(agentName?: string): AgentDiffMeta {
   const name = (agentName || 'Swarm Agent').toLowerCase();
 
   if (name.includes('architect') || name.includes('gpt-4.5') || name.includes('o1')) {
     return {
       displayName: agentName || 'Software Architect',
+      name: agentName || 'Software Architect',
       badgeClass: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
+      badge: 'bg-purple-500/15 text-purple-300 border-purple-500/30',
       borderClass: 'border-l-purple-500',
+      lineHighlight: 'bg-purple-950/25 border-l-2 border-purple-400',
       bgGlowClass: 'bg-purple-500/5',
       roleIcon: '📐',
+      dot: 'bg-purple-400'
+    };
+  }
+
+  if (name.includes('fullstack')) {
+    return {
+      displayName: agentName || 'Fullstack Developer',
+      name: agentName || 'Fullstack Developer',
+      badgeClass: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
+      badge: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
+      borderClass: 'border-l-violet-500',
+      lineHighlight: 'bg-violet-950/25 border-l-2 border-violet-400',
+      bgGlowClass: 'bg-violet-500/5',
+      roleIcon: '⚡',
+      dot: 'bg-violet-400'
     };
   }
 
   if (name.includes('frontend') || name.includes('claude')) {
     return {
       displayName: agentName || 'Frontend Developer',
+      name: agentName || 'Frontend Developer',
       badgeClass: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+      badge: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
       borderClass: 'border-l-amber-500',
+      lineHighlight: 'bg-amber-950/25 border-l-2 border-amber-400',
       bgGlowClass: 'bg-amber-500/5',
       roleIcon: '🎨',
+      dot: 'bg-amber-400'
     };
   }
 
   if (name.includes('backend') || name.includes('gpt-4o') || name.includes('codex')) {
     return {
       displayName: agentName || 'Backend Developer',
+      name: agentName || 'Backend Developer',
       badgeClass: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
+      badge: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
       borderClass: 'border-l-emerald-500',
+      lineHighlight: 'bg-emerald-950/25 border-l-2 border-emerald-400',
       bgGlowClass: 'bg-emerald-500/5',
       roleIcon: '⚡',
+      dot: 'bg-emerald-400'
     };
   }
 
   if (name.includes('qa') || name.includes('test') || name.includes('verifier')) {
     return {
       displayName: agentName || 'QA & Test Engineer',
+      name: agentName || 'QA & Test Engineer',
       badgeClass: 'bg-teal-500/15 text-teal-300 border-teal-500/30',
+      badge: 'bg-teal-500/15 text-teal-300 border-teal-500/30',
       borderClass: 'border-l-teal-500',
+      lineHighlight: 'bg-teal-950/25 border-l-2 border-teal-400',
       bgGlowClass: 'bg-teal-500/5',
       roleIcon: '🧪',
+      dot: 'bg-teal-400'
     };
   }
 
   if (name.includes('security') || name.includes('audit')) {
     return {
       displayName: agentName || 'Security Auditor',
+      name: agentName || 'Security Auditor',
       badgeClass: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+      badge: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
       borderClass: 'border-l-rose-500',
+      lineHighlight: 'bg-rose-950/25 border-l-2 border-rose-400',
       bgGlowClass: 'bg-rose-500/5',
       roleIcon: '🛡️',
+      dot: 'bg-rose-400'
     };
   }
 
   if (name.includes('gemini')) {
     return {
       displayName: agentName || 'Gemini 2.5',
+      name: agentName || 'Gemini 2.5',
       badgeClass: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
+      badge: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
       borderClass: 'border-l-blue-500',
+      lineHighlight: 'bg-blue-950/25 border-l-2 border-blue-400',
       bgGlowClass: 'bg-blue-500/5',
       roleIcon: '✨',
+      dot: 'bg-blue-400'
     };
   }
 
   if (name.includes('deepseek')) {
     return {
       displayName: agentName || 'DeepSeek Engine',
+      name: agentName || 'DeepSeek Engine',
       badgeClass: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+      badge: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
       borderClass: 'border-l-cyan-500',
+      lineHighlight: 'bg-cyan-950/25 border-l-2 border-cyan-400',
       bgGlowClass: 'bg-cyan-500/5',
       roleIcon: '🧠',
+      dot: 'bg-cyan-400'
     };
   }
 
   return {
     displayName: agentName || 'Swarm Engineer',
+    name: agentName || 'Swarm Engineer',
     badgeClass: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+    badge: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
     borderClass: 'border-l-indigo-500',
+    lineHighlight: 'bg-indigo-950/25 border-l-2 border-indigo-400',
     bgGlowClass: 'bg-indigo-500/5',
     roleIcon: '🤖',
+    dot: 'bg-indigo-400'
   };
 }

@@ -3,6 +3,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import * as esbuild from 'esbuild';
+import ts from 'typescript';
 import { ProjectFile } from '../types.js';
 
 export interface SyntaxErrorDetail {
@@ -48,10 +49,33 @@ export interface BuildValidationReport {
   errors: string[];
 }
 
+export interface TypeDiagnostic {
+  filePath: string;
+  line?: number;
+  column?: number;
+  code: string;
+  message: string;
+  category: 'error' | 'warning' | 'suggestion' | 'message';
+}
+
+export interface TypeCheckReport {
+  status: 'passed' | 'failed' | 'skipped' | 'not_run';
+  passed: boolean;
+  diagnostics: TypeDiagnostic[];
+  errors: TypeDiagnostic[];
+  warnings: TypeDiagnostic[];
+  totalChecked: number;
+  skipReason?: string;
+  durationMs?: number;
+  command?: string;
+  exitCode?: number;
+}
+
 export interface VerificationExecutionResult {
   passed: boolean;
   summary: string;
   syntaxErrors: SyntaxErrorDetail[];
+  typeCheckReport: TypeCheckReport;
   securityAudit: {
     passed: boolean;
     score: number;
@@ -637,12 +661,165 @@ export class ExecutionAdapter {
   }
 
   /**
+   * Performs genuine TypeScript compilation and type checking using project's installed TypeScript compiler.
+   * Produces actual compiler diagnostics with file paths, line numbers, TS codes, and readable messages.
+   * Strictly distinguishes syntax validation from type validation, and passed vs failed vs skipped states.
+   */
+  static runTypeCheck(buildIdOrFiles: string | ProjectFile[], filesMaybe?: ProjectFile[]): TypeCheckReport {
+    let buildId: string;
+    let files: ProjectFile[];
+    if (typeof buildIdOrFiles === 'string') {
+      buildId = buildIdOrFiles;
+      files = filesMaybe || [];
+    } else {
+      buildId = 'adhoc';
+      files = Array.isArray(buildIdOrFiles) ? buildIdOrFiles : [];
+    }
+
+    const tsFiles = files.filter(f => 
+      /\.(ts|tsx)$/.test(f.path) && 
+      !f.path.endsWith('.d.ts')
+    );
+
+    if (tsFiles.length === 0) {
+      return {
+        status: 'skipped',
+        passed: false,
+        diagnostics: [],
+        errors: [],
+        warnings: [],
+        totalChecked: 0,
+        skipReason: 'No TypeScript (.ts, .tsx) source files found in workspace',
+        command: 'tsc --noEmit'
+      };
+    }
+
+    const startTime = Date.now();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `squadforge_typecheck_${buildId}_`));
+
+    try {
+      // 1. Write project files to isolated sandbox
+      for (const file of files) {
+        const { valid, cleanPath } = this.sanitizeFilePath(file.path);
+        if (!valid) continue;
+        const target = path.join(tempDir, cleanPath);
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        fs.writeFileSync(target, file.content, 'utf-8');
+      }
+
+      // 2. Locate or create tsconfig.json
+      const rootFileNames = tsFiles.map(f => path.join(tempDir, f.path)).filter(p => fs.existsSync(p));
+      if (rootFileNames.length === 0) {
+        return {
+          status: 'skipped',
+          passed: false,
+          diagnostics: [],
+          errors: [],
+          warnings: [],
+          totalChecked: 0,
+          skipReason: 'No resolved TypeScript source files found on disk',
+          command: 'tsc --noEmit'
+        };
+      }
+
+      const compilerOptions: ts.CompilerOptions = {
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        jsx: ts.JsxEmit.ReactJSX,
+        skipLibCheck: true,
+        noEmit: true,
+        allowJs: true,
+        strict: false
+      };
+
+      const host = ts.createCompilerHost(compilerOptions);
+      const program = ts.createProgram(rootFileNames, compilerOptions, host);
+      const rawDiagnostics = ts.getPreEmitDiagnostics(program);
+
+      const diagnostics: TypeDiagnostic[] = [];
+
+      for (const diag of rawDiagnostics) {
+        if (diag.file) {
+          const relPath = path.relative(tempDir, diag.file.fileName).replace(/\\/g, '/');
+          // Skip external libs and node_modules
+          if (relPath.startsWith('..') || relPath.includes('node_modules')) continue;
+
+          const { line, character } = diag.file.getLineAndCharacterOfPosition(diag.start || 0);
+          const category = diag.category === ts.DiagnosticCategory.Error ? 'error'
+            : diag.category === ts.DiagnosticCategory.Warning ? 'warning'
+            : diag.category === ts.DiagnosticCategory.Suggestion ? 'suggestion' : 'message';
+
+          diagnostics.push({
+            filePath: relPath,
+            line: line + 1,
+            column: character + 1,
+            code: `TS${diag.code}`,
+            message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
+            category
+          });
+        } else {
+          diagnostics.push({
+            filePath: 'project',
+            code: `TS${diag.code}`,
+            message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
+            category: 'error'
+          });
+        }
+      }
+
+      const errors = diagnostics.filter(d => d.category === 'error');
+      const warnings = diagnostics.filter(d => d.category === 'warning');
+      const durationMs = Date.now() - startTime;
+      const passed = errors.length === 0;
+
+      return {
+        status: passed ? 'passed' : 'failed',
+        passed,
+        diagnostics,
+        errors,
+        warnings,
+        totalChecked: rootFileNames.length,
+        durationMs,
+        command: 'tsc --noEmit',
+        exitCode: passed ? 0 : 1
+      };
+    } catch (err: any) {
+      return {
+        status: 'failed',
+        passed: false,
+        diagnostics: [{
+          filePath: 'tsc',
+          code: 'TS_EXEC_ERR',
+          message: err.message || 'TypeScript compilation execution failure',
+          category: 'error'
+        }],
+        errors: [{
+          filePath: 'tsc',
+          code: 'TS_EXEC_ERR',
+          message: err.message || 'TypeScript compilation execution failure',
+          category: 'error'
+        }],
+        warnings: [],
+        totalChecked: tsFiles.length,
+        durationMs: Date.now() - startTime,
+        command: 'tsc --noEmit',
+        exitCode: 1
+      };
+    } finally {
+      try {
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      } catch {}
+    }
+  }
+
+  /**
    * Executes complete verification suite on a build
    */
   static runCompleteVerification(buildId: string, files: ProjectFile[]): VerificationExecutionResult {
     const executedAt = Date.now();
 
-    // 1. Syntax & language validation
+    // 1. Syntax & language validation (esbuild AST transformation)
     const syntaxErrors = this.validateSyntax(files);
 
     // 2. Configuration validation
@@ -651,9 +828,26 @@ export class ExecutionAdapter {
     // 3. Security audit
     const securityAudit = this.auditSecurity(files);
 
-    // 4. Isolated unit & integration tests
-    let testReport: TestExecutionReport;
+    // 4. Genuine TypeScript type checking (tsc compiler diagnostics)
+    let typeCheckReport: TypeCheckReport;
     if (syntaxErrors.length === 0) {
+      typeCheckReport = this.runTypeCheck(buildId, files);
+    } else {
+      typeCheckReport = {
+        status: 'skipped',
+        passed: false,
+        diagnostics: [],
+        errors: [],
+        warnings: [],
+        totalChecked: 0,
+        skipReason: 'Type checking deferred: Syntax errors must be resolved first.',
+        command: 'tsc --noEmit'
+      };
+    }
+
+    // 5. Isolated unit & integration tests
+    let testReport: TestExecutionReport;
+    if (syntaxErrors.length === 0 && typeCheckReport.errors.length === 0) {
       testReport = this.runIsolatedTests(buildId, files);
     } else {
       testReport = {
@@ -663,36 +857,45 @@ export class ExecutionAdapter {
         failed: 0,
         skipped: 0,
         details: [],
-        skipReason: 'Tests deferred: Syntax errors must be resolved first.'
+        skipReason: syntaxErrors.length > 0
+          ? 'Tests deferred: Syntax errors must be resolved first.'
+          : 'Tests deferred: TypeScript type errors must be resolved first.'
       };
     }
 
-    // 5. Production build validation
+    // 6. Production build validation
     let buildReport: BuildValidationReport;
-    if (syntaxErrors.length === 0) {
+    if (syntaxErrors.length === 0 && typeCheckReport.errors.length === 0) {
       buildReport = this.runProductionBuild(buildId, files);
     } else {
       buildReport = {
         status: 'skipped',
         passed: false,
-        errors: ['Build deferred: Syntax errors must be resolved first.']
+        errors: [syntaxErrors.length > 0 
+          ? 'Build deferred: Syntax errors must be resolved first.' 
+          : 'Build deferred: TypeScript type errors must be resolved first.']
       };
     }
 
+    const hasTsFiles = files.some(f => f.path.endsWith('.ts') || f.path.endsWith('.tsx'));
+    const typePassed = hasTsFiles ? (typeCheckReport.status === 'passed') : true;
+
     const passed = syntaxErrors.length === 0 && 
+                   typePassed &&
                    securityAudit.passed && 
                    configErrors.length === 0 &&
                    testReport.status !== 'failed' && 
                    (buildReport.status === 'passed' || buildReport.status === 'skipped');
 
     const summary = passed
-      ? `All verification checks passed (${files.length} files, ${testReport.passed} tests passed, security score: ${securityAudit.score}/100)`
-      : `Verification found issues: ${syntaxErrors.length} syntax error(s), ${testReport.failed} failed test(s), ${securityAudit.findings.length} security finding(s)`;
+      ? `All verification checks passed (${files.length} files, ${typeCheckReport.totalChecked} TS files checked, ${testReport.passed} tests passed, security score: ${securityAudit.score}/100)`
+      : `Verification found issues: ${syntaxErrors.length} syntax error(s), ${typeCheckReport.errors.length} type error(s), ${testReport.failed} failed test(s), ${securityAudit.findings.length} security finding(s)`;
 
     return {
       passed,
       summary,
       syntaxErrors,
+      typeCheckReport,
       securityAudit,
       configErrors,
       testReport,

@@ -264,6 +264,8 @@ Architecture Decisions (ADRs):
 ${build.architectureDecisions.map(a => `- ${a.title}: ${a.decision}`).join('\n')}
 
 Create the starter file tree and dependency-aware tasks.
+Available Agent Roles: software_architect, backend_developer, frontend_developer, fullstack_developer, database_specialist, qa_testing_specialist, security_specialist, devops_release_specialist, debugging_specialist.
+Assign fullstack_developer when a task bridges both frontend views and backend integration/state orchestration.
 Output ONLY JSON matching this structure:
 {
   "actions": [
@@ -278,7 +280,8 @@ Output ONLY JSON matching this structure:
       "title": "Architect Domain Data Types & Contracts",
       "description": "Establish TypeScript interfaces for domain models and data transfer objects",
       "filePaths": ["src/types/domain.ts"],
-      "priority": 2
+      "priority": 2,
+      "assignedRole": "software_architect"
     }
   ]
 }`;
@@ -301,6 +304,7 @@ Output ONLY JSON matching this structure:
             filePaths: action.filePaths,
             priority: action.priority || 3,
             maxRetries: this.MAX_TASK_RETRIES,
+            assignedRole: action.assignedRole,
             milestone: m1Id
           });
           build.milestones[0].taskIds.push(t.id);
@@ -644,7 +648,7 @@ Output ONLY JSON matching this structure:
       priority: 2,
       dependencies: [task1.id, task4.id],
       maxRetries: this.MAX_TASK_RETRIES,
-      assignedRole: 'frontend_developer',
+      assignedRole: 'fullstack_developer',
       milestone: m2
     });
 

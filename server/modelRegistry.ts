@@ -125,7 +125,7 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
     role: 'fullstack_developer',
     title: 'Fullstack Developer Agent',
     description: 'Implements cohesive end-to-end features bridging frontend views, client state, and backend API routes.',
-    assignedModelId: 'gemini',
+    assignedModelId: 'gemini-fullstack',
     responsibilities: [
       'Implement full-stack vertical slices and features',
       'Ensure tight coupling and contracts between frontend and backend',
@@ -346,6 +346,27 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     avatarColor: 'bg-teal-500/20 text-teal-300 border-teal-500/30',
     badge: 'OPS',
     description: 'DevOps & Release: Dockerfile, CI/CD workflows, build scripts, and Git feature branches'
+  },
+  {
+    id: 'gemini-fullstack',
+    displayName: 'Gemini 2.5 (Fullstack Dev)',
+    providerModel: 'google/gemini-2.5-flash',
+    provider: 'gemini',
+    tier: 'free',
+    agentRole: 'fullstack_developer',
+    strengths: ['frontend', 'backend', 'architecture', 'database', 'testing'],
+    capabilityLevel: 'advanced',
+    contextWindow: 1048576,
+    maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 0.15,
+      outputCostPerMillion: 0.60,
+      currency: 'USD'
+    },
+    enabled: true,
+    avatarColor: 'bg-violet-500/20 text-violet-300 border-violet-500/30',
+    badge: 'FS',
+    description: 'Fullstack Developer: end-to-end features, frontend-backend API contracts, and user workflows'
   }
 ];
 
@@ -362,6 +383,10 @@ class ModelRegistryManager {
 
   getById(id: string): ModelConfig | undefined {
     return this.models.get(id);
+  }
+
+  getModel(id: string): ModelConfig | undefined {
+    return this.getById(id);
   }
 
   getByRole(role: AgentRole): ModelConfig | undefined {

@@ -138,4 +138,66 @@ export const branch = 'feature';
     assert.equal(result.securityAudit.passed, true);
     assert.ok(result.summary.includes('passed'));
   });
+
+  test('Distinguishes valid syntax from real TypeScript type errors', () => {
+    // Valid JS/TS syntax, but illegal TypeScript type assignment
+    const typeErrorFiles: ProjectFile[] = [
+      {
+        path: 'src/badTypes.ts',
+        content: 'export const calculate = (val: number): string => { const res: number = "not_a_number"; return String(val); };',
+        version: 1,
+        history: []
+      }
+    ];
+
+    // 1. Syntax check passes because AST is syntactically valid TypeScript
+    const syntaxErrors = ExecutionAdapter.validateSyntax(typeErrorFiles);
+    assert.equal(syntaxErrors.length, 0, 'Syntax validation must pass for syntactically legal code');
+
+    // 2. Real TypeScript compiler check detects genuine TS2322 type error
+    const typeReport = ExecutionAdapter.runTypeCheck('test_type_err_build', typeErrorFiles);
+    assert.equal(typeReport.status, 'failed', 'Type check status must be failed');
+    assert.equal(typeReport.passed, false, 'Type check passed flag must be false');
+    assert.ok(typeReport.errors.length > 0, 'Must record diagnostic errors');
+
+    const ts2322 = typeReport.errors.find(e => e.code === 'TS2322');
+    assert.ok(ts2322, 'Must capture exact TS2322 diagnostic code');
+    assert.equal(ts2322?.filePath, 'src/badTypes.ts');
+    assert.ok(ts2322?.line && ts2322.line >= 1);
+    assert.ok(ts2322?.message.includes("Type 'string' is not assignable to type 'number'"));
+  });
+
+  test('Reports skipped status without falsely claiming passed when no TS files exist', () => {
+    const htmlOnlyFiles: ProjectFile[] = [
+      {
+        path: 'index.html',
+        content: '<!DOCTYPE html><html><body><h1>Hello</h1></body></html>',
+        version: 1,
+        history: []
+      }
+    ];
+
+    const typeReport = ExecutionAdapter.runTypeCheck('test_no_ts_build', htmlOnlyFiles);
+    assert.equal(typeReport.status, 'skipped');
+    assert.equal(typeReport.passed, false, 'Never report type checking as passed when it was skipped');
+    assert.ok(typeReport.skipReason?.includes('No TypeScript'));
+  });
+
+  test('Defers type checking and reports skipped when fatal syntax errors exist', () => {
+    const brokenFiles: ProjectFile[] = [
+      {
+        path: 'src/broken.ts',
+        content: 'function syntaxError( { missing closing brace',
+        version: 1,
+        history: []
+      }
+    ];
+
+    const result = ExecutionAdapter.runCompleteVerification('test_syntax_block_build', brokenFiles);
+    assert.equal(result.passed, false);
+    assert.ok(result.syntaxErrors.length > 0);
+    assert.equal(result.typeCheckReport.status, 'skipped');
+    assert.equal(result.typeCheckReport.passed, false);
+    assert.ok(result.typeCheckReport.skipReason?.includes('Syntax errors must be resolved first'));
+  });
 });

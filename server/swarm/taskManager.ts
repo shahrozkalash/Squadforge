@@ -66,6 +66,18 @@ export class TaskManager {
    * Atomic lock prevents two models from ever claiming the same task.
    */
   static claimTask(buildId: string, modelId: string, strengths: ModelStrength[] = [], agentRole?: AgentRole): Task | null {
+    if (!agentRole || strengths.length === 0) {
+      const modelCfg = modelRegistry.getById(modelId);
+      if (modelCfg) {
+        if (!agentRole && modelCfg.agentRole) {
+          agentRole = modelCfg.agentRole;
+        }
+        if (strengths.length === 0 && modelCfg.strengths) {
+          strengths = modelCfg.strengths;
+        }
+      }
+    }
+
     this.cleanExpiredLeases(buildId);
 
     const tasks = db.getTasks(buildId);
@@ -95,6 +107,10 @@ export class TaskManager {
         let score = 0;
         if (agentRole && task.assignedRole === agentRole) {
           score += 25;
+        }
+        // Fullstack developer can also claim frontend or backend tasks when no fullstack tasks are open
+        if (agentRole === 'fullstack_developer' && (task.assignedRole === 'frontend_developer' || task.assignedRole === 'backend_developer')) {
+          score += 15;
         }
         const text = `${task.title} ${task.description} ${task.filePaths.join(' ')}`.toLowerCase();
         for (const strength of strengths) {
@@ -307,9 +323,15 @@ export class TaskManager {
       }
     };
 
-    // If taskResult was supplied, normalize test statuses
+    // If taskResult was supplied, normalize test statuses and deduplicate on retries
     if (result.testsExecuted) {
-      result.testsExecuted = result.testsExecuted.map(t => ({
+      const seen = new Set<string>();
+      result.testsExecuted = result.testsExecuted.filter(t => {
+        const key = `${t.name}_${t.status}_${t.passed}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).map(t => ({
         ...t,
         status: t.status || (t.passed ? 'passed' : 'failed')
       }));
@@ -331,10 +353,21 @@ export class TaskManager {
       executionSource: taskResult?.executionEvidence?.executionSource
     };
 
-    const updatedHistory = [...(task.verificationHistory || []), newHistoryEntry];
+    // Deduplicate history entries so retries cannot create duplicate execution records
+    const existingHistory = task.verificationHistory || [];
+    const isDuplicate = existingHistory.some(h => 
+      h.verifier === modelId &&
+      h.status === verification.verificationStatus &&
+      h.command === newHistoryEntry.command &&
+      h.exitCode === newHistoryEntry.exitCode &&
+      h.details === newHistoryEntry.details &&
+      Math.abs(h.timestamp - now) < 2000
+    );
+
+    const updatedHistory = isDuplicate ? existingHistory : [...existingHistory, newHistoryEntry];
 
     // Separate task status (completed) from honest verification output
-    const isVerificationFailed = verification.errors.length > 0 && !verification.filesVerified;
+    const isVerificationFailed = verification.errors.length > 0 || !verification.filesVerified;
     
     db.updateTask(buildId, taskId, {
       status: isVerificationFailed ? 'failed' : 'completed',

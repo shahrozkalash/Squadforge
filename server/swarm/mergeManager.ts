@@ -136,14 +136,17 @@ export class MergeManager {
     const now = Date.now();
     const renewedPaths: string[] = [];
 
-    // Verify all leases are held by modelId
+    // Verify all leases are currently held and active for modelId
     for (const p of sortedPaths) {
       const file = db.getFile(buildId, p);
       if (!file) {
         return { success: false, error: `File ${p} not found` };
       }
-      if (file.leaseOwner && file.leaseOwner !== modelId && file.leaseExpiresAt && file.leaseExpiresAt > now) {
-        return { success: false, error: `File ${p} is leased by ${file.leaseOwner}` };
+      if (!file.leaseOwner || file.leaseOwner !== modelId) {
+        return { success: false, error: `Cannot renew lease: File ${p} is not leased by ${modelId}` };
+      }
+      if (!file.leaseExpiresAt || file.leaseExpiresAt <= now) {
+        return { success: false, error: `Cannot renew lease: Lease for file ${p} has already expired` };
       }
     }
 

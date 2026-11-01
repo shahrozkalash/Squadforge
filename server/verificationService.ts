@@ -78,15 +78,36 @@ export class HonestVerificationService {
       }
     }
 
-    // Type checking check
-    const typePassed = execResult.syntaxErrors.filter(e => e.filePath.endsWith('.ts') || e.filePath.endsWith('.tsx')).length === 0;
+    // 2b. Genuine TypeScript Compiler Type Checking (tsc diagnostics)
+    const typeReport = execResult.typeCheckReport;
+    const hasTsFiles = files.some(f => f.path.endsWith('.ts') || f.path.endsWith('.tsx'));
+    const typeStatus: 'passed' | 'failed' | 'skipped' | 'blocked' = !hasTsFiles
+      ? 'passed'
+      : typeReport.status === 'passed'
+      ? 'passed'
+      : typeReport.status === 'failed'
+      ? 'failed'
+      : 'skipped';
+    const typePassed = hasTsFiles ? typeReport.passed : true;
+
     checks.push({
       category: 'types',
-      name: 'TypeScript Structural Typing',
-      status: typePassed ? 'passed' : 'failed',
+      name: 'TypeScript Compiler Verification (tsc)',
+      status: typeStatus,
       passed: typePassed,
-      evidence: typePassed ? 'TypeScript syntax and structure valid.' : 'TypeScript syntax errors detected.'
+      evidence: typeStatus === 'passed'
+        ? `All ${typeReport.totalChecked || files.length} TypeScript file(s) type-checked cleanly with 0 diagnostics.`
+        : typeStatus === 'skipped'
+        ? (typeReport.skipReason || 'TypeScript verification was skipped.')
+        : `${typeReport.errors.length} TypeScript diagnostic error(s): ${typeReport.errors.map(e => `${e.filePath}:${e.line || 1} [${e.code}] ${e.message}`).join('; ')}`,
+      reasonIfSkipped: typeStatus === 'skipped' ? typeReport.skipReason : undefined
     });
+
+    if (typeReport.errors.length > 0) {
+      for (const err of typeReport.errors) {
+        knownDefects.push(`TypeScript error in ${err.filePath}:${err.line || 1} [${err.code}]: ${err.message}`);
+      }
+    }
 
     // Security audit check
     const secPassed = execResult.securityAudit.passed;
@@ -318,12 +339,27 @@ export class HonestVerificationService {
       evidence: functionalStatusObj.details
     });
 
+    const hasSkippedStages = 
+      (hasTsFiles && typeStatus === 'skipped') || 
+      testReport.status === 'skipped' || 
+      buildReport.status === 'skipped';
+
+    if (testReport.status === 'skipped') {
+      unresolvedCriteria.push(`Automated test verification was skipped: ${testReport.skipReason || 'No tests authored'}`);
+    }
+    if (hasTsFiles && typeStatus === 'skipped') {
+      unresolvedCriteria.push(`TypeScript type check was skipped: ${typeReport.skipReason || 'Deferred'}`);
+    }
+    if (buildReport.status === 'skipped') {
+      unresolvedCriteria.push('Production build bundling was skipped: No standard entry point.');
+    }
+
     const compilationIsPassing = syntaxPassed && typePassed && (!buildReport || buildReport.passed !== false) && contractResult.issues.filter(i => i.severity === 'error').length === 0;
     const runtimeIsPassing = previewPassed && runtimeReport.verified && previewResult.mode !== 'fallback_preview';
     const functionalIsPassing = functionalStatusObj.status === 'passed';
 
     // 7. Determine Honest Verdict based on real evidence
-    // A build must ONLY receive a verified verdict when all 3 checks pass, known defects are 0, and automated tests succeed.
+    // A build must ONLY receive a verified verdict when all checks genuinely pass, known defects are 0, and no required stages were skipped.
     let verdict: VerificationVerdict;
 
     if (build.status === 'stopped' || build.status === 'failed') {
@@ -337,7 +373,11 @@ export class HonestVerificationService {
       runtimeIsPassing &&
       functionalIsPassing &&
       knownDefects.length === 0 &&
-      (testReport.status === 'passed' || testReport.total === 0)
+      testReport.status === 'passed' &&
+      testReport.passed > 0 &&
+      typePassed &&
+      buildReport.status === 'passed' &&
+      !hasSkippedStages
     ) {
       verdict = 'verified';
     } else {

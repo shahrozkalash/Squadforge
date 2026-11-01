@@ -1334,16 +1334,6 @@ export class PersistentDatabase {
       return null;
     }
 
-    const updated: Task = {
-      ...task,
-      status: 'in_progress',
-      claimedBy: modelId,
-      leaseExpiresAt
-    };
-    list[index] = updated;
-    this.tasks.set(buildId, list);
-    this.broadcast(buildId, 'task_updated', updated);
-
     try {
       const res = this.dbManager.db.prepare(`
         UPDATE tasks SET status = 'in_progress', claimed_by = ?, lease_expires_at = ?
@@ -1354,11 +1344,21 @@ export class PersistentDatabase {
         // Lost race condition in database
         return null;
       }
+
+      const updated: Task = {
+        ...task,
+        status: 'in_progress',
+        claimedBy: modelId,
+        leaseExpiresAt
+      };
+      list[index] = updated;
+      this.tasks.set(buildId, list);
+      this.broadcast(buildId, 'task_updated', updated);
+      return updated;
     } catch (err: any) {
       this.handleDatabaseWriteError('claimTaskAtomic', err);
+      return null;
     }
-
-    return updated;
   }
 
   // --- Files ---
