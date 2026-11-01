@@ -80,27 +80,29 @@ export class HonestVerificationService {
 
     // 2b. Genuine TypeScript Compiler Type Checking (tsc diagnostics)
     const typeReport = execResult.typeCheckReport;
-    const hasTsFiles = files.some(f => f.path.endsWith('.ts') || f.path.endsWith('.tsx'));
+    const hasTsFiles = files.some(f => f.path.endsWith('.ts') || f.path.endsWith('.tsx') || f.path === 'tsconfig.json');
     const typeStatus: 'passed' | 'failed' | 'skipped' | 'blocked' = !hasTsFiles
-      ? 'passed'
+      ? 'skipped'
       : typeReport.status === 'passed'
       ? 'passed'
       : typeReport.status === 'failed'
       ? 'failed'
       : 'skipped';
-    const typePassed = hasTsFiles ? typeReport.passed : true;
+    const typePassed = hasTsFiles ? (typeReport.passed && typeReport.status === 'passed') : false;
 
     checks.push({
       category: 'types',
       name: 'TypeScript Compiler Verification (tsc)',
       status: typeStatus,
       passed: typePassed,
-      evidence: typeStatus === 'passed'
+      evidence: !hasTsFiles
+        ? 'TypeScript verification skipped: No TypeScript (.ts, .tsx) files in workspace.'
+        : typeStatus === 'passed'
         ? `All ${typeReport.totalChecked || files.length} TypeScript file(s) type-checked cleanly with 0 diagnostics.`
         : typeStatus === 'skipped'
         ? (typeReport.skipReason || 'TypeScript verification was skipped.')
         : `${typeReport.errors.length} TypeScript diagnostic error(s): ${typeReport.errors.map(e => `${e.filePath}:${e.line || 1} [${e.code}] ${e.message}`).join('; ')}`,
-      reasonIfSkipped: typeStatus === 'skipped' ? typeReport.skipReason : undefined
+      reasonIfSkipped: typeStatus === 'skipped' ? (typeReport.skipReason || 'No TypeScript (.ts, .tsx) files in workspace') : undefined
     });
 
     if (typeReport.errors.length > 0) {
@@ -339,35 +341,72 @@ export class HonestVerificationService {
       evidence: functionalStatusObj.details
     });
 
-    const hasSkippedStages = 
-      (hasTsFiles && typeStatus === 'skipped') || 
-      testReport.status === 'skipped' || 
-      buildReport.status === 'skipped';
+    const hasSkippedRequiredStages = 
+      (hasTsFiles && typeStatus !== 'passed') || 
+      testReport.status !== 'passed' || 
+      testReport.passed === 0 ||
+      buildReport.status !== 'passed' ||
+      previewResult.mode === 'fallback_preview';
 
-    if (testReport.status === 'skipped') {
-      unresolvedCriteria.push(`Automated test verification was skipped: ${testReport.skipReason || 'No tests authored'}`);
+    if (testReport.status === 'skipped' || testReport.passed === 0) {
+      unresolvedCriteria.push(`Automated test verification was skipped: ${testReport.skipReason || 'No test suites authored yet'}`);
     }
-    if (hasTsFiles && typeStatus === 'skipped') {
-      unresolvedCriteria.push(`TypeScript type check was skipped: ${typeReport.skipReason || 'Deferred'}`);
+    if (hasTsFiles && typeStatus !== 'passed') {
+      unresolvedCriteria.push(`TypeScript type check was not passed: ${typeReport.skipReason || `${typeReport.errors.length} diagnostic error(s)`}`);
     }
-    if (buildReport.status === 'skipped') {
-      unresolvedCriteria.push('Production build bundling was skipped: No standard entry point.');
+    if (buildReport.status !== 'passed') {
+      unresolvedCriteria.push('Production build bundling was not passed or was skipped.');
+    }
+    if (previewResult.mode === 'fallback_preview') {
+      unresolvedCriteria.push('Application preview running in fallback demonstration mode rather than real executable code.');
     }
 
-    const compilationIsPassing = syntaxPassed && typePassed && (!buildReport || buildReport.passed !== false) && contractResult.issues.filter(i => i.severity === 'error').length === 0;
+    const typeIsOk = !hasTsFiles || (typePassed && typeStatus === 'passed');
+    const compilationIsPassing = syntaxPassed && typeIsOk && (!buildReport || buildReport.passed !== false) && contractResult.issues.filter(i => i.severity === 'error').length === 0;
     const runtimeIsPassing = previewPassed && runtimeReport.verified && previewResult.mode !== 'fallback_preview';
     const functionalIsPassing = functionalStatusObj.status === 'passed';
 
     // 7. Determine Honest Verdict based on real evidence
-    // A build must ONLY receive a verified verdict when all checks genuinely pass, known defects are 0, and no required stages were skipped.
+    // Rules:
+    // - Failed required checks must block verification.
+    // - Skipped required checks must not be treated as passed.
+    // - Missing execution evidence must not be treated as success.
+    // - A fallback demonstration preview must not count as a real application preview.
+    // - Missing test suites must be reported honestly.
+    // - A project with unfinished required tasks cannot receive a fully verified verdict.
     let verdict: VerificationVerdict;
+    let verdictExplanation: string;
 
     if (build.status === 'stopped' || build.status === 'failed') {
       verdict = 'failed';
-    } else if (!hasFiles || !compilationIsPassing || failedTasks > 0 || testReport.failed > 0 || !secPassed || failedReqCount > 0 || knownDefects.length > 0) {
+      verdictExplanation = `Build halted: Project status is "${build.status}".`;
+    } else if (!hasFiles) {
       verdict = 'failed';
+      verdictExplanation = 'Verification failed: No source files exist in the project workspace.';
+    } else if (failedTasks > 0) {
+      verdict = 'failed';
+      verdictExplanation = `Verification blocked: ${failedTasks} required task(s) failed during execution.`;
+    } else if (testReport.failed > 0) {
+      verdict = 'failed';
+      verdictExplanation = `Verification failed: ${testReport.failed} automated test assertion(s) failed.`;
+    } else if (!syntaxPassed) {
+      verdict = 'failed';
+      verdictExplanation = `Verification failed: ${execResult.syntaxErrors.length} syntax error(s) detected in source code.`;
+    } else if (hasTsFiles && typeStatus === 'failed') {
+      verdict = 'failed';
+      verdictExplanation = `Verification failed: ${typeReport.errors.length} TypeScript type error(s) detected.`;
+    } else if (!secPassed) {
+      verdict = 'failed';
+      verdictExplanation = 'Verification failed: Security audit detected critical security findings or hardcoded secrets.';
+    } else if (failedReqCount > 0) {
+      verdict = 'failed';
+      verdictExplanation = `Verification failed: ${failedReqCount} mandatory requirement(s) failed verification.`;
+    } else if (knownDefects.length > 0) {
+      verdict = 'failed';
+      verdictExplanation = `Verification failed: ${knownDefects.length} known defect(s) detected (${knownDefects.slice(0, 2).join('; ')}).`;
     } else if (inProgressTasks > 0) {
       verdict = 'in_progress';
+      verdictExplanation = `Verification in progress: ${inProgressTasks} task(s) are still active or pending completion.`;
     } else if (
       compilationIsPassing &&
       runtimeIsPassing &&
@@ -375,13 +414,22 @@ export class HonestVerificationService {
       knownDefects.length === 0 &&
       testReport.status === 'passed' &&
       testReport.passed > 0 &&
-      typePassed &&
+      testReport.failed === 0 &&
+      (!hasTsFiles || typeStatus === 'passed') &&
       buildReport.status === 'passed' &&
-      !hasSkippedStages
+      previewResult.mode !== 'fallback_preview' &&
+      !hasSkippedRequiredStages
     ) {
       verdict = 'verified';
+      verdictExplanation = `Project fully verified: All ${files.length} modular source files valid, ${testReport.passed} automated tests passed, TypeScript compiler clean, production bundle compiled, and runtime preview mounting verified.`;
     } else {
       verdict = 'partially_verified';
+      const missingEvidence: string[] = [];
+      if (testReport.status === 'skipped' || testReport.passed === 0) missingEvidence.push('automated test suites missing');
+      if (buildReport.status === 'skipped') missingEvidence.push('production build entry point skipped');
+      if (previewResult.mode === 'fallback_preview') missingEvidence.push('real application runtime preview not mounted');
+      if (hasTsFiles && typeStatus !== 'passed') missingEvidence.push('TypeScript type verification not completed');
+      verdictExplanation = `Project partially verified: Working code and syntax are intact, but formal verification is incomplete because ${missingEvidence.join(', ') || 'some criteria remain unverified'}.`;
     }
 
     const finalOutcome = verdict === 'verified' ? 'verified' : verdict === 'partially_verified' ? 'partially_verified' : 'failed';
@@ -430,7 +478,8 @@ export class HonestVerificationService {
       missingEnvironmentVars: Array.from(missingEnvVars),
       unresolvedCriteria,
       unresolvedRisks,
-      evidenceSummary: `Honest Evaluation Verdict: [${verdict.toUpperCase()}]. Implemented requirements: ${implementedCount}/${verifiedRequirements.length || 1}. Syntax valid: ${syntaxPassed}. Tests: ${testReport.passed}/${testReport.total} passed. Preview mode: ${previewResult.mode}. Security score: ${execResult.securityAudit.score}/100.`,
+      evidenceSummary: `Honest Evaluation Verdict: [${verdict.toUpperCase()}]. ${verdictExplanation}`,
+      verdictExplanation,
       requirementsReport: verifiedRequirements,
       compilationStatus,
       runtimeStatus,

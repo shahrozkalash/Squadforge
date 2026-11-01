@@ -64,6 +64,9 @@ export interface TypeCheckReport {
   diagnostics: TypeDiagnostic[];
   errors: TypeDiagnostic[];
   warnings: TypeDiagnostic[];
+  syntaxErrors?: TypeDiagnostic[];
+  configErrors?: TypeDiagnostic[];
+  typeErrors?: TypeDiagnostic[];
   totalChecked: number;
   skipReason?: string;
   durationMs?: number;
@@ -665,6 +668,11 @@ export class ExecutionAdapter {
    * Produces actual compiler diagnostics with file paths, line numbers, TS codes, and readable messages.
    * Strictly distinguishes syntax validation from type validation, and passed vs failed vs skipped states.
    */
+  /**
+   * Performs genuine, project-aware TypeScript compilation and type checking.
+   * Reads and respects generated tsconfig.json (compilerOptions, strict mode, JSX, path aliases, module resolution),
+   * provides controlled access to dependencies, and classifies syntax errors, type errors, config errors, and warnings.
+   */
   static runTypeCheck(buildIdOrFiles: string | ProjectFile[], filesMaybe?: ProjectFile[]): TypeCheckReport {
     let buildId: string;
     let files: ProjectFile[];
@@ -680,14 +688,20 @@ export class ExecutionAdapter {
       /\.(ts|tsx)$/.test(f.path) && 
       !f.path.endsWith('.d.ts')
     );
+    const dtsFiles = files.filter(f => f.path.endsWith('.d.ts'));
+    const hasTsConfigFile = files.some(f => f.path === 'tsconfig.json');
 
-    if (tsFiles.length === 0) {
+    // Projects without TypeScript files and without tsconfig.json
+    if (tsFiles.length === 0 && !hasTsConfigFile && dtsFiles.length === 0) {
       return {
         status: 'skipped',
         passed: false,
         diagnostics: [],
         errors: [],
         warnings: [],
+        syntaxErrors: [],
+        configErrors: [],
+        typeErrors: [],
         totalChecked: 0,
         skipReason: 'No TypeScript (.ts, .tsx) source files found in workspace',
         command: 'tsc --noEmit'
@@ -698,7 +712,7 @@ export class ExecutionAdapter {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `squadforge_typecheck_${buildId}_`));
 
     try {
-      // 1. Write project files to isolated sandbox
+      // 1. Write project files to isolated sandbox workspace
       for (const file of files) {
         const { valid, cleanPath } = this.sanitizeFilePath(file.path);
         if (!valid) continue;
@@ -707,8 +721,119 @@ export class ExecutionAdapter {
         fs.writeFileSync(target, file.content, 'utf-8');
       }
 
-      // 2. Locate or create tsconfig.json
-      const rootFileNames = tsFiles.map(f => path.join(tempDir, f.path)).filter(p => fs.existsSync(p));
+      // 2. Controlled dependency environment: link host node_modules into sandbox
+      try {
+        const hostNodeModules = path.resolve(process.cwd(), 'node_modules');
+        const sandboxNodeModules = path.join(tempDir, 'node_modules');
+        if (fs.existsSync(hostNodeModules) && !fs.existsSync(sandboxNodeModules)) {
+          fs.symlinkSync(hostNodeModules, sandboxNodeModules, 'junction');
+        }
+      } catch {
+        // Controlled environment continues without symlink if unsupported
+      }
+
+      // 3. Read and validate generated tsconfig.json if present
+      let compilerOptions: ts.CompilerOptions;
+      let rootFileNames: string[] = [];
+      const configErrors: TypeDiagnostic[] = [];
+
+      const tsConfigDiskPath = path.join(tempDir, 'tsconfig.json');
+      if (hasTsConfigFile && fs.existsSync(tsConfigDiskPath)) {
+        const configFile = ts.readConfigFile(tsConfigDiskPath, ts.sys.readFile);
+        if (configFile.error) {
+          const cfgErr: TypeDiagnostic = {
+            filePath: 'tsconfig.json',
+            line: 1,
+            column: 1,
+            code: `TS${configFile.error.code}`,
+            message: ts.flattenDiagnosticMessageText(configFile.error.messageText, '\n'),
+            category: 'error'
+          };
+          return {
+            status: 'failed',
+            passed: false,
+            diagnostics: [cfgErr],
+            errors: [cfgErr],
+            warnings: [],
+            syntaxErrors: [],
+            configErrors: [cfgErr],
+            typeErrors: [],
+            totalChecked: 0,
+            durationMs: Date.now() - startTime,
+            command: 'tsc --noEmit',
+            exitCode: 1
+          };
+        }
+
+        const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, tempDir);
+        if (parsedConfig.errors.length > 0) {
+          for (const err of parsedConfig.errors) {
+            const isErr = err.category === ts.DiagnosticCategory.Error;
+            configErrors.push({
+              filePath: err.file ? path.relative(tempDir, err.file.fileName).replace(/\\/g, '/') : 'tsconfig.json',
+              line: err.file && err.start !== undefined ? err.file.getLineAndCharacterOfPosition(err.start).line + 1 : 1,
+              column: err.file && err.start !== undefined ? err.file.getLineAndCharacterOfPosition(err.start).character + 1 : 1,
+              code: `TS${err.code}`,
+              message: ts.flattenDiagnosticMessageText(err.messageText, '\n'),
+              category: isErr ? 'error' : 'warning'
+            });
+          }
+
+          const fatalConfigErrors = configErrors.filter(e => e.category === 'error');
+          if (fatalConfigErrors.length > 0) {
+            return {
+              status: 'failed',
+              passed: false,
+              diagnostics: configErrors,
+              errors: fatalConfigErrors,
+              warnings: configErrors.filter(e => e.category === 'warning'),
+              syntaxErrors: [],
+              configErrors: fatalConfigErrors,
+              typeErrors: [],
+              totalChecked: 0,
+              durationMs: Date.now() - startTime,
+              command: 'tsc --noEmit',
+              exitCode: 1
+            };
+          }
+        }
+
+        compilerOptions = {
+          ...parsedConfig.options,
+          noEmit: true
+        };
+
+        // Ensure baseUrl is resolved relative to tempDir if paths are configured
+        if (compilerOptions.paths && !compilerOptions.baseUrl) {
+          compilerOptions.baseUrl = tempDir;
+        }
+
+        if (parsedConfig.fileNames && parsedConfig.fileNames.length > 0) {
+          rootFileNames = parsedConfig.fileNames.filter(p => fs.existsSync(p));
+        }
+      } else {
+        // Standard baseline compiler options when tsconfig.json is omitted
+        compilerOptions = {
+          target: ts.ScriptTarget.ES2022,
+          module: ts.ModuleKind.ESNext,
+          moduleResolution: ts.ModuleResolutionKind.Bundler,
+          jsx: ts.JsxEmit.ReactJSX,
+          skipLibCheck: true,
+          noEmit: true,
+          allowJs: true,
+          strict: false,
+          baseUrl: tempDir
+        };
+      }
+
+      // If rootFileNames not determined by tsconfig, collect all source and declaration files
+      if (rootFileNames.length === 0) {
+        rootFileNames = files
+          .filter(f => /\.(ts|tsx|js|jsx|d\.ts)$/.test(f.path))
+          .map(f => path.join(tempDir, f.path))
+          .filter(p => fs.existsSync(p));
+      }
+
       if (rootFileNames.length === 0) {
         return {
           status: 'skipped',
@@ -716,69 +841,95 @@ export class ExecutionAdapter {
           diagnostics: [],
           errors: [],
           warnings: [],
+          syntaxErrors: [],
+          configErrors: [],
+          typeErrors: [],
           totalChecked: 0,
           skipReason: 'No resolved TypeScript source files found on disk',
           command: 'tsc --noEmit'
         };
       }
 
-      const compilerOptions: ts.CompilerOptions = {
-        target: ts.ScriptTarget.ES2022,
-        module: ts.ModuleKind.ESNext,
-        moduleResolution: ts.ModuleResolutionKind.Bundler,
-        jsx: ts.JsxEmit.ReactJSX,
-        skipLibCheck: true,
-        noEmit: true,
-        allowJs: true,
-        strict: false
-      };
-
       const host = ts.createCompilerHost(compilerOptions);
       const program = ts.createProgram(rootFileNames, compilerOptions, host);
-      const rawDiagnostics = ts.getPreEmitDiagnostics(program);
 
-      const diagnostics: TypeDiagnostic[] = [];
+      // Separate diagnostic categories
+      const syntacticDiags = program.getSyntacticDiagnostics();
+      const semanticDiags = program.getSemanticDiagnostics();
+      const optionsDiags = program.getOptionsDiagnostics();
 
-      for (const diag of rawDiagnostics) {
+      const formatDiag = (diag: ts.Diagnostic, categoryOverride?: 'error' | 'warning'): TypeDiagnostic | null => {
+        let relPath = 'project';
+        let line = 1;
+        let column = 1;
+
         if (diag.file) {
-          const relPath = path.relative(tempDir, diag.file.fileName).replace(/\\/g, '/');
-          // Skip external libs and node_modules
-          if (relPath.startsWith('..') || relPath.includes('node_modules')) continue;
+          relPath = path.relative(tempDir, diag.file.fileName).replace(/\\/g, '/');
+          // Skip external libs and node_modules unless inside project
+          if (relPath.startsWith('..') || relPath.includes('node_modules')) {
+            return null;
+          }
+          const pos = diag.file.getLineAndCharacterOfPosition(diag.start || 0);
+          line = pos.line + 1;
+          column = pos.character + 1;
+        }
 
-          const { line, character } = diag.file.getLineAndCharacterOfPosition(diag.start || 0);
-          const category = diag.category === ts.DiagnosticCategory.Error ? 'error'
-            : diag.category === ts.DiagnosticCategory.Warning ? 'warning'
-            : diag.category === ts.DiagnosticCategory.Suggestion ? 'suggestion' : 'message';
+        const category = categoryOverride || (diag.category === ts.DiagnosticCategory.Error ? 'error'
+          : diag.category === ts.DiagnosticCategory.Warning ? 'warning'
+          : diag.category === ts.DiagnosticCategory.Suggestion ? 'suggestion' : 'message');
 
-          diagnostics.push({
-            filePath: relPath,
-            line: line + 1,
-            column: character + 1,
-            code: `TS${diag.code}`,
-            message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
-            category
-          });
-        } else {
-          diagnostics.push({
-            filePath: 'project',
-            code: `TS${diag.code}`,
-            message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
-            category: 'error'
-          });
+        return {
+          filePath: relPath,
+          line,
+          column,
+          code: `TS${diag.code}`,
+          message: ts.flattenDiagnosticMessageText(diag.messageText, '\n'),
+          category
+        };
+      };
+
+      const syntaxErrors: TypeDiagnostic[] = [];
+      for (const d of syntacticDiags) {
+        const item = formatDiag(d, 'error');
+        if (item) syntaxErrors.push(item);
+      }
+
+      const typeErrors: TypeDiagnostic[] = [];
+      const warnings: TypeDiagnostic[] = [];
+      for (const d of semanticDiags) {
+        const item = formatDiag(d);
+        if (!item) continue;
+        if (item.category === 'error') {
+          typeErrors.push(item);
+        } else if (item.category === 'warning') {
+          warnings.push(item);
         }
       }
 
-      const errors = diagnostics.filter(d => d.category === 'error');
-      const warnings = diagnostics.filter(d => d.category === 'warning');
+      for (const d of optionsDiags) {
+        const item = formatDiag(d);
+        if (!item) continue;
+        if (item.category === 'error') {
+          configErrors.push(item);
+        } else if (item.category === 'warning') {
+          warnings.push(item);
+        }
+      }
+
+      const errors = [...configErrors.filter(c => c.category === 'error'), ...syntaxErrors, ...typeErrors];
+      const allDiagnostics = [...configErrors, ...syntaxErrors, ...typeErrors, ...warnings];
       const durationMs = Date.now() - startTime;
       const passed = errors.length === 0;
 
       return {
         status: passed ? 'passed' : 'failed',
         passed,
-        diagnostics,
+        diagnostics: allDiagnostics,
         errors,
         warnings,
+        syntaxErrors,
+        configErrors: configErrors.filter(c => c.category === 'error'),
+        typeErrors,
         totalChecked: rootFileNames.length,
         durationMs,
         command: 'tsc --noEmit',
@@ -801,6 +952,9 @@ export class ExecutionAdapter {
           category: 'error'
         }],
         warnings: [],
+        syntaxErrors: [],
+        configErrors: [],
+        typeErrors: [],
         totalChecked: tsFiles.length,
         durationMs: Date.now() - startTime,
         command: 'tsc --noEmit',

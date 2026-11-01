@@ -18,6 +18,18 @@ export class TaskManager {
         const retries = (task.retryCount || 0) + 1;
         const maxRetries = task.maxRetries || 3;
 
+        const timeoutHistoryEntry = {
+          timestamp: now,
+          verifier: task.claimedBy || 'system',
+          status: 'failed' as const,
+          syntaxPassed: false,
+          testsPassed: false,
+          filesVerified: false,
+          evidence: `Task lease expired (90s timeout, retry ${retries}/${maxRetries})`,
+          details: 'Lease timeout during agent execution'
+        };
+        const updatedHistory = [...(task.verificationHistory || []), timeoutHistoryEntry];
+
         if (retries >= maxRetries) {
           this.failTask(buildId, task.id, task.claimedBy || 'system', `Task lease expired (90s timeout) and retries exhausted (${retries}/${maxRetries})`);
         } else {
@@ -26,7 +38,8 @@ export class TaskManager {
             claimedBy: null,
             leaseExpiresAt: null,
             retryCount: retries,
-            lastError: 'Task lease timed out after 90 seconds'
+            lastError: 'Task lease timed out after 90 seconds',
+            verificationHistory: updatedHistory
           });
 
           db.addEvent({

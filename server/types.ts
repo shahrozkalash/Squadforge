@@ -605,6 +605,7 @@ export interface VerificationReport {
   unresolvedCriteria: string[];
   unresolvedRisks: string[];
   evidenceSummary: string;
+  verdictExplanation?: string;
 }
 
 export interface PatchEdit {

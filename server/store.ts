@@ -1211,7 +1211,7 @@ export class PersistentDatabase {
           preview_mode, preview_diagnostic, preview_runtime_errors, preview_entry_point
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        build.id, build.userId, build.idea, build.status, build.createdAt, build.updatedAt,
+        build.id, build.userId, build.idea, build.status, build.createdAt, (build.updatedAt || build.createdAt || this.getTime()),
         build.completedAt || null, JSON.stringify(build.selectedModels || []),
         build.autoPushGithub ? 1 : 0, build.totalTokens || 0, build.totalCost || 0.0,
         build.costLimit || 5.0, build.tokenBudget || 100000, build.maxDurationSeconds || 300,
@@ -1300,10 +1300,8 @@ export class PersistentDatabase {
     const list = this.getTasks(buildId);
     const index = list.findIndex(t => t.id === taskId);
     if (index === -1) return null;
-    const updated = { ...list[index], ...updates };
-    list[index] = updated;
-    this.tasks.set(buildId, list);
-    this.broadcast(buildId, 'task_updated', updated);
+    const current = list[index];
+    const updated = { ...current, ...updates };
 
     try {
       this.dbManager.db.prepare(`
@@ -1318,11 +1316,17 @@ export class PersistentDatabase {
         updated.lastError || null, updated.isPaused ? 1 : 0, updated.pausedReason || null,
         updated.actualTokensUsed || 0, updated.estimatedCost || 0.0, updated.id
       );
+
+      // Only mutate in-memory cache and broadcast if database write succeeded
+      list[index] = updated;
+      this.tasks.set(buildId, list);
+      this.broadcast(buildId, 'task_updated', updated);
+
+      return updated;
     } catch (err: any) {
       this.handleDatabaseWriteError('updateTask', err);
+      return null;
     }
-
-    return updated;
   }
 
   claimTaskAtomic(buildId: string, taskId: string, modelId: string, leaseExpiresAt: number): Task | null {
@@ -1358,6 +1362,95 @@ export class PersistentDatabase {
     } catch (err: any) {
       this.handleDatabaseWriteError('claimTaskAtomic', err);
       return null;
+    }
+  }
+
+  completeTaskAtomic(
+    buildId: string, 
+    taskId: string, 
+    modelId: string, 
+    updates: Partial<Task>
+  ): { success: boolean; task?: Task; error?: string } {
+    const list = this.getTasks(buildId);
+    const index = list.findIndex(t => t.id === taskId);
+    if (index === -1) {
+      return { success: false, error: 'Task not found' };
+    }
+    const currentTask = list[index];
+
+    // Prevent duplicate completion events
+    if (currentTask.status === 'completed' || currentTask.status === 'done') {
+      return { success: false, error: 'Task is already completed' };
+    }
+
+    // Validate worker ownership to prevent stale workers from completing tasks
+    if (currentTask.claimedBy && currentTask.claimedBy !== modelId) {
+      return { 
+        success: false, 
+        error: `Stale worker rejected: Task ${taskId} is currently claimed by ${currentTask.claimedBy}, not ${modelId}` 
+      };
+    }
+
+    // Validate lease expiration
+    const now = this.getTime();
+    if (currentTask.leaseExpiresAt && currentTask.leaseExpiresAt < now) {
+      return { 
+        success: false, 
+        error: `Stale lease rejected: Worker ${modelId} lease expired at ${new Date(currentTask.leaseExpiresAt).toISOString()}` 
+      };
+    }
+
+    const updatedStatus = updates.status || 'completed';
+    const updatedCompletedAt = updatedStatus === 'completed' ? (updates.completedAt || now) : null;
+
+    try {
+      // Atomic conditional update in SQLite: only completes if claimed_by matches, not already completed, and lease active
+      const res = this.dbManager.db.prepare(`
+        UPDATE tasks SET
+          status = ?, claimed_by = ?, lease_expires_at = NULL, completed_at = ?,
+          error = ?, retry_count = ?, last_error = ?,
+          actual_tokens_used = ?, estimated_cost = ?
+        WHERE id = ? 
+          AND status IN ('pending', 'in_progress', 'claimed', 'working', 'retrying')
+          AND (claimed_by = ? OR claimed_by IS NULL)
+          AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+      `).run(
+        updatedStatus,
+        updatedStatus === 'completed' ? modelId : null,
+        updatedCompletedAt,
+        updates.error || null,
+        updates.retryCount || currentTask.retryCount || 0,
+        updates.lastError || null,
+        updates.actualTokensUsed || currentTask.actualTokensUsed || 0,
+        updates.estimatedCost || currentTask.estimatedCost || 0.0,
+        taskId,
+        modelId,
+        now
+      );
+
+      if (res.changes === 0) {
+        return { 
+          success: false, 
+          error: `Task completion rejected: Task was modified, reassigned, or expired in database` 
+        };
+      }
+
+      const updated: Task = {
+        ...currentTask,
+        ...updates,
+        status: updatedStatus,
+        leaseExpiresAt: null,
+        completedAt: updatedCompletedAt || undefined
+      };
+
+      list[index] = updated;
+      this.tasks.set(buildId, list);
+      this.broadcast(buildId, 'task_updated', updated);
+
+      return { success: true, task: updated };
+    } catch (err: any) {
+      this.handleDatabaseWriteError('completeTaskAtomic', err);
+      return { success: false, error: err.message || 'Database error during task completion' };
     }
   }
 

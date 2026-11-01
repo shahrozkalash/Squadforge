@@ -156,7 +156,7 @@ export class SmartModelRouter {
     }
 
     // Check if requested model's provider is available and healthy
-    const provider = requested.provider || (requested.id === 'gemini' ? 'gemini' : 'openrouter');
+    const provider = requested.provider || (requested.id.startsWith('gemini') ? 'gemini' : 'openrouter');
     const quotaCheck = quotaManager.isProviderAvailable(provider, requested.id);
 
     if (quotaCheck.available) {
@@ -180,7 +180,7 @@ export class SmartModelRouter {
 
     // Filter by available provider
     const availableAlternatives = enabledModels.filter(m => {
-      const prov = m.provider || (m.id === 'gemini' ? 'gemini' : 'openrouter');
+      const prov = m.provider || (m.id.startsWith('gemini') ? 'gemini' : 'openrouter');
       const check = quotaManager.isProviderAvailable(prov, m.id);
       const fits = (m.contextWindow || 32768) >= params.estimatedInputTokens + 2000;
       return check.available && fits;
@@ -423,7 +423,7 @@ export class SmartModelRouter {
   }): Promise<GatewayResult> {
     const startTime = Date.now();
     const model = params.model;
-    const isDirectGemini = model.id === 'gemini';
+    const isDirectGemini = model.provider === 'gemini';
     const openRouterKey = process.env.OPENROUTER_API_KEY || '';
     const genAI = getGoogleGenAI();
 
@@ -610,7 +610,8 @@ export class SmartModelRouter {
       });
     }
 
-    // No Provider
+    // No Provider configured
+    const missingProviderKey = model.provider === 'gemini' ? 'GEMINI_API_KEY' : 'OPENROUTER_API_KEY';
     return {
       success: false,
       rawText: '',
@@ -621,7 +622,7 @@ export class SmartModelRouter {
       providerUsed: 'none',
       isFallback: false,
       latencyMs: Date.now() - startTime,
-      error: `Model "${model.displayName}" requires OPENROUTER_API_KEY. Configure key or enable fallback.`,
+      error: `Model "${model.displayName}" requires ${missingProviderKey}. Configure key or enable fallback.`,
       errorCode: 'NO_PROVIDER'
     };
   }
@@ -661,9 +662,13 @@ export class SmartModelRouter {
       ? `${params.systemInstruction}\n\nYou are operating as fallback for AI Model: ${params.model.displayName}. Output only valid JSON actions.`
       : params.systemInstruction;
 
+    const targetModel = params.isFallbackRun
+      ? 'gemini-3.8-flash'
+      : (params.model.providerModel ? params.model.providerModel.replace(/^google\//, '') : 'gemini-3.8-flash');
+
     try {
       const genAiCall = genAI.models.generateContent({
-        model: 'gemini-3.8-flash',
+        model: targetModel,
         contents: params.prompt,
         config: {
           systemInstruction: specializedSys,
@@ -709,7 +714,7 @@ export class SmartModelRouter {
         outputTokens,
         isEstimatedTokens: !usageMetadata,
         modelId: params.model.id,
-        actualModelUsed: 'gemini-3.8-flash',
+        actualModelUsed: targetModel,
         providerUsed: 'gemini',
         isFallback: params.isFallbackRun,
         fallbackReason: params.fallbackReason,

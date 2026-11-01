@@ -955,51 +955,46 @@ Never write placeholder comments. Implement functional code.`;
         continue;
       }
 
-      // Apply each action via Merge Manager
-      let allActionsSucceeded = true;
+      // Partition file actions from metadata/task creation actions
+      const fileActions = parsed.actions.filter(a => a.action !== 'create_task');
+      const taskActions = parsed.actions.filter(a => a.action === 'create_task');
+
+      let allActionsSucceeded = false;
       let appliedCount = 0;
 
-      for (const action of parsed.actions) {
-        if (action.action === 'create_file') {
-          const createRes = await MergeManager.createFile(buildId, model.id, action);
-          if (!createRes.success) {
-            allActionsSucceeded = false;
-            lastError = createRes.error || 'create_file failed';
-          } else {
-            appliedCount++;
-          }
-        } else if (action.action === 'patch_file') {
-          const patchRes = await MergeManager.applyPatch(buildId, model.id, action);
-          if (!patchRes.success) {
-            allActionsSucceeded = false;
-            lastError = patchRes.error || 'patch_file failed';
-            db.updateModelRun(buildId, model.id, {
-              patchesRejected: (modelRun?.patchesRejected || 0) + 1,
-              status: 'retrying'
-            });
-          } else {
-            appliedCount++;
-            db.updateModelRun(buildId, model.id, {
-              patchesApplied: (modelRun?.patchesApplied || 0) + 1
+      if (fileActions.length > 0) {
+        // Execute all file operations atomically with complete rollback on partial failure
+        const batchRes = await MergeManager.applyBatchActions(buildId, model.id, fileActions);
+        if (batchRes.success) {
+          allActionsSucceeded = true;
+          appliedCount = batchRes.appliedCount;
+          db.updateModelRun(buildId, model.id, {
+            patchesApplied: (modelRun?.patchesApplied || 0) + appliedCount
+          });
+
+          // Once file changes succeed, process any accompanying task creation actions
+          for (const action of taskActions) {
+            TaskManager.createNewTask(buildId, {
+              title: action.title,
+              description: action.description,
+              filePaths: action.filePaths,
+              dependencies: action.dependencies,
+              assignedRole: action.assignedRole,
+              priority: action.priority || 3,
+              maxRetries: this.MAX_TASK_RETRIES
             });
           }
-        } else if (action.action === 'delete_file') {
-          const delRes = await MergeManager.deleteFile(buildId, model.id, action);
-          if (!delRes.success) {
-            allActionsSucceeded = false;
-            lastError = delRes.error || 'delete_file failed';
-          } else {
-            appliedCount++;
-          }
-        } else if (action.action === 'rename_file') {
-          const renRes = await MergeManager.renameFile(buildId, model.id, action);
-          if (!renRes.success) {
-            allActionsSucceeded = false;
-            lastError = renRes.error || 'rename_file failed';
-          } else {
-            appliedCount++;
-          }
-        } else if (action.action === 'create_task') {
+        } else {
+          allActionsSucceeded = false;
+          lastError = batchRes.error || 'Batch file operations failed and were reverted';
+          db.updateModelRun(buildId, model.id, {
+            patchesRejected: (modelRun?.patchesRejected || 0) + 1,
+            status: 'retrying'
+          });
+        }
+      } else if (taskActions.length > 0) {
+        // Only task actions present
+        for (const action of taskActions) {
           TaskManager.createNewTask(buildId, {
             title: action.title,
             description: action.description,
@@ -1010,6 +1005,10 @@ Never write placeholder comments. Implement functional code.`;
             maxRetries: this.MAX_TASK_RETRIES
           });
         }
+        allActionsSucceeded = true;
+        appliedCount = taskActions.length;
+      } else {
+        lastError = 'No valid actions found in model response';
       }
 
       if (allActionsSucceeded && appliedCount > 0) {
