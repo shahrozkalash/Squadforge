@@ -8,6 +8,16 @@ describe('Phase 5 Concurrency Hardening & Architectural Guarantees', () => {
   const buildId = 'test_phase5_hardening_build';
 
   beforeEach(() => {
+    try {
+      db.dbManager.db.prepare('DELETE FROM tasks WHERE build_id = ?').run(buildId);
+      db.dbManager.db.prepare('DELETE FROM project_files WHERE build_id = ?').run(buildId);
+      db.dbManager.db.prepare('DELETE FROM file_versions WHERE build_id = ?').run(buildId);
+      db.dbManager.db.prepare('DELETE FROM swarm_events WHERE build_id = ?').run(buildId);
+    } catch {}
+    db.tasks.delete(buildId);
+    db.files.delete(buildId);
+    db.events.delete(buildId);
+
     db.saveBuild({
       id: buildId,
       userId: 'test_user_phase5',

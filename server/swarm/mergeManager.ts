@@ -38,26 +38,65 @@ export class MergeManager {
    * Enqueues patch operations sequentially with automatic cleanup of idle queues.
    * Uses both in-memory Promise queue and SQLite database-backed coordination locks
    * to ensure serialized, conflict-free patch application across multiple processes.
+   * Never executes a protected operation without acquiring the lock.
    */
-  static async enqueuePatch<T>(buildId: string, operation: () => Promise<T>): Promise<T> {
+  static async enqueuePatch<T>(
+    buildId: string, 
+    operation: () => Promise<T>,
+    timeoutMs: number = 10000,
+    lockDurationMs: number = 30000
+  ): Promise<T> {
     const previousPromise = this.patchQueues.get(buildId) || Promise.resolve();
     const lockKey = `build_patch_${buildId}`;
     const ownerId = `${process.pid}_${Math.random().toString(36).substring(2, 8)}`;
 
     const executeWithCoordination = async (): Promise<T> => {
-      // 1. Acquire database-backed coordination lock
+      // 1. Acquire database-backed coordination lock with active polling up to timeoutMs
       const startTime = Date.now();
       let acquired = false;
-      while (!acquired && (Date.now() - startTime) < 10000) {
-        acquired = db.dbManager.acquireCoordinationLock(lockKey, ownerId, 30000);
+      while (!acquired && (Date.now() - startTime) < timeoutMs) {
+        acquired = db.dbManager.acquireCoordinationLock(lockKey, ownerId, lockDurationMs);
         if (!acquired) {
           await new Promise(r => setTimeout(r, 25));
         }
       }
 
+      // CRITICAL: If lock acquisition timed out, NEVER proceed with protected mutation!
+      if (!acquired) {
+        const elapsed = Date.now() - startTime;
+        throw new Error(`Failed to acquire database coordination lock for build ${buildId} within ${elapsed}ms: lock timeout (key: ${lockKey})`);
+      }
+
+      // 2. Active lock renewal heartbeat for operations exceeding half the lock duration
+      let renewalTimer: NodeJS.Timeout | null = null;
+      if (lockDurationMs > 2000) {
+        const heartbeatInterval = Math.max(1000, Math.floor(lockDurationMs / 2));
+        renewalTimer = setInterval(() => {
+          try {
+            db.dbManager.renewCoordinationLock(lockKey, ownerId, lockDurationMs);
+          } catch {}
+        }, heartbeatInterval);
+        renewalTimer.unref();
+      }
+
       try {
-        return await operation();
+        // Prevent execution if lock was lost
+        if (!db.dbManager.isCoordinationLockHeld(lockKey, ownerId)) {
+          throw new Error(`Database coordination lock lost before operation execution for build ${buildId}`);
+        }
+
+        const result = await operation();
+
+        // Prevent returning successful result if lock ownership was lost during mutation
+        if (!db.dbManager.isCoordinationLockHeld(lockKey, ownerId)) {
+          throw new Error(`Database coordination lock expired or was preempted during operation for build ${buildId}`);
+        }
+
+        return result;
       } finally {
+        if (renewalTimer) {
+          clearInterval(renewalTimer);
+        }
         if (acquired) {
           db.dbManager.releaseCoordinationLock(lockKey, ownerId);
         }

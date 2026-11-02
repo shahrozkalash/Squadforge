@@ -540,6 +540,29 @@ export class DatabaseManager {
   }
 
   private transactionDepth = 0;
+  private postCommitHooks: Array<() => void> = [];
+  private postRollbackHooks: Array<() => void> = [];
+
+  /**
+   * Registers a callback to be executed strictly AFTER the outermost transaction commits.
+   * If not inside an active transaction, executes immediately.
+   */
+  onPostCommit(fn: () => void): void {
+    if (this.transactionDepth === 0) {
+      fn();
+    } else {
+      this.postCommitHooks.push(fn);
+    }
+  }
+
+  /**
+   * Registers a callback to be executed if the transaction rolls back.
+   */
+  onPostRollback(fn: () => void): void {
+    if (this.transactionDepth > 0) {
+      this.postRollbackHooks.push(fn);
+    }
+  }
 
   /**
    * Helper to execute in an immediate database transaction (serializes concurrent writes across processes).
@@ -547,8 +570,12 @@ export class DatabaseManager {
    */
   transaction<T>(fn: () => T): T {
     const isOuter = this.transactionDepth === 0;
-    const savepointName = `sp_${this.transactionDepth}`;
+    const currentDepth = this.transactionDepth;
+    const savepointName = `sp_${currentDepth}`;
     this.transactionDepth++;
+
+    const initialCommitHookCount = this.postCommitHooks.length;
+    const initialRollbackHookCount = this.postRollbackHooks.length;
 
     if (isOuter) {
       this.db.exec('BEGIN IMMEDIATE;');
@@ -560,34 +587,66 @@ export class DatabaseManager {
       const result = fn();
       if (isOuter) {
         this.db.exec('COMMIT;');
+        const hooks = this.postCommitHooks;
+        this.postCommitHooks = [];
+        this.postRollbackHooks = [];
+        for (const hook of hooks) {
+          try {
+            hook();
+          } catch (e) {
+            console.error('[DATABASE] Error in post-commit hook:', e);
+          }
+        }
       } else {
         this.db.exec(`RELEASE SAVEPOINT ${savepointName};`);
       }
       return result;
     } catch (err) {
+      // Discard commit hooks registered during this savepoint/transaction level
+      const rollbackHooksToRun = this.postRollbackHooks.slice(initialRollbackHookCount);
+      this.postCommitHooks = this.postCommitHooks.slice(0, initialCommitHookCount);
+      this.postRollbackHooks = this.postRollbackHooks.slice(0, initialRollbackHookCount);
+
       try {
         if (isOuter) {
           this.db.exec('ROLLBACK;');
+          for (const hook of rollbackHooksToRun) {
+            try { hook(); } catch {}
+          }
         } else {
           this.db.exec(`ROLLBACK TO SAVEPOINT ${savepointName};`);
           this.db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+          for (const hook of rollbackHooksToRun) {
+            try { hook(); } catch {}
+          }
         }
-      } catch {}
+      } catch {
+        // Rollback failed, possibly already rolled back by SQLite
+      }
       throw err;
     } finally {
       this.transactionDepth--;
+      if (this.transactionDepth === 0) {
+        this.postCommitHooks = [];
+        this.postRollbackHooks = [];
+      }
     }
   }
 
   /**
-   * Acquires a database-backed coordination lock for distributed multi-process safety
+   * Acquires a database-backed coordination lock for distributed multi-process safety.
+   * Validates duration and returns true only if lock was acquired.
    */
   acquireCoordinationLock(lockKey: string, ownerId: string, durationMs: number = 30000): boolean {
+    if (!lockKey || !ownerId) return false;
+    if (typeof durationMs !== 'number' || isNaN(durationMs) || !Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 24 * 60 * 60 * 1000) {
+      return false;
+    }
     const now = Date.now();
     const expiry = now + durationMs;
 
     try {
-      // First clean up expired locks
+      // Clean up expired locks first
       this.cleanExpiredCoordinationLocks(now);
 
       const res = this.db.prepare(`
@@ -607,9 +666,50 @@ export class DatabaseManager {
   }
 
   /**
-   * Releases a database-backed coordination lock owned by ownerId
+   * Renews an existing database coordination lock held by ownerId before it expires.
+   */
+  renewCoordinationLock(lockKey: string, ownerId: string, durationMs: number = 30000): boolean {
+    if (!lockKey || !ownerId) return false;
+    if (typeof durationMs !== 'number' || isNaN(durationMs) || !Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 24 * 60 * 60 * 1000) {
+      return false;
+    }
+    const now = Date.now();
+    const expiry = now + durationMs;
+    try {
+      const res = this.db.prepare(`
+        UPDATE coordination_locks
+        SET expires_at = ?
+        WHERE lock_key = ? AND owner_id = ? AND expires_at > ?
+      `).run(expiry, lockKey, ownerId, now);
+      return res.changes > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Checks whether the coordination lock is currently held by ownerId and not expired.
+   */
+  isCoordinationLockHeld(lockKey: string, ownerId: string): boolean {
+    if (!lockKey || !ownerId) return false;
+    const now = Date.now();
+    try {
+      const row = this.db.prepare(`
+        SELECT owner_id, expires_at FROM coordination_locks
+        WHERE lock_key = ? AND owner_id = ? AND expires_at > ?
+      `).get(lockKey, ownerId, now) as any;
+      return Boolean(row);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Releases a database-backed coordination lock owned strictly by ownerId.
+   * Never releases a lock owned by another process.
    */
   releaseCoordinationLock(lockKey: string, ownerId: string): boolean {
+    if (!lockKey || !ownerId) return false;
     try {
       const res = this.db.prepare(`
         DELETE FROM coordination_locks
@@ -622,7 +722,7 @@ export class DatabaseManager {
   }
 
   /**
-   * Cleans expired coordination locks
+   * Cleans expired coordination locks.
    */
   cleanExpiredCoordinationLocks(now: number = Date.now()): number {
     try {

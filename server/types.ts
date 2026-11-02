@@ -282,6 +282,7 @@ export type EventType =
   | 'checkpoint_reverted'
   | 'task_completed'
   | 'task_failed'
+  | 'task_cancelled'
   | 'task_rejected'
   | 'task_paused'
   | 'task_resumed'

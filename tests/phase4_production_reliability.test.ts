@@ -13,6 +13,16 @@ describe('SquadForge Phase 4: Production Reliability, Ownership Enforcement & Pa
 
   beforeEach(() => {
     // Clean and initialize build state
+    try {
+      db.dbManager.db.prepare('DELETE FROM tasks WHERE build_id = ?').run(buildId);
+      db.dbManager.db.prepare('DELETE FROM project_files WHERE build_id = ?').run(buildId);
+      db.dbManager.db.prepare('DELETE FROM file_versions WHERE build_id = ?').run(buildId);
+      db.dbManager.db.prepare('DELETE FROM swarm_events WHERE build_id = ?').run(buildId);
+    } catch {}
+    db.tasks.delete(buildId);
+    db.files.delete(buildId);
+    db.events.delete(buildId);
+
     db.saveBuild({
       id: buildId,
       userId: 'p4_user',

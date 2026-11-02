@@ -39,6 +39,7 @@ import { quotaManager } from './quotaManager.js';
 import { safeResultCache } from './cache.js';
 import { localLLMService } from './localLLM.js';
 import { DatabaseManager } from './db/database.js';
+import { ExecutionAdapter } from './swarm/executionAdapter.js';
 
 interface ClientSSEListener {
   id: string;
@@ -643,8 +644,16 @@ export class PersistentDatabase {
     maxFileSize: number = 500 * 1024,
     maxProjectSize: number = 10 * 1024 * 1024
   ): { success: boolean; filePath: string; version?: number; currentContent?: string; error?: string } {
-    const cleanPath = action.path.replace(/^\/+/, '');
-    const byteLength = Buffer.byteLength(action.content, 'utf-8');
+    const sanitized = ExecutionAdapter.sanitizeFilePath(action.path);
+    if (!sanitized.valid) {
+      return {
+        success: false,
+        filePath: action.path || '',
+        error: sanitized.error || 'Invalid file path'
+      };
+    }
+    const cleanPath = sanitized.cleanPath;
+    const byteLength = Buffer.byteLength(action.content || '', 'utf-8');
     if (byteLength > maxFileSize) {
       return {
         success: false,
@@ -655,7 +664,7 @@ export class PersistentDatabase {
 
     const now = this.getTime();
     const fileId = `${buildId}:${cleanPath}`;
-    const contentHash = computeContentHash(action.content);
+    const contentHash = computeContentHash(action.content || '');
 
     try {
       const result = this.dbManager.transaction(() => {
@@ -739,31 +748,38 @@ export class PersistentDatabase {
         return result;
       }
 
-      const files = this.getFilesMap(buildId);
-      const newFile: ProjectFile = {
-        path: cleanPath,
-        content: action.content,
-        version: 1,
-        ownerModel: modelId,
-        history: [result.initialVersion!],
-        createdAt: now,
-        updatedAt: now,
-        contentHash,
-        isRecreated: result.wasPreviouslyDeleted
-      };
-      files.set(cleanPath, newFile);
-
-      this.addEvent({
-        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        buildId,
-        timestamp: now,
-        type: 'file_created',
-        modelId,
-        filePath: cleanPath,
-        details: `${modelId} created ${cleanPath} (v1)`
+      this.dbManager.onPostRollback(() => {
+        this.resyncFilesMapFromDb(buildId);
       });
 
-      this.broadcast(buildId, 'file_updated', newFile);
+      this.dbManager.onPostCommit(() => {
+        const files = this.getFilesMap(buildId);
+        const newFile: ProjectFile = {
+          path: cleanPath,
+          content: action.content,
+          version: 1,
+          ownerModel: modelId,
+          history: [result.initialVersion!],
+          createdAt: now,
+          updatedAt: now,
+          contentHash,
+          isRecreated: result.wasPreviouslyDeleted
+        };
+        files.set(cleanPath, newFile);
+
+        this.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'file_created',
+          modelId,
+          filePath: cleanPath,
+          details: `${modelId} created ${cleanPath} (v1)`
+        });
+
+        this.broadcast(buildId, 'file_updated', newFile);
+      });
+
       return { success: true, filePath: cleanPath, version: 1, currentContent: action.content };
     } catch (err: any) {
       this.handleDatabaseWriteError('createFileAtomic', err);
@@ -777,7 +793,15 @@ export class PersistentDatabase {
     action: PatchAction,
     maxFileSize: number = 500 * 1024
   ): { success: boolean; filePath: string; version?: number; currentContent?: string; error?: string } {
-    const cleanPath = action.path.replace(/^\/+/, '');
+    const sanitized = ExecutionAdapter.sanitizeFilePath(action.path);
+    if (!sanitized.valid) {
+      return {
+        success: false,
+        filePath: action.path || '',
+        error: sanitized.error || 'Invalid file path'
+      };
+    }
+    const cleanPath = sanitized.cleanPath;
     const now = this.getTime();
     const fileId = `${buildId}:${cleanPath}`;
 
@@ -882,72 +906,81 @@ export class PersistentDatabase {
       });
 
       if (!result.success) {
-        this.addEvent({
-          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          buildId,
-          timestamp: now,
-          type: 'patch_rejected',
-          modelId,
-          filePath: cleanPath,
-          details: `Rejected patch from ${modelId} on ${cleanPath}: ${result.error}`
+        this.dbManager.onPostCommit(() => {
+          this.addEvent({
+            id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            buildId,
+            timestamp: now,
+            type: 'patch_rejected',
+            modelId,
+            filePath: cleanPath,
+            details: `Rejected patch from ${modelId} on ${cleanPath}: ${result.error}`
+          });
         });
         return result;
       }
 
-      const file = this.getFile(buildId, cleanPath);
-      const isReverted = file ? file.history.some(h => h.version < file.version && h.content === result.currentContent) : false;
-      const isFormattingOnly = file ? file.content.trim().replace(/\s+/g, ' ') === result.currentContent!.trim().replace(/\s+/g, ' ') : false;
-
-      const newVersion: FileVersion = {
-        version: result.version!,
-        content: result.currentContent!,
-        authorModel: modelId,
-        timestamp: now,
-        commitMessage: action.commitMessage || `Patch ${cleanPath} v${result.version}`,
-        taskId: action.taskId,
-        changeType: isReverted ? 'reverted' : 'modified',
-        isFormattingOnly,
-        contentHash: result.newContentHash
-      };
-
-      if (file) {
-        file.content = result.currentContent!;
-        file.version = result.version!;
-        file.ownerModel = modelId;
-        file.updatedAt = now;
-        file.contentHash = result.newContentHash;
-        file.history.push(newVersion);
-      } else {
-        const fullFile: ProjectFile = {
-          path: cleanPath,
-          content: result.currentContent!,
-          version: result.version!,
-          ownerModel: modelId,
-          history: [newVersion],
-          createdAt: now,
-          updatedAt: now,
-          contentHash: result.newContentHash
-        };
-        this.getFilesMap(buildId).set(cleanPath, fullFile);
-      }
-
-      const build = this.getBuild(buildId);
-      if (build) {
-        build.patchesAppliedCount = (build.patchesAppliedCount || 0) + 1;
-        this.saveBuild(build);
-      }
-
-      this.addEvent({
-        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        buildId,
-        timestamp: now,
-        type: 'patch_applied',
-        modelId,
-        filePath: cleanPath,
-        details: `${modelId} patched ${cleanPath} (v${result.version})`
+      this.dbManager.onPostRollback(() => {
+        this.resyncFilesMapFromDb(buildId);
       });
 
-      this.broadcast(buildId, 'file_updated', this.getFile(buildId, cleanPath));
+      this.dbManager.onPostCommit(() => {
+        const file = this.getFile(buildId, cleanPath);
+        const isReverted = file ? file.history.some(h => h.version < file.version && h.content === result.currentContent) : false;
+        const isFormattingOnly = file ? file.content.trim().replace(/\s+/g, ' ') === result.currentContent!.trim().replace(/\s+/g, ' ') : false;
+
+        const newVersion: FileVersion = {
+          version: result.version!,
+          content: result.currentContent!,
+          authorModel: modelId,
+          timestamp: now,
+          commitMessage: action.commitMessage || `Patch ${cleanPath} v${result.version}`,
+          taskId: action.taskId,
+          changeType: isReverted ? 'reverted' : 'modified',
+          isFormattingOnly,
+          contentHash: result.newContentHash
+        };
+
+        if (file) {
+          file.content = result.currentContent!;
+          file.version = result.version!;
+          file.ownerModel = modelId;
+          file.updatedAt = now;
+          file.contentHash = result.newContentHash;
+          file.history.push(newVersion);
+        } else {
+          const fullFile: ProjectFile = {
+            path: cleanPath,
+            content: result.currentContent!,
+            version: result.version!,
+            ownerModel: modelId,
+            history: [newVersion],
+            createdAt: now,
+            updatedAt: now,
+            contentHash: result.newContentHash
+          };
+          this.getFilesMap(buildId).set(cleanPath, fullFile);
+        }
+
+        const build = this.getBuild(buildId);
+        if (build) {
+          build.patchesAppliedCount = (build.patchesAppliedCount || 0) + 1;
+          this.saveBuild(build);
+        }
+
+        this.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_applied',
+          modelId,
+          filePath: cleanPath,
+          details: `${modelId} patched ${cleanPath} (v${result.version})`
+        });
+
+        this.broadcast(buildId, 'file_updated', this.getFile(buildId, cleanPath));
+      });
+
       return { success: true, filePath: cleanPath, version: result.version, currentContent: result.currentContent };
     } catch (err: any) {
       this.handleDatabaseWriteError('applyPatchAtomic', err);
@@ -960,7 +993,11 @@ export class PersistentDatabase {
     modelId: string,
     filePath: string
   ): { success: boolean; filePath: string; error?: string } {
-    const cleanPath = filePath.replace(/^\/+/, '');
+    const sanitized = ExecutionAdapter.sanitizeFilePath(filePath);
+    if (!sanitized.valid) {
+      return { success: false, filePath, error: sanitized.error || 'Invalid file path' };
+    }
+    const cleanPath = sanitized.cleanPath;
     const now = this.getTime();
 
     try {
@@ -995,32 +1032,41 @@ export class PersistentDatabase {
       });
 
       if (!result.success) {
-        this.addEvent({
-          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          buildId,
-          timestamp: now,
-          type: 'patch_rejected',
-          modelId,
-          filePath: cleanPath,
-          details: `Rejected delete from ${modelId}: ${result.error}`
+        this.dbManager.onPostCommit(() => {
+          this.addEvent({
+            id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            buildId,
+            timestamp: now,
+            type: 'patch_rejected',
+            modelId,
+            filePath: cleanPath,
+            details: `Rejected delete from ${modelId}: ${result.error}`
+          });
         });
         return result;
       }
 
-      const files = this.getFilesMap(buildId);
-      files.delete(cleanPath);
-
-      this.addEvent({
-        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        buildId,
-        timestamp: now,
-        type: 'file_deleted',
-        modelId,
-        filePath: cleanPath,
-        details: `${modelId} deleted file: ${cleanPath}`
+      this.dbManager.onPostRollback(() => {
+        this.resyncFilesMapFromDb(buildId);
       });
 
-      this.broadcast(buildId, 'file_deleted', { path: cleanPath });
+      this.dbManager.onPostCommit(() => {
+        const files = this.getFilesMap(buildId);
+        files.delete(cleanPath);
+
+        this.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'file_deleted',
+          modelId,
+          filePath: cleanPath,
+          details: `${modelId} deleted file: ${cleanPath}`
+        });
+
+        this.broadcast(buildId, 'file_deleted', { path: cleanPath });
+      });
+
       return { success: true, filePath: cleanPath };
     } catch (err: any) {
       this.handleDatabaseWriteError('deleteFileAtomic', err);
@@ -1036,8 +1082,16 @@ export class PersistentDatabase {
     commitMessage?: string,
     taskId?: string
   ): { success: boolean; oldPath: string; newPath: string; error?: string } {
-    const cleanOld = oldPath.replace(/^\/+/, '');
-    const cleanNew = newPath.replace(/^\/+/, '');
+    const sanitizedOld = ExecutionAdapter.sanitizeFilePath(oldPath);
+    if (!sanitizedOld.valid) {
+      return { success: false, oldPath, newPath, error: `Invalid source path: ${sanitizedOld.error}` };
+    }
+    const sanitizedNew = ExecutionAdapter.sanitizeFilePath(newPath);
+    if (!sanitizedNew.valid) {
+      return { success: false, oldPath, newPath, error: `Invalid destination path: ${sanitizedNew.error}` };
+    }
+    const cleanOld = sanitizedOld.cleanPath;
+    const cleanNew = sanitizedNew.cleanPath;
     const now = this.getTime();
     const oldId = `${buildId}:${cleanOld}`;
     const newId = `${buildId}:${cleanNew}`;
@@ -1095,6 +1149,14 @@ export class PersistentDatabase {
           source.created_at || now, now, source.content_hash
         );
 
+        // Move existing historical versions to destination file_id and path to preserve history across reloads
+        this.dbManager.db.prepare(`
+          UPDATE file_versions
+          SET file_id = ?, path = ?
+          WHERE build_id = ? AND file_id = ?
+        `).run(newId, cleanNew, buildId, oldId);
+
+        // Record the rename commit version
         this.dbManager.db.prepare(`
           INSERT INTO file_versions (file_id, build_id, path, version, content, author_model, commit_message, timestamp, content_hash)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1117,47 +1179,54 @@ export class PersistentDatabase {
         return result;
       }
 
-      const files = this.getFilesMap(buildId);
-      const oldFile = files.get(cleanOld);
-      files.delete(cleanOld);
-
-      const newVersion: FileVersion = {
-        version: result.version!,
-        content: result.content!,
-        authorModel: modelId,
-        timestamp: now,
-        commitMessage: commitMessage || `Renamed from ${cleanOld} to ${cleanNew}`,
-        taskId,
-        changeType: 'modified',
-        contentHash: result.contentHash
-      };
-
-      const newFileObj: ProjectFile = {
-        path: cleanNew,
-        content: result.content!,
-        version: result.version!,
-        ownerModel: modelId,
-        history: oldFile ? [...oldFile.history, newVersion] : [newVersion],
-        createdAt: oldFile?.createdAt || now,
-        updatedAt: now,
-        isRenamed: true,
-        originalPath: oldFile?.originalPath || cleanOld,
-        contentHash: result.contentHash
-      };
-      files.set(cleanNew, newFileObj);
-
-      this.addEvent({
-        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        buildId,
-        timestamp: now,
-        type: 'patch_applied',
-        modelId,
-        filePath: cleanNew,
-        details: `${modelId} renamed ${cleanOld} -> ${cleanNew}`
+      this.dbManager.onPostRollback(() => {
+        this.resyncFilesMapFromDb(buildId);
       });
 
-      this.broadcast(buildId, 'file_deleted', { path: cleanOld });
-      this.broadcast(buildId, 'file_updated', newFileObj);
+      this.dbManager.onPostCommit(() => {
+        const files = this.getFilesMap(buildId);
+        const oldFile = files.get(cleanOld);
+        files.delete(cleanOld);
+
+        const newVersion: FileVersion = {
+          version: result.version!,
+          content: result.content!,
+          authorModel: modelId,
+          timestamp: now,
+          commitMessage: commitMessage || `Renamed from ${cleanOld} to ${cleanNew}`,
+          taskId,
+          changeType: 'modified',
+          contentHash: result.contentHash
+        };
+
+        const newFileObj: ProjectFile = {
+          path: cleanNew,
+          content: result.content!,
+          version: result.version!,
+          ownerModel: modelId,
+          history: oldFile ? [...oldFile.history, newVersion] : [newVersion],
+          createdAt: oldFile?.createdAt || now,
+          updatedAt: now,
+          isRenamed: true,
+          originalPath: oldFile?.originalPath || cleanOld,
+          contentHash: result.contentHash
+        };
+        files.set(cleanNew, newFileObj);
+
+        this.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_applied',
+          modelId,
+          filePath: cleanNew,
+          details: `${modelId} renamed ${cleanOld} -> ${cleanNew}`
+        });
+
+        this.broadcast(buildId, 'file_deleted', { path: cleanOld });
+        this.broadcast(buildId, 'file_updated', newFileObj);
+      });
+
       return { success: true, oldPath: cleanOld, newPath: cleanNew };
     } catch (err: any) {
       this.handleDatabaseWriteError('renameFileAtomic', err);
@@ -2587,28 +2656,34 @@ export class PersistentDatabase {
         acquired.push(p);
       }
 
-      // 4. Update in-memory file objects
-      for (const p of acquired) {
-        let file = this.getFile(buildId, p);
-        if (!file) {
-          file = {
-            path: p,
-            content: '',
-            version: 0,
-            ownerModel: modelId,
-            history: [],
-            leaseOwner: modelId,
-            leaseExpiresAt: expiry,
-            createdAt: now,
-            updatedAt: now
-          };
-          this.getFilesMap(buildId).set(p, file);
-        } else {
-          file.leaseOwner = modelId;
-          file.leaseExpiresAt = expiry;
-          file.updatedAt = now;
+      // 4. Update in-memory file objects post-commit
+      this.dbManager.onPostRollback(() => {
+        this.resyncFilesMapFromDb(buildId);
+      });
+
+      this.dbManager.onPostCommit(() => {
+        for (const p of acquired) {
+          let file = this.getFile(buildId, p);
+          if (!file) {
+            file = {
+              path: p,
+              content: '',
+              version: 0,
+              ownerModel: modelId,
+              history: [],
+              leaseOwner: modelId,
+              leaseExpiresAt: expiry,
+              createdAt: now,
+              updatedAt: now
+            };
+            this.getFilesMap(buildId).set(p, file);
+          } else {
+            file.leaseOwner = modelId;
+            file.leaseExpiresAt = expiry;
+            file.updatedAt = now;
+          }
         }
-      }
+      });
 
       return { success: true, acquiredPaths: acquired };
     });
@@ -2667,13 +2742,19 @@ export class PersistentDatabase {
         return { success: false, error: `Partial renewal failure: renewed ${renewed.length}/${sortedPaths.length} files`, renewedPaths: [] };
       }
 
-      // 3. Update in-memory cache
-      for (const p of renewed) {
-        const file = this.getFile(buildId, p);
-        if (file) {
-          file.leaseExpiresAt = expiry;
+      // 3. Update in-memory cache post-commit
+      this.dbManager.onPostRollback(() => {
+        this.resyncFilesMapFromDb(buildId);
+      });
+
+      this.dbManager.onPostCommit(() => {
+        for (const p of renewed) {
+          const file = this.getFile(buildId, p);
+          if (file) {
+            file.leaseExpiresAt = expiry;
+          }
         }
-      }
+      });
 
       return { success: true, renewedPaths: renewed };
     });
@@ -2731,14 +2812,20 @@ export class PersistentDatabase {
         }
       }
 
-      // Pass 3: In-memory cache update strictly after database updates succeed
-      for (const p of releasedPaths) {
-        const file = this.getFile(buildId, p);
-        if (file) {
-          file.leaseOwner = null;
-          file.leaseExpiresAt = null;
+      // Pass 3: In-memory cache update strictly after database updates commit
+      this.dbManager.onPostRollback(() => {
+        this.resyncFilesMapFromDb(buildId);
+      });
+
+      this.dbManager.onPostCommit(() => {
+        for (const p of releasedPaths) {
+          const file = this.getFile(buildId, p);
+          if (file) {
+            file.leaseOwner = null;
+            file.leaseExpiresAt = null;
+          }
         }
-      }
+      });
 
       return { success: true, releasedPaths };
     });
