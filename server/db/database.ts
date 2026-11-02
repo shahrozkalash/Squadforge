@@ -539,20 +539,43 @@ export class DatabaseManager {
     }
   }
 
+  private transactionDepth = 0;
+
   /**
-   * Helper to execute in an immediate database transaction (serializes concurrent writes across processes)
+   * Helper to execute in an immediate database transaction (serializes concurrent writes across processes).
+   * Supports nested transactions seamlessly via SQLite SAVEPOINTs.
    */
   transaction<T>(fn: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE;');
+    const isOuter = this.transactionDepth === 0;
+    const savepointName = `sp_${this.transactionDepth}`;
+    this.transactionDepth++;
+
+    if (isOuter) {
+      this.db.exec('BEGIN IMMEDIATE;');
+    } else {
+      this.db.exec(`SAVEPOINT ${savepointName};`);
+    }
+
     try {
       const result = fn();
-      this.db.exec('COMMIT;');
+      if (isOuter) {
+        this.db.exec('COMMIT;');
+      } else {
+        this.db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+      }
       return result;
     } catch (err) {
       try {
-        this.db.exec('ROLLBACK;');
+        if (isOuter) {
+          this.db.exec('ROLLBACK;');
+        } else {
+          this.db.exec(`ROLLBACK TO SAVEPOINT ${savepointName};`);
+          this.db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+        }
       } catch {}
       throw err;
+    } finally {
+      this.transactionDepth--;
     }
   }
 
@@ -606,7 +629,7 @@ export class DatabaseManager {
       const res = this.db.prepare(`
         DELETE FROM coordination_locks WHERE expires_at < ?
       `).run(now);
-      return res.changes;
+      return Number(res.changes);
     } catch {
       return 0;
     }

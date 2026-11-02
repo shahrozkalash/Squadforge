@@ -1050,6 +1050,30 @@ export class ExecutionAdapter {
         'tls', 'url', 'zlib', 'assert', 'assert/strict', 'test', 'node:test', 'node:assert', 'node:assert/strict'
       ]);
 
+      // Collect ambient module declarations from .d.ts files in workspace
+      const ambientModules = new Set<string>();
+      for (const f of files) {
+        if (f.path.endsWith('.d.ts') || f.content.includes('declare module')) {
+          const modMatches = f.content.matchAll(/declare\s+module\s+['"]([^'"]+)['"]/g);
+          for (const mm of modMatches) {
+            ambientModules.add(mm[1]);
+          }
+        }
+      }
+
+      // Helper to check if an import matches tsconfig path aliases
+      const isPathAlias = (importStr: string, paths?: ts.MapLike<string[]>): boolean => {
+        if (!paths) return false;
+        for (const pattern of Object.keys(paths)) {
+          const prefix = pattern.replace(/\*.*$/, '');
+          if (prefix && importStr.startsWith(prefix)) {
+            return true;
+          }
+          if (pattern === importStr) return true;
+        }
+        return false;
+      };
+
       for (const file of files) {
         if (!/\.(ts|tsx|js|jsx)$/.test(file.path)) continue;
         const importMatches = file.content.matchAll(/(?:import|from|require)\s*\(?['"]([^'"\r\n]+)['"]\)?/g);
@@ -1058,6 +1082,17 @@ export class ExecutionAdapter {
           if (importPath.startsWith('.') || importPath.startsWith('/') || importPath.startsWith('node:')) {
             continue;
           }
+
+          // Skip path aliases defined in tsconfig.json
+          if (isPathAlias(importPath, compilerOptions?.paths)) {
+            continue;
+          }
+
+          // Skip ambient modules declared in project .d.ts files
+          if (ambientModules.has(importPath)) {
+            continue;
+          }
+
           let pkgName = importPath;
           if (pkgName.startsWith('@')) {
             pkgName = pkgName.split('/').slice(0, 2).join('/');
@@ -1066,6 +1101,10 @@ export class ExecutionAdapter {
           }
 
           if (nodeBuiltins.has(pkgName) || nodeBuiltins.has(importPath)) {
+            continue;
+          }
+
+          if (ambientModules.has(pkgName) || isPathAlias(pkgName, compilerOptions?.paths)) {
             continue;
           }
 

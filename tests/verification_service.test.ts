@@ -61,6 +61,7 @@ describe('SquadForge Honest Verification & Readiness Service', () => {
       filePaths: ['src/index.ts'],
       priority: 2
     });
+    TaskManager.claimTask(buildId, 'agent_dev');
     TaskManager.completeTask(buildId, task.id, 'agent_dev');
 
     const report = HonestVerificationService.evaluateProjectReadiness(buildId);

@@ -16,7 +16,11 @@ import {
   PasswordResetCodeRecord,
   PasswordResetAuthRecord,
   UsageLogEntry,
-  SwarmUsageStats
+  SwarmUsageStats,
+  PatchAction,
+  CreateFileAction,
+  DeleteFileAction,
+  RenameFileAction
 } from './types.js';
 import { ProjectMemory } from './swarm/projectMemory.js';
 import { 
@@ -630,6 +634,647 @@ export class PersistentDatabase {
     return existed;
   }
 
+  // --- Atomic Database-Backed File Mutations ---
+
+  createFileAtomic(
+    buildId: string,
+    modelId: string,
+    action: { path: string; content: string; commitMessage?: string; taskId?: string },
+    maxFileSize: number = 500 * 1024,
+    maxProjectSize: number = 10 * 1024 * 1024
+  ): { success: boolean; filePath: string; version?: number; currentContent?: string; error?: string } {
+    const cleanPath = action.path.replace(/^\/+/, '');
+    const byteLength = Buffer.byteLength(action.content, 'utf-8');
+    if (byteLength > maxFileSize) {
+      return {
+        success: false,
+        filePath: cleanPath,
+        error: `File size limit exceeded (${byteLength} bytes > ${maxFileSize} bytes max).`
+      };
+    }
+
+    const now = this.getTime();
+    const fileId = `${buildId}:${cleanPath}`;
+    const contentHash = computeContentHash(action.content);
+
+    try {
+      const result = this.dbManager.transaction(() => {
+        const existing = this.dbManager.db.prepare(
+          'SELECT version, content, lease_owner, lease_expires_at FROM project_files WHERE build_id = ? AND path = ?'
+        ).get(buildId, cleanPath) as any;
+
+        if (existing && (existing.version > 0 || existing.content !== '')) {
+          return {
+            success: false,
+            filePath: cleanPath,
+            error: `File ${cleanPath} already exists (v${existing.version}). Models must use patch_file with exact find/replace edits.`,
+            currentContent: existing.content
+          };
+        }
+
+        if (existing && existing.lease_owner && existing.lease_owner !== modelId && (!existing.lease_expires_at || existing.lease_expires_at > now)) {
+          return {
+            success: false,
+            filePath: cleanPath,
+            error: `File is currently locked under refactor lease by ${existing.lease_owner}.`
+          };
+        }
+
+        const allDbFiles = this.dbManager.db.prepare(
+          'SELECT content FROM project_files WHERE build_id = ? AND path != ?'
+        ).all(buildId, cleanPath) as Array<{ content: string }>;
+        const totalProjectBytes = allDbFiles.reduce((acc, f) => acc + Buffer.byteLength(f.content || '', 'utf-8'), 0) + byteLength;
+        if (totalProjectBytes > maxProjectSize) {
+          return {
+            success: false,
+            filePath: cleanPath,
+            error: `Project size limit exceeded (${totalProjectBytes} bytes > ${maxProjectSize} bytes max).`
+          };
+        }
+
+        const wasPreviouslyDeleted = (this.events.get(buildId) || []).some(e => e.type === 'file_deleted' && e.filePath === cleanPath);
+
+        const initialVersion: FileVersion = {
+          version: 1,
+          content: action.content,
+          authorModel: modelId,
+          timestamp: now,
+          commitMessage: action.commitMessage || (wasPreviouslyDeleted ? `Recreated ${cleanPath}` : `Created ${cleanPath}`),
+          taskId: action.taskId,
+          changeType: wasPreviouslyDeleted ? 'recreated' : 'added',
+          contentHash
+        };
+
+        this.dbManager.db.prepare(`
+          INSERT INTO project_files (
+            id, build_id, path, content, version, owner_model,
+            lease_owner, lease_expires_at, created_at, updated_at, content_hash
+          ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            content = excluded.content,
+            version = 1,
+            owner_model = excluded.owner_model,
+            lease_owner = excluded.lease_owner,
+            lease_expires_at = excluded.lease_expires_at,
+            updated_at = excluded.updated_at,
+            content_hash = excluded.content_hash
+        `).run(fileId, buildId, cleanPath, action.content, modelId, existing?.lease_owner || null, existing?.lease_expires_at || null, now, now, contentHash);
+
+        this.dbManager.db.prepare(`
+          INSERT INTO file_versions (file_id, build_id, path, version, content, author_model, commit_message, timestamp, content_hash)
+          VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+        `).run(fileId, buildId, cleanPath, action.content, modelId, initialVersion.commitMessage, now, contentHash);
+
+        return {
+          success: true,
+          filePath: cleanPath,
+          version: 1,
+          currentContent: action.content,
+          initialVersion,
+          wasPreviouslyDeleted
+        };
+      });
+
+      if (!result.success) {
+        return result;
+      }
+
+      const files = this.getFilesMap(buildId);
+      const newFile: ProjectFile = {
+        path: cleanPath,
+        content: action.content,
+        version: 1,
+        ownerModel: modelId,
+        history: [result.initialVersion!],
+        createdAt: now,
+        updatedAt: now,
+        contentHash,
+        isRecreated: result.wasPreviouslyDeleted
+      };
+      files.set(cleanPath, newFile);
+
+      this.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'file_created',
+        modelId,
+        filePath: cleanPath,
+        details: `${modelId} created ${cleanPath} (v1)`
+      });
+
+      this.broadcast(buildId, 'file_updated', newFile);
+      return { success: true, filePath: cleanPath, version: 1, currentContent: action.content };
+    } catch (err: any) {
+      this.handleDatabaseWriteError('createFileAtomic', err);
+      return { success: false, filePath: cleanPath, error: err.message || 'Database error creating file' };
+    }
+  }
+
+  applyPatchAtomic(
+    buildId: string,
+    modelId: string,
+    action: PatchAction,
+    maxFileSize: number = 500 * 1024
+  ): { success: boolean; filePath: string; version?: number; currentContent?: string; error?: string } {
+    const cleanPath = action.path.replace(/^\/+/, '');
+    const now = this.getTime();
+    const fileId = `${buildId}:${cleanPath}`;
+
+    try {
+      const result = this.dbManager.transaction(() => {
+        const row = this.dbManager.db.prepare(
+          'SELECT version, content, lease_owner, lease_expires_at, content_hash, owner_model, created_at FROM project_files WHERE build_id = ? AND path = ?'
+        ).get(buildId, cleanPath) as any;
+
+        if (!row || (row.version === 0 && row.content === '')) {
+          return {
+            success: false,
+            filePath: cleanPath,
+            error: `File ${cleanPath} does not exist yet. Use create_file first.`
+          };
+        }
+
+        if (row.lease_owner) {
+          if (row.lease_owner !== modelId && (!row.lease_expires_at || row.lease_expires_at > now)) {
+            const error = `File is currently locked under refactor lease by ${row.lease_owner}. Lease expires in ${Math.round(((row.lease_expires_at || now) - now) / 1000)}s.`;
+            return { success: false, filePath: cleanPath, error, currentContent: row.content };
+          }
+          if (row.lease_owner === modelId && row.lease_expires_at && row.lease_expires_at <= now) {
+            const error = `Stale lease rejected: Lease for file ${cleanPath} expired ${Math.round((now - row.lease_expires_at) / 1000)}s ago. Renew your lease before applying edits.`;
+            return { success: false, filePath: cleanPath, error, currentContent: row.content };
+          }
+        }
+
+        if (action.expectedVersion !== undefined && row.version !== action.expectedVersion) {
+          const error = `Version conflict: Expected file version v${action.expectedVersion}, but ${cleanPath} is currently at v${row.version}. File was modified concurrently.`;
+          return { success: false, filePath: cleanPath, error, currentContent: row.content };
+        }
+
+        if (action.expectedContentHash && row.content_hash && row.content_hash !== action.expectedContentHash) {
+          const error = `Content hash conflict: Expected hash ${action.expectedContentHash}, but ${cleanPath} has hash ${row.content_hash}. File was modified concurrently.`;
+          return { success: false, filePath: cleanPath, error, currentContent: row.content };
+        }
+
+        let content = row.content;
+        for (const edit of action.edits) {
+          if (!edit.find && edit.find !== '') continue;
+          const occurrences = content.split(edit.find).length - 1;
+          if (occurrences === 0) {
+            const error = `Conflict: "find" text was not found in ${cleanPath} (current v${row.version}). File may have been edited by another model. Redo your edit on this version.`;
+            return { success: false, filePath: cleanPath, error, currentContent: content };
+          }
+          if (occurrences > 1) {
+            const error = `Ambiguity: "find" text appears ${occurrences} times in ${cleanPath}. Provide more surrounding context lines in "find".`;
+            return { success: false, filePath: cleanPath, error, currentContent: content };
+          }
+          content = content.replace(edit.find, edit.replace);
+        }
+
+        const byteLength = Buffer.byteLength(content, 'utf-8');
+        if (byteLength > maxFileSize) {
+          return {
+            success: false,
+            filePath: cleanPath,
+            error: `Patched file exceeds maximum file size limit (${byteLength} bytes > ${maxFileSize} bytes max).`,
+            currentContent: row.content
+          };
+        }
+
+        const newVersionNum = row.version + 1;
+        const newContentHash = computeContentHash(content);
+
+        const res = this.dbManager.db.prepare(`
+          UPDATE project_files SET
+            content = ?,
+            version = ?,
+            owner_model = ?,
+            updated_at = ?,
+            content_hash = ?
+          WHERE id = ?
+            AND build_id = ?
+            AND version = ?
+            AND (content_hash IS NULL OR content_hash = ?)
+            AND (lease_owner IS NULL OR lease_owner = ? OR lease_expires_at <= ?)
+        `).run(content, newVersionNum, modelId, now, newContentHash, fileId, buildId, row.version, row.content_hash || newContentHash, modelId, now);
+
+        if (res.changes === 0) {
+          return {
+            success: false,
+            filePath: cleanPath,
+            error: `Concurrent write conflict: File ${cleanPath} was modified by another process.`,
+            currentContent: row.content
+          };
+        }
+
+        this.dbManager.db.prepare(`
+          INSERT INTO file_versions (file_id, build_id, path, version, content, author_model, commit_message, timestamp, content_hash)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(fileId, buildId, cleanPath, newVersionNum, content, modelId, action.commitMessage || `Patch ${cleanPath} v${newVersionNum}`, now, newContentHash);
+
+        return {
+          success: true,
+          filePath: cleanPath,
+          version: newVersionNum,
+          currentContent: content,
+          newContentHash
+        };
+      });
+
+      if (!result.success) {
+        this.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected patch from ${modelId} on ${cleanPath}: ${result.error}`
+        });
+        return result;
+      }
+
+      const file = this.getFile(buildId, cleanPath);
+      const isReverted = file ? file.history.some(h => h.version < file.version && h.content === result.currentContent) : false;
+      const isFormattingOnly = file ? file.content.trim().replace(/\s+/g, ' ') === result.currentContent!.trim().replace(/\s+/g, ' ') : false;
+
+      const newVersion: FileVersion = {
+        version: result.version!,
+        content: result.currentContent!,
+        authorModel: modelId,
+        timestamp: now,
+        commitMessage: action.commitMessage || `Patch ${cleanPath} v${result.version}`,
+        taskId: action.taskId,
+        changeType: isReverted ? 'reverted' : 'modified',
+        isFormattingOnly,
+        contentHash: result.newContentHash
+      };
+
+      if (file) {
+        file.content = result.currentContent!;
+        file.version = result.version!;
+        file.ownerModel = modelId;
+        file.updatedAt = now;
+        file.contentHash = result.newContentHash;
+        file.history.push(newVersion);
+      } else {
+        const fullFile: ProjectFile = {
+          path: cleanPath,
+          content: result.currentContent!,
+          version: result.version!,
+          ownerModel: modelId,
+          history: [newVersion],
+          createdAt: now,
+          updatedAt: now,
+          contentHash: result.newContentHash
+        };
+        this.getFilesMap(buildId).set(cleanPath, fullFile);
+      }
+
+      const build = this.getBuild(buildId);
+      if (build) {
+        build.patchesAppliedCount = (build.patchesAppliedCount || 0) + 1;
+        this.saveBuild(build);
+      }
+
+      this.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'patch_applied',
+        modelId,
+        filePath: cleanPath,
+        details: `${modelId} patched ${cleanPath} (v${result.version})`
+      });
+
+      this.broadcast(buildId, 'file_updated', this.getFile(buildId, cleanPath));
+      return { success: true, filePath: cleanPath, version: result.version, currentContent: result.currentContent };
+    } catch (err: any) {
+      this.handleDatabaseWriteError('applyPatchAtomic', err);
+      return { success: false, filePath: cleanPath, error: err.message || 'Database error during patch' };
+    }
+  }
+
+  deleteFileAtomic(
+    buildId: string,
+    modelId: string,
+    filePath: string
+  ): { success: boolean; filePath: string; error?: string } {
+    const cleanPath = filePath.replace(/^\/+/, '');
+    const now = this.getTime();
+
+    try {
+      const result = this.dbManager.transaction(() => {
+        const row = this.dbManager.db.prepare(
+          'SELECT version, content, lease_owner, lease_expires_at FROM project_files WHERE build_id = ? AND path = ?'
+        ).get(buildId, cleanPath) as any;
+
+        if (!row || (row.version === 0 && row.content === '')) {
+          return { success: false, filePath: cleanPath, error: `File ${cleanPath} does not exist.` };
+        }
+
+        if (row.lease_owner) {
+          if (row.lease_owner !== modelId && (!row.lease_expires_at || row.lease_expires_at > now)) {
+            return { success: false, filePath: cleanPath, error: `Cannot delete file: Locked under active lease by ${row.lease_owner}.` };
+          }
+          if (row.lease_owner === modelId && row.lease_expires_at && row.lease_expires_at <= now) {
+            return { success: false, filePath: cleanPath, error: `Cannot delete file: Lease for ${cleanPath} expired. Renew lease before deleting.` };
+          }
+        }
+
+        const res = this.dbManager.db.prepare(`
+          DELETE FROM project_files
+          WHERE build_id = ? AND path = ? AND (lease_owner IS NULL OR lease_owner = ? OR lease_expires_at <= ?)
+        `).run(buildId, cleanPath, modelId, now);
+
+        if (res.changes === 0) {
+          return { success: false, filePath: cleanPath, error: `Cannot delete file ${cleanPath}: condition not satisfied.` };
+        }
+
+        return { success: true, filePath: cleanPath };
+      });
+
+      if (!result.success) {
+        this.addEvent({
+          id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          buildId,
+          timestamp: now,
+          type: 'patch_rejected',
+          modelId,
+          filePath: cleanPath,
+          details: `Rejected delete from ${modelId}: ${result.error}`
+        });
+        return result;
+      }
+
+      const files = this.getFilesMap(buildId);
+      files.delete(cleanPath);
+
+      this.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'file_deleted',
+        modelId,
+        filePath: cleanPath,
+        details: `${modelId} deleted file: ${cleanPath}`
+      });
+
+      this.broadcast(buildId, 'file_deleted', { path: cleanPath });
+      return { success: true, filePath: cleanPath };
+    } catch (err: any) {
+      this.handleDatabaseWriteError('deleteFileAtomic', err);
+      return { success: false, filePath: cleanPath, error: err.message || 'Database error during delete' };
+    }
+  }
+
+  renameFileAtomic(
+    buildId: string,
+    modelId: string,
+    oldPath: string,
+    newPath: string,
+    commitMessage?: string,
+    taskId?: string
+  ): { success: boolean; oldPath: string; newPath: string; error?: string } {
+    const cleanOld = oldPath.replace(/^\/+/, '');
+    const cleanNew = newPath.replace(/^\/+/, '');
+    const now = this.getTime();
+    const oldId = `${buildId}:${cleanOld}`;
+    const newId = `${buildId}:${cleanNew}`;
+
+    try {
+      const result = this.dbManager.transaction(() => {
+        const source = this.dbManager.db.prepare(
+          'SELECT * FROM project_files WHERE build_id = ? AND path = ?'
+        ).get(buildId, cleanOld) as any;
+
+        if (!source || (source.version === 0 && source.content === '')) {
+          return { success: false, oldPath: cleanOld, newPath: cleanNew, error: `File ${cleanOld} does not exist.` };
+        }
+
+        if (source.lease_owner) {
+          if (source.lease_owner !== modelId && (!source.lease_expires_at || source.lease_expires_at > now)) {
+            return { success: false, oldPath: cleanOld, newPath: cleanNew, error: `Cannot rename file: Source file is locked under active lease by ${source.lease_owner}.` };
+          }
+          if (source.lease_owner === modelId && source.lease_expires_at && source.lease_expires_at <= now) {
+            return { success: false, oldPath: cleanOld, newPath: cleanNew, error: `Cannot rename file: Lease for source file expired. Renew lease before renaming.` };
+          }
+        }
+
+        const dest = this.dbManager.db.prepare(
+          'SELECT version, content, lease_owner, lease_expires_at FROM project_files WHERE build_id = ? AND path = ?'
+        ).get(buildId, cleanNew) as any;
+
+        if (dest && (dest.version > 0 || dest.content !== '')) {
+          return { success: false, oldPath: cleanOld, newPath: cleanNew, error: `Destination ${cleanNew} already exists.` };
+        }
+
+        if (dest && dest.lease_owner && dest.lease_owner !== modelId && (!dest.lease_expires_at || dest.lease_expires_at > now)) {
+          return { success: false, oldPath: cleanOld, newPath: cleanNew, error: `Destination ${cleanNew} is locked by another agent.` };
+        }
+
+        const newVersionNum = source.version + 1;
+
+        // Destination created FIRST in database before source is deleted
+        this.dbManager.db.prepare(`
+          INSERT INTO project_files (
+            id, build_id, path, content, version, owner_model,
+            lease_owner, lease_expires_at, created_at, updated_at, content_hash
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            content = excluded.content,
+            version = excluded.version,
+            owner_model = excluded.owner_model,
+            lease_owner = excluded.lease_owner,
+            lease_expires_at = excluded.lease_expires_at,
+            updated_at = excluded.updated_at,
+            content_hash = excluded.content_hash
+        `).run(
+          newId, buildId, cleanNew, source.content, newVersionNum, modelId,
+          source.lease_owner || null, source.lease_expires_at || null,
+          source.created_at || now, now, source.content_hash
+        );
+
+        this.dbManager.db.prepare(`
+          INSERT INTO file_versions (file_id, build_id, path, version, content, author_model, commit_message, timestamp, content_hash)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(newId, buildId, cleanNew, newVersionNum, source.content, modelId, commitMessage || `Renamed from ${cleanOld} to ${cleanNew}`, now, source.content_hash);
+
+        // Delete source
+        this.dbManager.db.prepare('DELETE FROM project_files WHERE id = ?').run(oldId);
+
+        return {
+          success: true,
+          oldPath: cleanOld,
+          newPath: cleanNew,
+          version: newVersionNum,
+          content: source.content,
+          contentHash: source.content_hash
+        };
+      });
+
+      if (!result.success) {
+        return result;
+      }
+
+      const files = this.getFilesMap(buildId);
+      const oldFile = files.get(cleanOld);
+      files.delete(cleanOld);
+
+      const newVersion: FileVersion = {
+        version: result.version!,
+        content: result.content!,
+        authorModel: modelId,
+        timestamp: now,
+        commitMessage: commitMessage || `Renamed from ${cleanOld} to ${cleanNew}`,
+        taskId,
+        changeType: 'modified',
+        contentHash: result.contentHash
+      };
+
+      const newFileObj: ProjectFile = {
+        path: cleanNew,
+        content: result.content!,
+        version: result.version!,
+        ownerModel: modelId,
+        history: oldFile ? [...oldFile.history, newVersion] : [newVersion],
+        createdAt: oldFile?.createdAt || now,
+        updatedAt: now,
+        isRenamed: true,
+        originalPath: oldFile?.originalPath || cleanOld,
+        contentHash: result.contentHash
+      };
+      files.set(cleanNew, newFileObj);
+
+      this.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: now,
+        type: 'patch_applied',
+        modelId,
+        filePath: cleanNew,
+        details: `${modelId} renamed ${cleanOld} -> ${cleanNew}`
+      });
+
+      this.broadcast(buildId, 'file_deleted', { path: cleanOld });
+      this.broadcast(buildId, 'file_updated', newFileObj);
+      return { success: true, oldPath: cleanOld, newPath: cleanNew };
+    } catch (err: any) {
+      this.handleDatabaseWriteError('renameFileAtomic', err);
+      return { success: false, oldPath: cleanOld, newPath: cleanNew, error: err.message || 'Database error during rename' };
+    }
+  }
+
+  applyBatchActionsAtomic(
+    buildId: string,
+    modelId: string,
+    actions: Array<{ action?: string; [key: string]: any }>,
+    maxFileSize: number = 500 * 1024,
+    maxProjectSize: number = 10 * 1024 * 1024
+  ): {
+    success: boolean;
+    appliedCount: number;
+    totalCount: number;
+    error?: string;
+    reverted?: boolean;
+    results: any[];
+  } {
+    const results: any[] = [];
+    let failureError: string | undefined;
+
+    try {
+      this.dbManager.transaction(() => {
+        for (const item of actions) {
+          let res: { success: boolean; error?: string; [key: string]: any } = { success: false, error: 'Unknown action' };
+
+          if (item.action === 'create_file') {
+            res = this.createFileAtomic(buildId, modelId, item as any, maxFileSize, maxProjectSize);
+          } else if (item.action === 'patch_file') {
+            res = this.applyPatchAtomic(buildId, modelId, item as any, maxFileSize);
+          } else if (item.action === 'delete_file') {
+            res = this.deleteFileAtomic(buildId, modelId, (item as any).path);
+          } else if (item.action === 'rename_file') {
+            res = this.renameFileAtomic(buildId, modelId, (item as any).oldPath, (item as any).newPath, (item as any).commitMessage, (item as any).taskId);
+          } else if (item.action === 'create_task') {
+            res = { success: true };
+          } else {
+            res = { success: false, error: `Unsupported action type: ${item.action}` };
+          }
+
+          results.push(res);
+
+          if (!res.success) {
+            failureError = res.error || `Action ${item.action} failed`;
+            // Throw inside transaction to trigger automatic SQLite rollback of all statements in this batch!
+            throw new Error(failureError);
+          }
+        }
+      });
+
+      return {
+        success: true,
+        appliedCount: results.filter(r => r.success).length,
+        totalCount: actions.length,
+        results
+      };
+    } catch (err: any) {
+      // Transaction was completely rolled back by SQLite.
+      // In-memory cache is resynchronized from database to ensure perfect cache consistency.
+      this.resyncFilesMapFromDb(buildId);
+
+      this.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: this.getTime(),
+        type: 'patch_rejected',
+        modelId,
+        details: `Batch transaction aborted and rolled back cleanly: ${failureError || err.message}`
+      });
+
+      return {
+        success: false,
+        appliedCount: 0,
+        totalCount: actions.length,
+        error: failureError || err.message,
+        reverted: true,
+        results
+      };
+    }
+  }
+
+  resyncFilesMapFromDb(buildId: string): void {
+    const fileMap = new Map<string, ProjectFile>();
+    try {
+      const rows = this.dbManager.db.prepare('SELECT * FROM project_files WHERE build_id = ?').all(buildId) as any[];
+      for (const row of rows) {
+        const fileVersions = this.dbManager.db.prepare(
+          'SELECT * FROM file_versions WHERE build_id = ? AND path = ? ORDER BY version ASC'
+        ).all(buildId, row.path) as any[];
+
+        fileMap.set(row.path, {
+          path: row.path,
+          content: row.content || '',
+          version: row.version || 1,
+          ownerModel: row.owner_model || 'system',
+          leaseOwner: row.lease_owner || null,
+          leaseExpiresAt: row.lease_expires_at || null,
+          createdAt: row.created_at || Date.now(),
+          updatedAt: row.updated_at || Date.now(),
+          contentHash: row.content_hash || computeContentHash(row.content || ''),
+          history: fileVersions.map(v => ({
+            version: v.version,
+            content: v.content,
+            authorModel: v.author_model,
+            commitMessage: v.commit_message || undefined,
+            timestamp: v.timestamp,
+            contentHash: v.content_hash
+          }))
+        });
+      }
+      this.files.set(buildId, fileMap);
+    } catch {}
+  }
+
   deleteUserSessions(userId: string): void {
     for (const [id, s] of this.sessions.entries()) {
       if (s.userId === userId) {
@@ -1206,7 +1851,7 @@ export class PersistentDatabase {
     // 1. Database write MUST happen BEFORE cache mutation
     try {
       this.dbManager.db.prepare(`
-        INSERT OR REPLACE INTO builds (
+        INSERT INTO builds (
           id, user_id, idea, status, created_at, updated_at, completed_at,
           selected_models, auto_push_github, total_tokens, total_cost, cost_limit,
           token_budget, max_duration_seconds, patches_applied_count, error, failure_reason,
@@ -1216,6 +1861,43 @@ export class PersistentDatabase {
           project_type, architecture_decisions, requirements_checklist, revisions, live_preview_html,
           preview_mode, preview_diagnostic, preview_runtime_errors, preview_entry_point
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          user_id = excluded.user_id,
+          idea = excluded.idea,
+          status = excluded.status,
+          updated_at = excluded.updated_at,
+          completed_at = excluded.completed_at,
+          selected_models = excluded.selected_models,
+          auto_push_github = excluded.auto_push_github,
+          total_tokens = excluded.total_tokens,
+          total_cost = excluded.total_cost,
+          cost_limit = excluded.cost_limit,
+          token_budget = excluded.token_budget,
+          max_duration_seconds = excluded.max_duration_seconds,
+          patches_applied_count = excluded.patches_applied_count,
+          error = excluded.error,
+          failure_reason = excluded.failure_reason,
+          tech_stack = excluded.tech_stack,
+          milestones = excluded.milestones,
+          test_report = excluded.test_report,
+          security_audit = excluded.security_audit,
+          verification_report = excluded.verification_report,
+          verification_feedback = excluded.verification_feedback,
+          verification_attempts = excluded.verification_attempts,
+          max_verification_attempts = excluded.max_verification_attempts,
+          budget_warning_emitted = excluded.budget_warning_emitted,
+          github_repo = excluded.github_repo,
+          github_branch = excluded.github_branch,
+          github_pr_url = excluded.github_pr_url,
+          project_type = excluded.project_type,
+          architecture_decisions = excluded.architecture_decisions,
+          requirements_checklist = excluded.requirements_checklist,
+          revisions = excluded.revisions,
+          live_preview_html = excluded.live_preview_html,
+          preview_mode = excluded.preview_mode,
+          preview_diagnostic = excluded.preview_diagnostic,
+          preview_runtime_errors = excluded.preview_runtime_errors,
+          preview_entry_point = excluded.preview_entry_point
       `).run(
         build.id, build.userId, build.idea, build.status, build.createdAt, (build.updatedAt || build.createdAt || this.getTime()),
         build.completedAt || null, JSON.stringify(build.selectedModels || []),
@@ -1674,9 +2356,17 @@ export class PersistentDatabase {
         return { success: false, error: 'Cannot cancel task: Task is already completed' };
       }
 
-      const isSystem = modelId === 'system';
-      if (!isSystem && row.claimed_by && row.claimed_by !== modelId) {
-        return { success: false, error: `Cannot cancel task: Task is currently owned by ${row.claimed_by}, not ${modelId}` };
+      const isSupervisor = modelId === 'system' || modelId === 'supervisor' || modelId === 'project_manager';
+      if (!isSupervisor) {
+        if (!row.claimed_by || row.status === 'pending' || row.status === 'open') {
+          return { success: false, error: 'Cannot cancel unclaimed task: Only an authorized system supervisor can cancel unclaimed tasks' };
+        }
+        if (row.claimed_by !== modelId) {
+          return { success: false, error: `Cannot cancel task: Task is currently owned by ${row.claimed_by}, not ${modelId}` };
+        }
+        if (row.lease_expires_at && row.lease_expires_at < now) {
+          return { success: false, error: `Stale lease rejected: Worker ${modelId} lease expired at ${new Date(row.lease_expires_at).toISOString()}` };
+        }
       }
 
       const res = this.dbManager.db.prepare(`
@@ -1689,8 +2379,15 @@ export class PersistentDatabase {
         WHERE id = ?
           AND build_id = ?
           AND status NOT IN ('completed', 'done', 'cancelled')
-          AND (? = 'system' OR claimed_by = ? OR claimed_by IS NULL)
-      `).run(reason, reason, taskId, buildId, modelId, modelId);
+          AND (
+            (? = 1)
+            OR (
+              claimed_by IS NOT NULL 
+              AND claimed_by = ? 
+              AND (lease_expires_at IS NULL OR lease_expires_at >= ?)
+            )
+          )
+      `).run(reason, reason, taskId, buildId, isSupervisor ? 1 : 0, modelId, now);
 
       if (res.changes === 0) {
         return { success: false, error: `Cannot cancel task ${taskId}: task condition not satisfied` };
@@ -1757,10 +2454,18 @@ export class PersistentDatabase {
     try {
       this.dbManager.transaction(() => {
         this.dbManager.db.prepare(`
-          INSERT OR REPLACE INTO project_files (
+          INSERT INTO project_files (
             id, build_id, path, content, version, owner_model,
             lease_owner, lease_expires_at, created_at, updated_at, content_hash
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            content = excluded.content,
+            version = excluded.version,
+            owner_model = excluded.owner_model,
+            lease_owner = excluded.lease_owner,
+            lease_expires_at = excluded.lease_expires_at,
+            updated_at = excluded.updated_at,
+            content_hash = excluded.content_hash
         `).run(
           fileId, buildId, file.path, file.content, file.version, file.ownerModel || 'system',
           file.leaseOwner || null, file.leaseExpiresAt || null, file.createdAt || now, file.updatedAt || now, contentHash
@@ -1816,6 +2521,9 @@ export class PersistentDatabase {
     if (!buildId || !modelId || !filePaths || filePaths.length === 0) {
       return { success: false, acquiredPaths: [], error: 'buildId, modelId, and filePaths are required' };
     }
+    if (typeof durationMs !== 'number' || isNaN(durationMs) || !Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 24 * 60 * 60 * 1000) {
+      return { success: false, acquiredPaths: [], error: 'Invalid lease duration: must be a positive finite number <= 24 hours' };
+    }
     const now = this.getTime();
     const sortedPaths = [...new Set(filePaths)].sort();
     const expiry = now + durationMs;
@@ -1847,10 +2555,9 @@ export class PersistentDatabase {
         ).get(buildId, p) as any;
 
         if (row && row.lease_owner && row.lease_owner !== modelId) {
-          if (row.lease_expires_at && row.lease_expires_at > now) {
+          if (!row.lease_expires_at || row.lease_expires_at > now) {
             // Cannot acquire: file is actively held by another agent.
-            // Returning early rolls back the transaction, guaranteeing zero partial acquisitions.
-            return { success: false, lockedBy: row.lease_owner, acquiredPaths: [] };
+            return { success: false, lockedBy: row.lease_owner, acquiredPaths: [], error: `File ${p} is locked by ${row.lease_owner}` };
           }
         }
       }
@@ -1859,7 +2566,7 @@ export class PersistentDatabase {
       const acquired: string[] = [];
       for (const p of sortedPaths) {
         const fileId = `${buildId}:${p}`;
-        this.dbManager.db.prepare(`
+        const res = this.dbManager.db.prepare(`
           INSERT INTO project_files (
             id, build_id, path, content, version, owner_model,
             lease_owner, lease_expires_at, created_at, updated_at
@@ -1868,7 +2575,14 @@ export class PersistentDatabase {
             lease_owner = excluded.lease_owner,
             lease_expires_at = excluded.lease_expires_at,
             updated_at = excluded.updated_at
-        `).run(fileId, buildId, p, modelId, modelId, expiry, now, now);
+          WHERE project_files.lease_owner IS NULL
+             OR project_files.lease_owner = excluded.lease_owner
+             OR project_files.lease_expires_at <= ?
+        `).run(fileId, buildId, p, modelId, modelId, expiry, now, now, now);
+
+        if (res.changes === 0) {
+          return { success: false, lockedBy: 'another_agent', acquiredPaths: [], error: `Failed to acquire lease on ${p}: active lease held by another model` };
+        }
 
         acquired.push(p);
       }
@@ -1909,6 +2623,9 @@ export class PersistentDatabase {
     if (!buildId || !modelId || !filePaths || filePaths.length === 0) {
       return { success: false, error: 'buildId, modelId, and filePaths are required', renewedPaths: [] };
     }
+    if (typeof durationMs !== 'number' || isNaN(durationMs) || !Number.isFinite(durationMs) || durationMs <= 0 || durationMs > 24 * 60 * 60 * 1000) {
+      return { success: false, error: 'Invalid lease duration: must be a positive finite number <= 24 hours', renewedPaths: [] };
+    }
     const now = this.getTime();
     const sortedPaths = [...new Set(filePaths)].sort();
     const expiry = now + durationMs;
@@ -1943,6 +2660,11 @@ export class PersistentDatabase {
         if (res.changes > 0) {
           renewed.push(p);
         }
+      }
+
+      // Ensure all requested leases were renewed or abort transaction completely
+      if (renewed.length !== sortedPaths.length) {
+        return { success: false, error: `Partial renewal failure: renewed ${renewed.length}/${sortedPaths.length} files`, renewedPaths: [] };
       }
 
       // 3. Update in-memory cache

@@ -31,7 +31,7 @@ export class TaskManager {
         const updatedHistory = [...(task.verificationHistory || []), timeoutHistoryEntry];
 
         if (retries >= maxRetries) {
-          this.failTask(buildId, task.id, task.claimedBy || 'system', `Task lease expired (90s timeout) and retries exhausted (${retries}/${maxRetries})`);
+          this.failTask(buildId, task.id, 'system', `Task lease expired (90s timeout) and retries exhausted (${retries}/${maxRetries})`);
         } else {
           db.updateTask(buildId, task.id, {
             status: 'pending',
@@ -496,6 +496,42 @@ export class TaskManager {
   }
 
   /**
+   * Cancels a task with ownership and lease validation, preventing duplicate cancellation events.
+   */
+  static cancelTask(
+    buildId: string, 
+    taskId: string, 
+    modelId: string, 
+    reason: string
+  ): { success: boolean; task?: Task; error?: string } {
+    const task = db.getTask(buildId, taskId);
+    if (!task) return { success: false, error: 'Task not found' };
+
+    const res = db.cancelTaskAtomic(buildId, taskId, modelId, reason);
+    if (!res.success) return res;
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'task_cancelled',
+      taskId,
+      modelId,
+      details: `Task cancelled: "${task.title}". Reason: ${reason}`
+    });
+
+    if (modelId !== 'system' && modelId !== 'supervisor') {
+      db.updateModelRun(buildId, modelId, {
+        status: 'idle',
+        currentTaskId: null,
+        lastActionSummary: `Cancelled task: ${task.title}`
+      });
+    }
+
+    return res;
+  }
+
+  /**
    * Resets a failed task for clean retry and reassignment
    */
   static retryTask(buildId: string, taskId: string): { success: boolean; error?: string } {
@@ -533,7 +569,7 @@ export class TaskManager {
     const maxRetries = task.maxRetries || 3;
 
     if (currentRetries >= maxRetries) {
-      this.failTask(buildId, taskId, modelId, `Exhausted retries (${currentRetries}/${maxRetries}): ${error || 'Unknown error'}`);
+      this.failTask(buildId, taskId, 'system', `Exhausted retries (${currentRetries}/${maxRetries}): ${error || 'Unknown error'}`);
       return;
     }
 

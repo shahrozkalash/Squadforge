@@ -358,6 +358,7 @@ describe('SquadForge V3 Full-Stack Execution, Database Consistency & Reliability
         filePaths: ['src/index.ts'],
         priority: 1
       });
+      TaskManager.claimTask(testBuildId, 'agent');
       TaskManager.completeTask(testBuildId, task.id, 'agent');
 
       const report = HonestVerificationService.evaluateProjectReadiness(testBuildId);

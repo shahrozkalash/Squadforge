@@ -108,14 +108,7 @@ describe('SquadForge Model Routing & Gateway Reliability', () => {
     assert.equal(valid.actions.length, 3);
   });
 
-  after(() => {
-    const handles = (process as any)._getActiveHandles();
-    for (const h of handles) {
-      if (h && typeof h.destroy === 'function' && h?.constructor?.name?.includes('Socket')) {
-        try { h.destroy(); } catch {}
-      }
-    }
-  });
+
 });
 
 describe('Verifier Response Validation & False Completion Prevention', () => {
@@ -223,6 +216,7 @@ describe('Task State Machine, Dependencies & Retry Exhaustion', () => {
       priority: 2
     });
 
+    TaskManager.claimTask(buildId, 'gemini');
     TaskManager.completeTask(buildId, task.id, 'gemini');
     const updated = db.getTask(buildId, task.id);
     assert.ok(updated?.status === 'done' || updated?.status === 'completed');
@@ -257,6 +251,7 @@ describe('Task State Machine, Dependencies & Retry Exhaustion', () => {
     assert.equal(TaskManager.areDependenciesMet(buildId, childTask), false);
 
     // Complete parent
+    TaskManager.claimTask(buildId, 'nemotron');
     TaskManager.completeTask(buildId, parentTask.id, 'nemotron');
 
     // Now child dependencies are met!

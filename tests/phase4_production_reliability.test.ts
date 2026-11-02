@@ -43,13 +43,13 @@ describe('SquadForge Phase 4: Production Reliability, Ownership Enforcement & Pa
     });
 
     // Worker 1 claims task
-    const claim1 = TaskManager.claimNextTask(buildId, 'worker_alpha', ['gemini']);
+    const claim1 = TaskManager.claimNextTask(buildId, 'worker_alpha', ['backend']);
     assert.ok(claim1, 'Worker alpha should successfully claim the task');
     assert.equal(claim1?.id, task.id);
     assert.equal(claim1?.claimedBy, 'worker_alpha');
 
     // Worker 2 attempts to claim the same task
-    const claim2 = TaskManager.claimNextTask(buildId, 'worker_beta', ['gemini']);
+    const claim2 = TaskManager.claimNextTask(buildId, 'worker_beta', ['backend']);
     assert.equal(claim2, null, 'Worker beta must not claim an already claimed active task');
 
     // Authoritative DB verification
@@ -66,7 +66,7 @@ describe('SquadForge Phase 4: Production Reliability, Ownership Enforcement & Pa
     });
 
     // Worker A claims task
-    TaskManager.claimNextTask(buildId, 'worker_a', ['gemini']);
+    TaskManager.claimNextTask(buildId, 'worker_a', ['backend']);
 
     // Simulate task being reassigned to worker_b in database
     db.dbManager.db.prepare(
@@ -95,7 +95,7 @@ describe('SquadForge Phase 4: Production Reliability, Ownership Enforcement & Pa
       priority: 1
     });
 
-    TaskManager.claimNextTask(buildId, 'worker_slow', ['gemini']);
+    TaskManager.claimNextTask(buildId, 'worker_slow', ['backend']);
 
     // Backdate the lease expiration timestamp into the past
     const pastTime = Date.now() - 5000;
@@ -137,7 +137,7 @@ describe('SquadForge Phase 4: Production Reliability, Ownership Enforcement & Pa
       priority: 1
     });
 
-    TaskManager.claimNextTask(buildId, 'worker_legit', ['gemini']);
+    TaskManager.claimNextTask(buildId, 'worker_legit', ['backend']);
 
     // Rogue worker attempts to fail legit worker's task
     const rogueFail = TaskManager.failTask(buildId, task.id, 'worker_rogue', 'Rogue failure attempt');
@@ -165,7 +165,7 @@ describe('SquadForge Phase 4: Production Reliability, Ownership Enforcement & Pa
     });
 
     // Worker 1 claims and fails
-    TaskManager.claimNextTask(buildId, 'worker_failing', ['gemini']);
+    TaskManager.claimNextTask(buildId, 'worker_failing', ['backend']);
     TaskManager.failTask(buildId, task.id, 'worker_failing', 'Temporary API timeout');
 
     // Retry the task
@@ -179,7 +179,7 @@ describe('SquadForge Phase 4: Production Reliability, Ownership Enforcement & Pa
     assert.equal(dbTask?.lease_expires_at, null, 'Lease expiration must be cleared on retry');
 
     // Fresh worker claims the retried task
-    const freshClaim = TaskManager.claimNextTask(buildId, 'worker_recovery', ['gemini']);
+    const freshClaim = TaskManager.claimNextTask(buildId, 'worker_recovery', ['backend']);
     assert.ok(freshClaim, 'Fresh worker must be able to claim retried task');
     assert.equal(freshClaim?.id, task.id);
     assert.equal(freshClaim?.claimedBy, 'worker_recovery');
@@ -612,7 +612,7 @@ describe('SquadForge Phase 4: Production Reliability, Ownership Enforcement & Pa
       priority: 1
     });
     // Claim and then complete the task with valid ownership
-    const claimed = TaskManager.claimTask(verdictBuildId, 'agent_dev', ['typescript'], 'backend_developer');
+    const claimed = TaskManager.claimTask(verdictBuildId, 'agent_dev', ['backend'], 'backend_developer');
     assert.ok(claimed, 'Task must be claimed');
     const compRes = TaskManager.completeTask(verdictBuildId, task.id, 'agent_dev');
     assert.equal(compRes.success, true);

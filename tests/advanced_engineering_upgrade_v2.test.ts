@@ -241,6 +241,8 @@ describe('SquadForge Advanced Engineering Upgrade V2 Test Suite', () => {
         history: []
       });
 
+      TaskManager.claimTask(testBuildId, 'gemini-2.5-pro');
+
       // Complete task without providing taskResult (or without tests executed)
       TaskManager.completeTask(testBuildId, task.id, 'gemini-2.5-pro');
 
@@ -260,6 +262,8 @@ describe('SquadForge Advanced Engineering Upgrade V2 Test Suite', () => {
         priority: 2,
         assignedRole: 'backend_developer'
       });
+
+      TaskManager.claimTask(testBuildId, 'gemini-2.5-pro');
 
       // Task complete attempted, but file was never created!
       TaskManager.completeTask(testBuildId, task.id, 'gemini-2.5-pro');
@@ -286,6 +290,8 @@ describe('SquadForge Advanced Engineering Upgrade V2 Test Suite', () => {
         version: 1,
         history: []
       });
+
+      TaskManager.claimTask(testBuildId, 'gemini-2.5-pro');
 
       const taskResult: AgentTaskResult = {
         taskId: task.id,

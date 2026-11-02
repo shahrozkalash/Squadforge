@@ -245,6 +245,8 @@ describe('SquadForge Fullstack Developer Agent & Concurrency Upgrade Test Suite'
         history: []
       });
 
+      TaskManager.claimTask(testBuildId, 'gemini-fullstack');
+
       const taskResult: AgentTaskResult = {
         taskId: task.id,
         agentModelId: 'gemini-fullstack',
