@@ -2,6 +2,7 @@ import { db } from '../store.js';
 import { Task, TaskPriority, TaskStatus, ModelStrength, AgentRole } from '../types.js';
 import { modelRegistry } from '../modelRegistry.js';
 import { ProjectMemoryService } from './projectMemory.js';
+import { CollaborationManager } from './collaborationManager.js';
 
 export class TaskManager {
   private static LEASE_DURATION_MS = 90 * 1000; // 90 seconds lease duration
@@ -700,7 +701,11 @@ export class TaskManager {
     }
 
     // Check workload of target agent
-    const targetProfile = db.getAgentProfile(buildId, targetRole);
+    let targetProfile = db.getAgentProfile(buildId, targetRole);
+    if (!targetProfile) {
+      CollaborationManager.initializeBuildAgents(buildId, []);
+      targetProfile = db.getAgentProfile(buildId, targetRole);
+    }
     if (targetProfile && targetProfile.workloadScore >= 95) {
       return {
         success: false,

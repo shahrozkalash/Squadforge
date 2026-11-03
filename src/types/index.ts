@@ -14,8 +14,11 @@ export type AgentRole =
   | 'frontend_developer'
   | 'backend_developer'
   | 'database_specialist'
+  | 'database_engineer'
   | 'integration_specialist'
+  | 'integration_engineer'
   | 'qa_testing_specialist'
+  | 'qa_engineer'
   | 'debugging_specialist'
   | 'security_specialist'
   | 'devops_release_specialist'
@@ -1163,10 +1166,12 @@ export interface CodeReview {
   proposedChanges: Array<{ filePath: string; action: string; diffSnippet?: string }>;
   requirementsAddressed: string[];
   implementationExplanation: string;
+  explanation?: string;
   testEvidence: string;
-  verdict: CodeReviewVerdict;
+  verdict: CodeReviewVerdict | 'pending';
   status: 'pending' | 'under_review' | 'completed' | 'revising';
   reviewChecks: CodeReviewChecks;
+  checks?: Record<string, boolean>;
   comments: CodeReviewComment[];
   createdAt: number;
   updatedAt: number;
@@ -1200,9 +1205,11 @@ export interface PatchProposal {
     versionCurrent: boolean;
     errors: string[];
   };
+  validationStatus?: string;
   reviewStatus: 'pending' | 'reviewed' | 'approved' | 'changes_requested' | 'rejected';
-  applicationStatus: 'proposed' | 'validating' | 'approved' | 'applied' | 'rejected' | 'conflict';
+  applicationStatus: 'proposed' | 'validating' | 'approved' | 'applied' | 'rejected' | 'conflict' | 'pending';
   appliedFileVersion?: number;
+  hunks?: Array<{ oldStart: number; oldLines: number; newStart: number; newLines: number; content: string }>;
   createdAt: number;
   updatedAt: number;
 }
@@ -1243,16 +1250,25 @@ export interface FileConflict {
 
 export type AIChallengeSubject = 
   | 'Architecture'
+  | 'architecture'
   | 'Database design'
   | 'database_design'
   | 'API contracts'
+  | 'api_contracts'
   | 'Security'
+  | 'security'
   | 'Performance'
+  | 'performance'
   | 'Algorithms'
+  | 'algorithms'
   | 'Dependencies'
+  | 'dependencies'
   | 'Implementation strategy'
+  | 'implementation_strategy'
   | 'Testing strategy'
-  | 'Maintainability';
+  | 'testing_strategy'
+  | 'Maintainability'
+  | 'maintainability';
 
 export type AIChallengeOutcome = 
   | 'pending'

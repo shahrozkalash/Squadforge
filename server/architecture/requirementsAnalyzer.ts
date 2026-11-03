@@ -85,7 +85,10 @@ export class SoftwareRequirementsAnalyzer {
     if (/\b(photo editor|image editor|video editor|audio editor|daw|multimedia|transcode|filter)\b/i.test(text)) {
       return 'multimedia_application';
     }
-    if (/\b(drawing|canvas|digital art|generative art|creative|illustration|shader)\b/i.test(text)) {
+    if (/\b(portfolio|resume|cv|personal website)\b/i.test(text)) {
+      return 'portfolio';
+    }
+    if (/\b(drawing|canvas|digital art|generative art|creative suite|creative coding|illustration|shader)\b/i.test(text)) {
       return 'creative_application';
     }
     if (/\b(simulation|finite element|physics engine|matlab|math|scientific|engineering tool)\b/i.test(text)) {

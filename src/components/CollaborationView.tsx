@@ -632,14 +632,14 @@ export const CollaborationView: React.FC = () => {
 
                         <div className="text-xs text-neutral-300 bg-neutral-950/60 p-3 rounded-lg border border-neutral-800/80">
                           <div className="font-semibold text-neutral-200 mb-1">Explanation:</div>
-                          {review.explanation}
+                          {review.explanation || review.implementationExplanation}
                         </div>
 
                         {/* 12 Review Checks Grid */}
                         <div>
                           <h4 className="text-[11px] font-mono text-neutral-400 uppercase tracking-wider mb-2">Automated Quality Checks</h4>
                           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-                            {Object.entries(review.checks).map(([checkName, passed]) => (
+                            {Object.entries(review.checks || review.reviewChecks || {}).map(([checkName, passed]) => (
                               <div 
                                 key={checkName} 
                                 className={`flex items-center justify-between px-2.5 py-1.5 rounded border text-[11px] font-mono ${
@@ -706,11 +706,11 @@ export const CollaborationView: React.FC = () => {
                             <span className="text-xs font-mono font-bold text-amber-400">{patch.targetFile}</span>
                             <span className="text-[11px] font-mono text-neutral-500">base v{patch.baseFileVersion}</span>
                             <span className={`px-2 py-0.5 text-[10px] font-mono rounded border uppercase ${
-                              patch.validationStatus === 'valid' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' :
-                              patch.validationStatus === 'conflict' ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' :
+                              (patch.validationStatus || (patch.validationResults?.syntaxValid ? 'valid' : 'conflict')) === 'valid' ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' :
+                              (patch.validationStatus || (patch.validationResults?.syntaxValid ? 'valid' : 'conflict')) === 'conflict' ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' :
                               'bg-neutral-800 text-neutral-400 border-neutral-700'
                             }`}>
-                              {patch.validationStatus}
+                              {patch.validationStatus || (patch.validationResults?.syntaxValid ? 'valid' : 'conflict')}
                             </span>
                           </div>
                           <div className="flex items-center gap-2">
@@ -720,7 +720,7 @@ export const CollaborationView: React.FC = () => {
                             }`}>
                               {patch.applicationStatus}
                             </span>
-                            {patch.applicationStatus === 'pending' && (
+                            {(patch.applicationStatus === 'pending' || patch.applicationStatus === 'approved' || patch.applicationStatus === 'proposed') && (
                               <button
                                 onClick={async () => {
                                   await fetch(`/api/builds/${activeBuild.id}/collaboration/patches/${patch.id}/apply`, { method: 'POST' });
@@ -740,7 +740,7 @@ export const CollaborationView: React.FC = () => {
 
                         {/* Hunks */}
                         <div className="space-y-2">
-                          {patch.hunks.map((hunk, idx) => (
+                          {(patch.hunks || (patch.proposedChanges ? [{ oldStart: 1, oldLines: 10, newStart: 1, newLines: 10, content: patch.proposedChanges.content || `${patch.proposedChanges.find || ''} => ${patch.proposedChanges.replace || ''}` }] : [])).map((hunk, idx) => (
                             <div key={idx} className="font-mono text-[11px] rounded bg-neutral-950 p-2.5 border border-neutral-800/80">
                               <div className="text-neutral-500 text-[10px] mb-1">
                                 @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@

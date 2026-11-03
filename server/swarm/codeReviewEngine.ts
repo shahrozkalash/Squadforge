@@ -52,8 +52,13 @@ export class CodeReviewEngine {
     }
 
     const reviewId = `rev_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
-    const defaultChecks: CodeReviewChecks = {
-      logicCorrectness: true,
+    
+    // Evaluate initial checks based on provided evidence rather than blindly defaulting to true
+    const hasEvidence = Boolean(params.testEvidence && params.testEvidence.trim().length > 10);
+    const hasChanges = Array.isArray(params.proposedChanges) && params.proposedChanges.length > 0;
+
+    const initialChecks: CodeReviewChecks = {
+      logicCorrectness: hasEvidence,
       errorHandling: true,
       security: true,
       inputValidation: true,
@@ -63,8 +68,8 @@ export class CodeReviewEngine {
       maintainability: true,
       architectureConsistency: true,
       dependencyRisks: true,
-      testCoverage: true,
-      requirementCompliance: true
+      testCoverage: hasEvidence,
+      requirementCompliance: hasChanges
     };
 
     const review: CodeReview = {
@@ -81,10 +86,12 @@ export class CodeReviewEngine {
       proposedChanges: params.proposedChanges,
       requirementsAddressed: params.requirementsAddressed,
       implementationExplanation: params.implementationExplanation,
+      explanation: params.implementationExplanation,
       testEvidence: params.testEvidence,
-      verdict: 'approved', // initial default until completed
+      verdict: 'pending', // STRICT: Pending reviews must NEVER be treated as approved!
       status: 'pending',
-      reviewChecks: defaultChecks,
+      reviewChecks: initialChecks,
+      checks: initialChecks as any,
       comments: [],
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -113,6 +120,7 @@ export class CodeReviewEngine {
 
   /**
    * Adds a line-level comment on exact file locations.
+   * Validates multi-tenant isolation, file existence, and valid line ranges.
    */
   static addComment(
     buildId: string,
@@ -136,8 +144,12 @@ export class CodeReviewEngine {
     }
 
     const review = db.getCodeReview(params.reviewId);
-    if (!review) {
-      return { success: false, error: `Review ${params.reviewId} not found` };
+    if (!review || review.buildId !== buildId) {
+      return { success: false, error: `Review ${params.reviewId} not found in this build` };
+    }
+
+    if (params.startLine < 1 || params.endLine < params.startLine) {
+      return { success: false, error: `Invalid line range: lines must be >= 1 and endLine >= startLine` };
     }
 
     const commentId = `cm_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
@@ -164,6 +176,8 @@ export class CodeReviewEngine {
 
   /**
    * Submits a formal review verdict with checks evaluation.
+   * Enforces that reviewer is authorized, critical findings block approval,
+   * and changes requested trigger revision workflow.
    */
   static submitVerdict(
     buildId: string,
@@ -182,8 +196,23 @@ export class CodeReviewEngine {
     }
 
     const review = db.getCodeReview(params.reviewId);
-    if (!review) {
-      return { success: false, error: `Review ${params.reviewId} not found` };
+    if (!review || review.buildId !== buildId) {
+      return { success: false, error: `Review ${params.reviewId} not found in this build` };
+    }
+
+    // STRICT ANTI-BYPASS: Author cannot review or approve their own submission
+    if (params.reviewerAgent === review.authorAgent || params.reviewerAgent === review.authorRole) {
+      return {
+        success: false,
+        error: 'Forbidden: Author cannot submit verdict on their own review submission'
+      };
+    }
+
+    if (review.status === 'completed') {
+      return {
+        success: false,
+        error: `Review ${params.reviewId} is already completed and cannot accept new verdicts`
+      };
     }
 
     // Merge checks
@@ -195,14 +224,17 @@ export class CodeReviewEngine {
     // If critical comments exist or security/logic failed, cannot be approved without changes
     const comments = db.getReviewComments(review.id);
     const hasCritical = comments.some(c => c.severity === 'critical' && c.status === 'open');
+    const failedCoreChecks = !updatedChecks.security || !updatedChecks.logicCorrectness;
+
     let finalVerdict = params.verdict;
 
-    if (hasCritical && (finalVerdict === 'approved' || finalVerdict === 'approved_with_suggestions')) {
+    if ((hasCritical || failedCoreChecks) && (finalVerdict === 'approved' || finalVerdict === 'approved_with_suggestions')) {
       finalVerdict = 'changes_requested';
     }
 
     review.verdict = finalVerdict;
     review.reviewChecks = updatedChecks;
+    review.checks = updatedChecks as any;
     review.status = finalVerdict === 'changes_requested' ? 'revising' : 'completed';
     review.updatedAt = Date.now();
 
@@ -211,7 +243,7 @@ export class CodeReviewEngine {
     // Update agent state
     if (finalVerdict === 'changes_requested') {
       db.updateAgentStatus(buildId, review.authorRole, 'revising', `Revising changes per review ${review.id}`, review.taskId);
-    } else if (finalVerdict === 'approved') {
+    } else if (finalVerdict === 'approved' || finalVerdict === 'approved_with_suggestions') {
       db.updateAgentStatus(buildId, review.authorRole, 'working', `Review ${review.id} approved, ready for integration`, review.taskId);
     }
 
@@ -224,8 +256,53 @@ export class CodeReviewEngine {
       modelId: params.reviewerAgent,
       taskId: review.taskId,
       filePath: review.changedFiles[0],
-      details: `Code review verdict: [${finalVerdict.toUpperCase()}] by ${review.reviewerAgent} on task ${review.taskId}`
+      details: `Code review verdict: [${finalVerdict.toUpperCase()}] by ${params.reviewerAgent} on task ${review.taskId}`
     });
+
+    return { success: true, review };
+  }
+
+  /**
+   * Submits a revised implementation addressing changes requested in a code review
+   */
+  static submitRevision(
+    buildId: string,
+    userId: string,
+    params: {
+      reviewId: string;
+      authorAgent: string;
+      revisionExplanation: string;
+      newTestEvidence?: string;
+      revisedChanges?: Array<{ filePath: string; action: string; diffSnippet?: string }>;
+    }
+  ): { success: boolean; review?: CodeReview; error?: string } {
+    const build = db.getBuild(buildId);
+    if (!build || build.userId !== userId) {
+      return { success: false, error: 'Unauthorized or build not found' };
+    }
+
+    const review = db.getCodeReview(params.reviewId);
+    if (!review || review.buildId !== buildId) {
+      return { success: false, error: `Review ${params.reviewId} not found in this build` };
+    }
+
+    // Reset status to under_review, verdict to pending for independent re-review
+    review.status = 'under_review';
+    review.verdict = 'pending';
+    review.implementationExplanation = `${review.implementationExplanation}\n\nRevision: ${params.revisionExplanation}`;
+    review.explanation = review.implementationExplanation;
+    if (params.newTestEvidence) {
+      review.testEvidence = params.newTestEvidence;
+    }
+    if (params.revisedChanges && params.revisedChanges.length > 0) {
+      review.proposedChanges = params.revisedChanges;
+    }
+    review.updatedAt = Date.now();
+
+    db.saveCodeReview(review);
+
+    db.updateAgentStatus(buildId, review.authorRole, 'awaiting_review', `Submitted revised implementation for review ${review.id}`, review.taskId);
+    db.updateAgentStatus(buildId, review.reviewerRole, 'assigned', `Assigned re-review of revised implementation ${review.id}`, review.taskId);
 
     return { success: true, review };
   }

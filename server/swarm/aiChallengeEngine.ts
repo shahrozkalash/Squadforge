@@ -105,7 +105,8 @@ export class AIChallengeEngine {
     params: {
       challengeId: string;
       authorAgent?: string;
-      authorRole: AgentRole;
+      authorRole?: AgentRole;
+      agentRole?: AgentRole;
       round?: number;
       argumentType: 'pro' | 'con' | 'alternative' | 'counter_evidence' | 'risk' | 'defense';
       claim?: string;
@@ -121,8 +122,8 @@ export class AIChallengeEngine {
     }
 
     const challenge = db.getAIChallenge(params.challengeId);
-    if (!challenge) {
-      return { success: false, error: `Challenge ${params.challengeId} not found` };
+    if (!challenge || challenge.buildId !== buildId) {
+      return { success: false, error: `Challenge ${params.challengeId} not found in this build` };
     }
 
     if (challenge.status !== 'active') {
@@ -140,9 +141,11 @@ export class AIChallengeEngine {
     const existingArgs = db.getChallengeArguments(params.challengeId);
     let nextRound = params.round || challenge.currentRound;
 
+    const authorRole = params.authorRole || params.agentRole || 'software_architect';
+
     // Increment round if switching speakers and not explicitly passed
     const lastArg = existingArgs[existingArgs.length - 1];
-    if (!params.round && lastArg && lastArg.authorRole !== params.authorRole) {
+    if (!params.round && lastArg && lastArg.authorRole !== authorRole) {
       nextRound = challenge.currentRound + 1;
     }
 
@@ -153,7 +156,7 @@ export class AIChallengeEngine {
       };
     }
 
-    const authorAgent = params.authorAgent || `${params.authorRole}_agent`;
+    const authorAgent = params.authorAgent || `${authorRole}_agent`;
     const claim = params.claim || params.argument || 'Dialectic technical argument';
     const evidence = params.evidence || 'Observed runtime and architecture telemetry';
     const argType = (params.argumentType === 'risk' || params.argumentType === 'defense') 
@@ -166,7 +169,7 @@ export class AIChallengeEngine {
       challengeId: params.challengeId,
       roundNumber: nextRound,
       authorAgent,
-      authorRole: params.authorRole,
+      authorRole,
       argumentType: argType as any,
       claim,
       evidence,
@@ -198,8 +201,9 @@ export class AIChallengeEngine {
     userId: string,
     params: {
       challengeId: string;
-      decisionMaker: string;
-      decisionMakerRole: AgentRole;
+      decisionMaker?: string;
+      decisionMakerRole?: AgentRole;
+      decidedByRole?: AgentRole;
       outcome: AIChallengeOutcome;
       finalDecision: string;
       decisionRationale: string;
@@ -211,9 +215,12 @@ export class AIChallengeEngine {
     }
 
     const challenge = db.getAIChallenge(params.challengeId);
-    if (!challenge) {
-      return { success: false, error: `Challenge ${params.challengeId} not found` };
+    if (!challenge || challenge.buildId !== buildId) {
+      return { success: false, error: `Challenge ${params.challengeId} not found in this build` };
     }
+
+    const decisionMaker = params.decisionMaker || params.decidedByRole || 'software_architect';
+    const decisionMakerRole = params.decisionMakerRole || params.decidedByRole || 'software_architect';
 
     challenge.status = 'concluded';
     challenge.outcome = params.outcome;
@@ -228,10 +235,10 @@ export class AIChallengeEngine {
       id: knowledgeId,
       projectId: buildId,
       buildId,
-      sourceAgent: params.decisionMaker,
-      sourceRole: params.decisionMakerRole,
+      sourceAgent: decisionMaker,
+      sourceRole: decisionMakerRole,
       sourceTaskId: challenge.taskId,
-      category: 'architecture_decision',
+      category: 'adr',
       title: `Challenge Decision: ${challenge.subject} (${params.outcome})`,
       content: `DECISION: ${params.finalDecision}\n\nRATIONALE: ${params.decisionRationale}\n\nORIGINAL PROPOSAL: ${challenge.originalProposal}`,
       relevantFiles: [],
@@ -249,7 +256,7 @@ export class AIChallengeEngine {
       buildId,
       timestamp: Date.now(),
       type: 'ai_challenge_concluded',
-      modelId: params.decisionMaker,
+      modelId: decisionMaker,
       taskId: challenge.taskId,
       details: `AI Challenge [${challenge.subject}] concluded: [${params.outcome.toUpperCase()}]. Decision: "${params.finalDecision.slice(0, 80)}"`
     });

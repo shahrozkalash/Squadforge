@@ -116,12 +116,36 @@ export class ApprovalGateService {
     }
 
     const request = db.getApprovalRequest(params.requestId);
-    if (!request) {
-      return { success: false, error: `Approval request ${params.requestId} not found` };
+    if (!request || request.buildId !== buildId) {
+      return { success: false, error: `Approval request ${params.requestId} not found in this build` };
     }
 
-    // STRICT ANTI-BYPASS: Agents cannot approve their own restricted operations
-    if (params.approvedBy === request.requestingAgent || params.approvedBy === request.requestingRole) {
+    // STRICT IDEMPOTENCY / REPEATED DECISION GUARD:
+    // Reject repeated or conflicting decisions on already resolved requests
+    if (request.status !== 'pending') {
+      return {
+        success: false,
+        error: `Conflict: Approval request ${params.requestId} is already resolved (${request.status}) and cannot be modified.`
+      };
+    }
+
+    // STRICT ANTI-BYPASS: Agents cannot approve restricted operations; must be authenticated human user
+    const KNOWN_AGENT_ROLES = [
+      'project_manager', 'software_architect', 'frontend_developer', 'backend_developer',
+      'database_specialist', 'database_engineer', 'integration_specialist', 'integration_engineer',
+      'qa_testing_specialist', 'qa_engineer', 'debugging_specialist', 'security_specialist',
+      'devops_release_specialist', 'fullstack_developer', 'ui_ux_designer', 'performance_engineer',
+      'documentation_engineer'
+    ];
+
+    const approver = params.approvedBy?.toLowerCase() || '';
+    if (
+      !params.approvedBy ||
+      approver.startsWith('agent_') ||
+      KNOWN_AGENT_ROLES.includes(approver) ||
+      params.approvedBy === request.requestingAgent ||
+      params.approvedBy === request.requestingRole
+    ) {
       return {
         success: false,
         error: 'Forbidden: Agents cannot approve their own restricted operations. Human approval is strictly required.'

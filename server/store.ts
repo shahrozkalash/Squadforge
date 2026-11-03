@@ -657,7 +657,7 @@ export class PersistentDatabase {
   createFileAtomic(
     buildId: string,
     modelId: string,
-    action: { path: string; content: string; commitMessage?: string; taskId?: string },
+    action: { action?: string; path: string; content: string; commitMessage?: string; taskId?: string },
     maxFileSize: number = 500 * 1024,
     maxProjectSize: number = 10 * 1024 * 1024
   ): { success: boolean; filePath: string; version?: number; currentContent?: string; error?: string } {

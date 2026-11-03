@@ -191,12 +191,16 @@ export class PatchValidationPipeline {
     }
 
     const patch = db.getPatchProposal(patchId);
-    if (!patch) {
-      return { success: false, error: `Patch proposal ${patchId} not found` };
+    if (!patch || patch.buildId !== buildId) {
+      return { success: false, error: `Patch proposal ${patchId} not found in this build` };
     }
 
     if (patch.applicationStatus === 'applied') {
       return { success: true, appliedVersion: patch.appliedFileVersion };
+    }
+
+    if (patch.applicationStatus === 'rejected' || patch.applicationStatus === 'conflict') {
+      return { success: false, error: `Cannot apply patch: patch status is ${patch.applicationStatus}` };
     }
 
     const action = patch.proposedChanges;
@@ -214,6 +218,7 @@ export class PatchValidationPipeline {
       mergeRes = await MergeManager.applyPatch(buildId, patch.authorAgent, {
         action: 'patch_file',
         path: patch.targetFile,
+        edits: [{ find: action.find || '', replace: action.replace || '' }],
         find: action.find || '',
         replace: action.replace || '',
         commitMessage: patch.changeExplanation,
@@ -274,8 +279,8 @@ export class PatchValidationPipeline {
     }
 
     const conflict = db.getFileConflict(params.conflictId);
-    if (!conflict) {
-      return { success: false, error: `Conflict ${params.conflictId} not found` };
+    if (!conflict || conflict.buildId !== buildId) {
+      return { success: false, error: `Conflict ${params.conflictId} not found in this build` };
     }
 
     // Apply resolved content directly through MergeManager atomic batch/file operation
@@ -288,6 +293,7 @@ export class PatchValidationPipeline {
       res = await MergeManager.applyPatch(buildId, params.resolvedBy, {
         action: 'patch_file',
         path: targetFile,
+        edits: [{ find: existing.content, replace: params.resolvedContent }],
         find: existing.content,
         replace: params.resolvedContent,
         commitMessage: `Resolved conflict: ${params.resolutionExplanation}`

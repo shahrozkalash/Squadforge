@@ -1435,8 +1435,8 @@ export class ProjectMemoryService {
     }
 
     const target = db.getKnowledgeItem(params.targetId);
-    if (!target) {
-      return { success: false, error: `Knowledge item ${params.targetId} not found` };
+    if (!target || target.buildId !== buildId) {
+      return { success: false, error: `Knowledge item ${params.targetId} not found in this build` };
     }
 
     // Mark previous as superseded (preserve history)

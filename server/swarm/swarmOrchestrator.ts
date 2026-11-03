@@ -40,7 +40,8 @@ import {
   ProjectRevision,
   ProjectType,
   CanonicalProjectType,
-  normalizeProjectType
+  normalizeProjectType,
+  PatchProposalHunk
 } from '../types.js';
 
 interface ActiveSwarmControl {
@@ -418,8 +419,18 @@ Output ONLY JSON matching this structure:
    * Strongly typed, extensible project type detection.
    * Backward-compatible with legacy project types and safe fallback for custom types.
    */
-  static detectProjectType(idea: string, currentType?: ProjectType): CanonicalProjectType {
-    return SoftwareRequirementsAnalyzer.detectCategory(idea.toLowerCase(), currentType);
+  static detectProjectType(idea: string, currentType?: ProjectType): ProjectType {
+    const lower = idea.toLowerCase();
+    if (lower.includes('saas') && (lower.includes('dashboard') || lower.includes('metrics'))) {
+      return 'saas_dashboard';
+    }
+    if (lower.includes('internal') && (lower.includes('tool') || lower.includes('admin') || lower.includes('console'))) {
+      return 'internal_tool';
+    }
+    if (lower.includes('blog') && (lower.includes('content') || lower.includes('publication') || lower.includes('articles'))) {
+      return 'blog_content';
+    }
+    return SoftwareRequirementsAnalyzer.detectCategory(lower, currentType);
   }
 
   /**
@@ -1063,23 +1074,43 @@ Never write placeholder comments. Implement functional code.`;
         // Phase 8: Record applied patch proposals and broadcast progress message
         try {
           for (const fa of fileActions) {
-            const fileNow = db.getFile(buildId, fa.path);
+            const targetPath = ('path' in fa && typeof fa.path === 'string') 
+              ? fa.path 
+              : ('newPath' in fa ? (fa as any).newPath : '');
+            if (!targetPath) continue;
+
+            const fileNow = db.getFile(buildId, targetPath);
             if (fileNow) {
+              let proposedChanges: PatchProposalHunk = { actionType: 'patch' };
+              if (fa.action === 'create_file') {
+                proposedChanges = { actionType: 'create', content: (fa as any).content || '' };
+              } else if (fa.action === 'patch_file') {
+                const firstEdit = (fa as any).edits?.[0];
+                proposedChanges = {
+                  actionType: 'patch',
+                  find: firstEdit?.find || (fa as any).find || '',
+                  replace: firstEdit?.replace || (fa as any).replace || ''
+                };
+              } else if (fa.action === 'delete_file') {
+                proposedChanges = { actionType: 'delete' };
+              } else if (fa.action === 'rename_file') {
+                proposedChanges = {
+                  actionType: 'rename',
+                  oldPath: (fa as any).oldPath,
+                  newPath: (fa as any).newPath
+                };
+              }
+
               db.savePatchProposal({
                 id: `patch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
                 buildId,
                 authorAgent: model.id,
                 authorRole: model.agentRole || 'fullstack_developer',
                 relatedTaskId: task.id,
-                targetFile: fa.path,
+                targetFile: targetPath,
                 baseFileVersion: Math.max(1, (fileNow.version || 1) - 1),
                 baseContentHash: fileNow.contentHash || '',
-                proposedChanges: {
-                  actionType: fa.action === 'create_file' ? 'create' : 'patch',
-                  content: fa.content,
-                  find: fa.find,
-                  replace: fa.replace
-                },
+                proposedChanges,
                 changeExplanation: fa.commitMessage || `Implementation for ${task.title}`,
                 expectedBehavior: task.description,
                 validationResults: { syntaxValid: true, pathAllowed: true, hashMatched: true, versionCurrent: true, errors: [] },

@@ -81,10 +81,13 @@ export class CollaborativeDebuggingEngine {
     userId: string,
     params: {
       defectId: string;
-      author: string;
+      author?: string;
       authorRole?: AgentRole;
       rootCause?: string;
-      proposal: string;
+      rootCauseHypothesis?: string;
+      proposal?: string;
+      proposedDiff?: string;
+      estimatedImpact?: string;
       patchId?: string;
       score?: number;
     }
@@ -95,20 +98,24 @@ export class CollaborativeDebuggingEngine {
     }
 
     const defect = db.getDefect(params.defectId);
-    if (!defect) {
-      return { success: false, error: `Defect ${params.defectId} not found` };
+    if (!defect || defect.buildId !== buildId) {
+      return { success: false, error: `Defect ${params.defectId} not found in this build` };
     }
 
-    if (params.rootCause) {
-      defect.rootCause = params.rootCause;
+    const rootCause = params.rootCause || params.rootCauseHypothesis;
+    if (rootCause) {
+      defect.rootCause = rootCause;
       defect.status = 'identified';
     }
 
+    const proposal = params.proposal || params.proposedDiff || 'Proposed defect repair';
+    const author = params.author || (params.authorRole ? `${params.authorRole}_agent` : 'debugging_agent');
+
     const solution: DefectSolution = {
       solutionId: `sol_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`,
-      author: params.author,
+      author,
       authorRole: params.authorRole,
-      proposal: params.proposal,
+      proposal,
       patchId: params.patchId,
       score: params.score || 85
     };
@@ -148,8 +155,8 @@ export class CollaborativeDebuggingEngine {
     }
 
     const defect = db.getDefect(params.defectId);
-    if (!defect) {
-      return { success: false, error: `Defect ${params.defectId} not found` };
+    if (!defect || defect.buildId !== buildId) {
+      return { success: false, error: `Defect ${params.defectId} not found in this build` };
     }
 
     // STRICT HONESTY GUARD: Cannot mark resolved without verification evidence

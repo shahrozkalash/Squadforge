@@ -194,14 +194,18 @@ export class CollaborationManager {
     let depth = 0;
     if (params.parentMessageId) {
       const parent = db.getAgentMessage(params.parentMessageId);
-      if (parent) {
-        depth = (parent.depth || 0) + 1;
-        if (depth > this.MAX_CONVERSATION_DEPTH) {
-          return {
-            success: false,
-            error: `Loop protection: Maximum thread depth of ${this.MAX_CONVERSATION_DEPTH} reached for message ${params.parentMessageId}. Topic must be escalated or resolved.`
-          };
-        }
+      if (!parent || parent.buildId !== buildId) {
+        return {
+          success: false,
+          error: `Forbidden: Parent message ${params.parentMessageId} not found in this build`
+        };
+      }
+      depth = (parent.depth || 0) + 1;
+      if (depth > this.MAX_CONVERSATION_DEPTH) {
+        return {
+          success: false,
+          error: `Loop protection: Maximum thread depth of ${this.MAX_CONVERSATION_DEPTH} reached for message ${params.parentMessageId}. Topic must be escalated or resolved.`
+        };
       }
     }
 

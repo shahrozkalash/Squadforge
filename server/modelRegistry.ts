@@ -168,6 +168,42 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
       'Maintain system manuals, setup guides, and environment requirements',
       'Capture implementation discoveries and lessons learned'
     ]
+  },
+  database_engineer: {
+    role: 'database_engineer',
+    title: 'Database Engineer Agent',
+    description: 'Designs schemas, entity relationships, migration scripts, and validated data store interfaces.',
+    assignedModelId: 'nemotron',
+    responsibilities: [
+      'Design relational schemas and document models',
+      'Generate database migrations and entity validation rules',
+      'Integrate data store layer safely without assuming external DB availability',
+      'Optimize queries, indexes, and concurrency locks'
+    ]
+  },
+  integration_engineer: {
+    role: 'integration_engineer',
+    title: 'Integration Engineer Agent',
+    description: 'Combines outputs across all agents, aligns imports, validates types, and detects conflict markers.',
+    assignedModelId: 'gemini',
+    responsibilities: [
+      'Ensure cross-module import consistency and type alignments',
+      'Validate API contracts between frontend and backend',
+      'Detect and resolve file conflicts and merge friction',
+      'Verify end-to-end integration across the codebase'
+    ]
+  },
+  qa_engineer: {
+    role: 'qa_engineer',
+    title: 'QA Engineer Agent',
+    description: 'Generates automated test suites (unit, integration, E2E) and executes checks to prevent regressions.',
+    assignedModelId: 'deepseek',
+    responsibilities: [
+      'Author unit tests for domain logic and API routes',
+      'Generate integration test fixtures and component tests',
+      'Execute sandbox test runner and verify expected outputs',
+      'Prevent false completions by enforcing rigorous assertions'
+    ]
   }
 };
 

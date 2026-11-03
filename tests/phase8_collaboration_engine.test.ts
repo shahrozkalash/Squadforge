@@ -722,4 +722,190 @@ describe('Phase 8: Collaborative AI Development System Verification Suite', () =
     assert.strictEqual(oldItem.status, 'superseded');
     assert.strictEqual(oldItem.supersedeReason, 'Lower server CPU overhead and achieve sub-second latency');
   });
+
+  // 36. Comprehensive Multi-Tenant & Cross-Build Isolation Audit
+  test('36. Cross-build isolation rejects unauthorized reading and mutation across all collaboration services', async () => {
+    // Setup resources in Build B (owned by userB)
+    db.addTask(buildIdB, {
+      id: 'tsk_b_1',
+      buildId: buildIdB,
+      title: 'Task in Build B',
+      description: 'Implement server logic for B',
+      status: 'pending',
+      priority: 2,
+      filePaths: ['server.ts'],
+      createdAt: Date.now()
+    });
+
+    const reviewB = CodeReviewEngine.submitForReview(buildIdB, userB, {
+      taskId: 'tsk_b_1',
+      authorAgent: 'agent_author_b',
+      authorRole: 'backend_developer',
+      reviewerRole: 'security_specialist',
+      changedFiles: ['server.ts'],
+      baseVersions: { 'server.ts': 1 },
+      proposedChanges: [{ filePath: 'server.ts', action: 'patch' }],
+      requirementsAddressed: ['Auth hardening'],
+      implementationExplanation: 'Hardened cookie parser options',
+      testEvidence: 'Unit tests passed for session validation'
+    });
+    assert.strictEqual(reviewB.success, true);
+    const revIdB = reviewB.review!.id;
+
+    const patchB = PatchValidationPipeline.proposePatch(buildIdB, userB, {
+      authorAgent: 'agent_author_b',
+      authorRole: 'backend_developer',
+      relatedTaskId: 'tsk_b_1',
+      targetFile: 'server.ts',
+      baseFileVersion: 1,
+      baseContentHash: 'hash_b_1',
+      proposedChanges: { actionType: 'create', content: 'const b = 1;' },
+      changeExplanation: 'Create server entry',
+      expectedBehavior: 'Server boots cleanly'
+    });
+    const patchIdB = patchB.patch!.id;
+
+    const challengeB = AIChallengeEngine.startChallenge(buildIdB, userB, {
+      subject: 'Architecture',
+      originalProposal: 'Use distributed event bus',
+      proposerAgent: 'agent_architect_b',
+      proposerRole: 'software_architect'
+    });
+    const challengeIdB = challengeB.challenge!.id;
+
+    const defectB = CollaborativeDebuggingEngine.recordDefect(buildIdB, userB, {
+      title: 'Private defect in project B',
+      description: 'Leak in B socket pool',
+      severity: 'high',
+      reproductionSteps: ['step 1'],
+      expectedBehavior: 'Clean pool',
+      actualBehavior: 'Dangling socket',
+      affectedFiles: ['socket_b.ts']
+    });
+    const defectIdB = defectB.defect!.id;
+
+    const approvalB = ApprovalGateService.requestApproval(buildIdB, userB, {
+      requestingAgent: 'agent_b',
+      requestingRole: 'database_engineer',
+      operationType: 'destructive_file_op',
+      affectedFiles: ['data_b.sql'],
+      explanation: 'Delete obsolete table in B',
+      proposedChanges: 'DROP TABLE b_temp;'
+    });
+    const approvalIdB = approvalB.request!.id;
+
+    const knowledgeB = ProjectMemoryService.recordKnowledgeItem(buildIdB, userB, {
+      sourceAgent: 'agent_b',
+      sourceRole: 'software_architect',
+      category: 'adr',
+      title: 'Confidential Algorithm in B',
+      content: 'Proprietary sorting mechanism',
+      relevantFiles: ['algo_b.ts']
+    });
+    const knowledgeIdB = knowledgeB.item!.id;
+
+    const msgB = CollaborationManager.sendMessage(buildIdB, userB, {
+      sender: 'agent_b',
+      senderRole: 'software_architect',
+      messageType: 'architecture_decision',
+      content: 'Classified message in build B'
+    });
+    const msgIdB = msgB.message!.id;
+
+    // ATTACK 1: User A attempts to add comment to Build B's review using Build A
+    const addCommentAttack = CodeReviewEngine.addComment(buildIdA, userA, {
+      reviewId: revIdB, // ID from Build B
+      filePath: 'server.ts',
+      startLine: 1,
+      endLine: 5,
+      severity: 'critical',
+      explanation: 'Cross-build injection attempt',
+      author: 'agent_attacker',
+      authorRole: 'security_specialist'
+    });
+    assert.strictEqual(addCommentAttack.success, false);
+    assert.match(addCommentAttack.error || '', /not found in this build/);
+
+    // ATTACK 2: User A attempts to submit verdict on Build B's review using Build A
+    const submitVerdictAttack = CodeReviewEngine.submitVerdict(buildIdA, userA, {
+      reviewId: revIdB,
+      reviewerAgent: 'attacker',
+      verdict: 'approved'
+    });
+    assert.strictEqual(submitVerdictAttack.success, false);
+    assert.match(submitVerdictAttack.error || '', /not found in this build/);
+
+    // ATTACK 3: User A attempts to apply Build B's patch in Build A
+    const applyPatchAttack = await PatchValidationPipeline.applyApprovedPatch(buildIdA, userA, patchIdB);
+    assert.strictEqual(applyPatchAttack.success, false);
+    assert.match(applyPatchAttack.error || '', /not found in this build/);
+
+    // ATTACK 4: User A attempts to add argument to Build B's challenge using Build A
+    const addArgAttack = AIChallengeEngine.addArgument(buildIdA, userA, {
+      challengeId: challengeIdB,
+      authorRole: 'backend_developer',
+      argumentType: 'risk',
+      argument: 'Injected counter-argument'
+    });
+    assert.strictEqual(addArgAttack.success, false);
+    assert.match(addArgAttack.error || '', /not found in this build/);
+
+    // ATTACK 5: User A attempts to conclude Build B's challenge using Build A
+    const concludeAttack = AIChallengeEngine.concludeChallenge(buildIdA, userA, {
+      challengeId: challengeIdB,
+      outcome: 'rejected',
+      finalDecision: 'Malicious conclusion',
+      decisionRationale: 'Unauthorized decision'
+    });
+    assert.strictEqual(concludeAttack.success, false);
+    assert.match(concludeAttack.error || '', /not found in this build/);
+
+    // ATTACK 6: User A attempts to propose solution on Build B's defect using Build A
+    const solAttack = CollaborativeDebuggingEngine.proposeSolution(buildIdA, userA, {
+      defectId: defectIdB,
+      proposal: 'Malicious solution'
+    });
+    assert.strictEqual(solAttack.success, false);
+    assert.match(solAttack.error || '', /not found in this build/);
+
+    // ATTACK 7: User A attempts to update status of Build B's defect using Build A
+    const statusAttack = CollaborativeDebuggingEngine.updateStatus(buildIdA, userA, {
+      defectId: defectIdB,
+      status: 'resolved',
+      testEvidence: 'Fake evidence'
+    });
+    assert.strictEqual(statusAttack.success, false);
+    assert.match(statusAttack.error || '', /not found in this build/);
+
+    // ATTACK 8: User A attempts to approve Build B's approval request using Build A
+    const approveAttack = ApprovalGateService.respondToApproval(buildIdA, userA, {
+      requestId: approvalIdB,
+      approved: true,
+      approvedBy: userA
+    });
+    assert.strictEqual(approveAttack.success, false);
+    assert.match(approveAttack.error || '', /not found in this build/);
+
+    // ATTACK 9: User A attempts to supersede Build B's knowledge item using Build A
+    const supersedeAttack = ProjectMemoryService.supersedeKnowledgeItem(buildIdA, userA, {
+      targetId: knowledgeIdB,
+      sourceAgent: 'agent_attacker',
+      sourceRole: 'software_architect',
+      newContent: 'Tampered knowledge',
+      supersedeReason: 'Unauthorized modification'
+    });
+    assert.strictEqual(supersedeAttack.success, false);
+    assert.match(supersedeAttack.error || '', /not found in this build/);
+
+    // ATTACK 10: User A attempts to reply to Build B's parent message using Build A
+    const msgAttack = CollaborationManager.sendMessage(buildIdA, userA, {
+      sender: 'attacker',
+      senderRole: 'software_architect',
+      messageType: 'task_update',
+      content: 'Tampered reply',
+      parentMessageId: msgIdB
+    });
+    assert.strictEqual(msgAttack.success, false);
+    assert.match(msgAttack.error || '', /not found in this build/);
+  });
 });
