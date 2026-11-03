@@ -29,6 +29,10 @@ import { HonestVerificationService } from './server/verificationService.js';
 import { ExecutionAdapter } from './server/swarm/executionAdapter.js';
 import { PreviewGenerator } from './server/swarm/previewGenerator.js';
 import { ProjectMemoryService } from './server/swarm/projectMemory.js';
+import { TechnologyStackRegistry } from './server/architecture/techRegistry.js';
+import { SoftwareRequirementsAnalyzer } from './server/architecture/requirementsAnalyzer.js';
+import { IntelligentStackSelector } from './server/architecture/stackSelector.js';
+import { ProjectComplexityEstimator } from './server/architecture/complexityEstimator.js';
 
 dotenv.config();
 
@@ -910,6 +914,54 @@ app.get('/api/builds/:id', requireAuth, (req, res) => {
     events,
     modelRuns,
     checkpoints
+  });
+});
+
+// Architecture Intelligence & Blueprint Endpoints
+app.get('/api/tech-registry', requireAuth, (_req, res) => {
+  res.json({ success: true, technologies: TechnologyStackRegistry.getAll() });
+});
+
+app.post('/api/architecture/analyze', requireAuth, (req, res) => {
+  const { idea, projectType } = req.body;
+  if (!idea || typeof idea !== 'string') {
+    return res.status(400).json({ error: 'idea is required' });
+  }
+  const analysis = SoftwareRequirementsAnalyzer.analyze(idea.trim(), projectType);
+  const stack = IntelligentStackSelector.selectStack(analysis);
+  const complexity = ProjectComplexityEstimator.assess(analysis, stack);
+
+  res.json({
+    success: true,
+    analysis,
+    stack,
+    complexity
+  });
+});
+
+app.get('/api/builds/:id/architecture', requireAuth, (req, res) => {
+  const build = db.getBuild(req.params.id);
+  if (!build) return res.status(404).json({ error: 'Build not found' });
+  if (build.userId !== req.user!.id) {
+    return res.status(403).json({ error: 'Forbidden: You do not own this project.' });
+  }
+
+  const memory = ProjectMemoryService.getOrInitializeMemory(build.id, req.user!.id);
+  const blueprint = memory?.architectureBlueprint || build.architectureBlueprint;
+  const requirementsAnalysis = memory?.requirementsAnalysis || build.requirementsAnalysis;
+  const complexityAssessment = memory?.complexityAssessment || build.complexityAssessment;
+  const fileStructurePlan = memory?.fileStructurePlan || build.fileStructurePlan;
+  const dependencyPlan = memory?.dependencyPlan || build.dependencyPlan;
+
+  res.json({
+    success: true,
+    blueprint,
+    requirementsAnalysis,
+    complexityAssessment,
+    fileStructurePlan,
+    dependencyPlan,
+    techStack: build.techStack,
+    projectType: build.projectType
   });
 });
 

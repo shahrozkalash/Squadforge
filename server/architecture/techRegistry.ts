@@ -29,12 +29,24 @@ export class TechnologyStackRegistry {
     return this.getAll().filter(e => e.category === category);
   }
 
+  static getByCategory(category: TechCategory): TechRegistryEntry[] {
+    return this.findByCategory(category);
+  }
+
   static findByPlatform(platform: TargetPlatform): TechRegistryEntry[] {
     return this.getAll().filter(e => e.supportedPlatforms.includes(platform) || e.supportedPlatforms.includes('cross_platform'));
   }
 
+  static getByPlatform(platform: TargetPlatform): TechRegistryEntry[] {
+    return this.findByPlatform(platform);
+  }
+
   static findByProjectType(projectType: CanonicalProjectType): TechRegistryEntry[] {
     return this.getAll().filter(e => e.projectTypes.includes(projectType));
+  }
+
+  static getByProjectType(projectType: CanonicalProjectType): TechRegistryEntry[] {
+    return this.findByProjectType(projectType);
   }
 
   private static registerDefaults(): void {
@@ -385,7 +397,7 @@ export class TechnologyStackRegistry {
         category: 'systems',
         supportedPlatforms: ['cross_platform', 'linux', 'windows', 'macos', 'cli', 'embedded'],
         programmingLanguages: ['rust'],
-        projectTypes: ['cli_tool', 'developer_tool', 'engineering_application', 'systems'],
+        projectTypes: ['cli_tool', 'developer_tool', 'engineering_application', 'custom'],
         compatibilityRequirements: ['Rustc >= 1.77', 'Cargo'],
         runtimeRequirements: ['None (compiles to static native machine code)'],
         buildTooling: ['cargo', 'rustc'],

@@ -285,6 +285,7 @@ export class AdaptiveFileStructurePlanner {
     ];
 
     const suggestedFiles: PlannedFile[] = [
+      { path: 'package.json', responsibility: 'Project dependencies, build scripts, and engine specifications', role: 'devops_release_specialist', priority: 1 },
       { path: 'src/types/index.ts', responsibility: 'Domain entity models and API request/response schemas', role: 'software_architect', priority: 1 },
       { path: 'src/App.tsx', responsibility: 'Application root layout, navigation bar, and view router', role: 'frontend_developer', priority: 1 },
       { path: 'server.ts', responsibility: 'Express server entry point, API middleware, and Vite integration', role: 'software_architect', priority: 1 },

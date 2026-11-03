@@ -42,8 +42,15 @@ export class ProjectComplexityEstimator {
       score += 20;
     } else if (applicationCategory === 'saas' || applicationCategory === 'ecommerce') {
       score += 15;
+    } else if (applicationCategory === 'api_service' || applicationCategory === 'backend_service' || applicationCategory === 'data_application' || applicationCategory === 'web_application' || applicationCategory === 'fullstack') {
+      score += 15;
     } else if (applicationCategory === 'landing_page' || applicationCategory === 'portfolio') {
       score -= 10;
+    }
+
+    // Enterprise / Distributed systems complexity boost
+    if (/\b(enterprise|erp|microservice|cluster|sharding|multi-region|distributed|ha|high availability)\b/i.test(analysis.originalPrompt)) {
+      score += 25;
     }
 
     // Determine level

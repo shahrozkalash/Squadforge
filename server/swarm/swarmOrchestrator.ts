@@ -14,6 +14,12 @@ import { PreviewGenerator } from './previewGenerator.js';
 import { IntegrationAgent } from './integrationAgent.js';
 import { ProjectMemoryService } from './projectMemory.js';
 import { HonestVerificationService } from '../verificationService.js';
+import { SoftwareRequirementsAnalyzer } from '../architecture/requirementsAnalyzer.js';
+import { IntelligentStackSelector } from '../architecture/stackSelector.js';
+import { UniversalArchitectureBlueprintGenerator } from '../architecture/blueprintGenerator.js';
+import { ProjectComplexityEstimator } from '../architecture/complexityEstimator.js';
+import { AdaptiveFileStructurePlanner } from '../architecture/fileStructurePlanner.js';
+import { ArchitectureDependencyPlanner } from '../architecture/architectureDependencyPlanner.js';
 import { 
   Build, 
   ModelConfig, 
@@ -25,7 +31,9 @@ import {
   ArchitectureDecision,
   RequirementItem,
   ProjectRevision,
-  ProjectType
+  ProjectType,
+  CanonicalProjectType,
+  normalizeProjectType
 } from '../types.js';
 
 interface ActiveSwarmControl {
@@ -194,26 +202,67 @@ export class SwarmOrchestrator {
   }
 
   /**
-   * Phase 1: Project Manager and Architect Agents establish project specs, tech stack, milestones, ADRs, and initial files
+   * Phase 1: Universal Software Architecture Engine establishes requirements analysis, 
+   * technology selection, architecture blueprint, complexity assessment, and dependency planning.
    */
   private static async runInitialPlanner(build: Build): Promise<boolean> {
-    // 0. Detect or preserve Project Type
-    build.projectType = this.detectProjectType(build.idea, build.projectType);
+    // 1. Requirements Analysis
+    const reqAnalysis = SoftwareRequirementsAnalyzer.analyze(build.idea, build.projectType);
+    build.requirementsAnalysis = reqAnalysis;
+    build.projectType = reqAnalysis.applicationCategory;
 
-    // 1. Software Architect selects optimal tech stack based on project type
-    const techStack: TechStackConfig = this.selectOptimalTechStack(build.projectType);
+    // 2. Intelligent Stack Selection (respects existing stack if established)
+    const stackSelection = IntelligentStackSelector.selectStack(reqAnalysis, build.techStack);
+    const rec = stackSelection.recommendedStack;
+    const techStack: TechStackConfig = {
+      frontend: rec.frontend || rec.uiFramework || rec.desktopFramework || 'N/A',
+      backend: rec.backend || rec.runtime || 'N/A',
+      database: rec.database || 'Embedded / In-Memory State',
+      testing: rec.testing || 'Native Automated Test Runner',
+      security: 'OWASP Defensive Validation, Rate Limiter & Safe Boundaries'
+    };
     build.techStack = techStack;
 
-    // 2. Project Memory: Record Architecture Decision Records (ADRs)
+    // 3. Universal Architecture Blueprint Generation
+    const blueprint = UniversalArchitectureBlueprintGenerator.generate(reqAnalysis, stackSelection);
+    build.architectureBlueprint = blueprint;
+
+    // 4. Complexity & Resource Estimation
+    const complexity = ProjectComplexityEstimator.assess(reqAnalysis, stackSelection);
+    build.complexityAssessment = complexity;
+
+    // 5. Adaptive File Structure Planning
+    const fileStructurePlan = AdaptiveFileStructurePlanner.planStructure(
+      reqAnalysis.applicationCategory,
+      reqAnalysis.targetPlatforms,
+      rec
+    );
+    build.fileStructurePlan = fileStructurePlan;
+
+    // 6. Architecture-Level Dependency Planning
+    const dependencyPlan = ArchitectureDependencyPlanner.planDependencies(
+      reqAnalysis.applicationCategory,
+      reqAnalysis.targetPlatforms,
+      rec,
+      build.idea
+    );
+    build.dependencyPlan = dependencyPlan;
+
+    // 7. Architecture Decision Records (ADRs)
     build.architectureDecisions = this.generateArchitectureDecisions(build.idea, build.projectType);
 
-    // 3. Project Requirements Checklist
-    build.requirementsChecklist = this.generateRequirementsChecklist(build.idea, build.projectType);
+    // 8. Project Requirements Checklist
+    build.requirementsChecklist = this.generateRequirementsChecklist(build.idea, build.projectType, reqAnalysis);
 
-    // 4. Persistent Project Memory System
+    // 9. Persistent Project Memory Synchronization with strict user isolation
     ProjectMemoryService.getOrInitializeMemory(build.id, build.userId);
+    ProjectMemoryService.recordRequirementsAnalysis(build.id, build.userId, reqAnalysis);
+    ProjectMemoryService.recordArchitectureBlueprint(build.id, build.userId, blueprint);
+    ProjectMemoryService.recordComplexityAssessment(build.id, build.userId, complexity);
+    ProjectMemoryService.recordFileStructurePlan(build.id, build.userId, fileStructurePlan);
+    ProjectMemoryService.recordDependencyPlan(build.id, build.userId, dependencyPlan);
 
-    // 5. Project Manager creates milestone breakdown
+    // 10. Project Manager creates milestone breakdown
     const m1Id = 'ms_1_foundation';
     const m2Id = 'ms_2_core';
     const m3Id = 'ms_3_qa_security';
@@ -253,6 +302,8 @@ export class SwarmOrchestrator {
     const plannerPrompt = `PROJECT MANAGER & ARCHITECT SPECIFICATION:
 Original Requirements: "${build.idea}"
 Project Type: ${build.projectType}
+Target Platforms: ${reqAnalysis.targetPlatforms.join(', ')}
+Estimated Complexity: ${complexity.level} (Score: ${complexity.score}/100)
 Selected Tech Stack:
 - Frontend: ${techStack.frontend}
 - Backend: ${techStack.backend}
@@ -262,6 +313,9 @@ Selected Tech Stack:
 
 Architecture Decisions (ADRs):
 ${build.architectureDecisions.map(a => `- ${a.title}: ${a.decision}`).join('\n')}
+
+Key Modules:
+${blueprint.moduleStructure.map(m => `- ${m.name}: ${m.description}`).join('\n')}
 
 Create the starter file tree and dependency-aware tasks.
 Available Agent Roles: software_architect, backend_developer, frontend_developer, fullstack_developer, database_specialist, qa_testing_specialist, security_specialist, devops_release_specialist, debugging_specialist.
@@ -318,18 +372,22 @@ Output ONLY JSON matching this structure:
       this.seedMilestoneTasks(build, m1Id, m2Id, m3Id, m4Id);
     }
 
-    // Ensure README.md exists with comprehensive ADR summary
+    // Ensure README.md exists with comprehensive architecture summary
     const readme = db.getFile(build.id, 'README.md');
     if (!readme) {
       const adrList = (build.architectureDecisions || [])
         .map(a => `### ${a.title}\n**Decision:** ${a.decision}\n**Rationale:** ${a.rationale}`)
         .join('\n\n');
 
+      const modulesList = blueprint.moduleStructure
+        .map(m => `- **${m.name}**: ${m.description}`)
+        .join('\n');
+
       await MergeManager.createFile(build.id, 'project_manager', {
         action: 'create_file',
         path: 'README.md',
-        content: `# ${build.idea}\n\nBuilt by **SquadForge Autonomous AI Development Team**.\n\n## Project Type\n\`${build.projectType}\`\n\n## Tech Stack\n- **Frontend:** ${techStack.frontend}\n- **Backend:** ${techStack.backend}\n- **Database:** ${techStack.database}\n- **Testing:** ${techStack.testing}\n\n## Architecture Decision Records (ADRs)\n${adrList}\n\n## Running the Project\n\`\`\`bash\nnpm install\nnpm run dev\n\`\`\`\n`,
-        commitMessage: 'Project documentation, architecture decisions & specification'
+        content: `# ${build.idea}\n\nBuilt by **SquadForge Universal Software Architecture Engine**.\n\n## Project Classification\n- **Category:** \`${build.projectType}\`\n- **Target Platforms:** ${reqAnalysis.targetPlatforms.join(', ')}\n- **Complexity Level:** ${complexity.level.toUpperCase()} (Score: ${complexity.score}/100)\n\n## Technology Stack\n- **Frontend / UI:** ${techStack.frontend}\n- **Backend / Runtime:** ${techStack.backend}\n- **Data Storage:** ${techStack.database}\n- **Testing Suite:** ${techStack.testing}\n\n## Subsystems & Architecture Modules\n${modulesList}\n\n## Architecture Decision Records (ADRs)\n${adrList}\n\n## Running the Project\n\`\`\`bash\nnpm install\nnpm run dev\n\`\`\`\n`,
+        commitMessage: 'Project documentation, architecture blueprint & specification'
       });
     }
 
@@ -340,69 +398,33 @@ Output ONLY JSON matching this structure:
       buildId: build.id,
       timestamp: Date.now(),
       type: 'plan_created',
-      details: `Project specification established (${build.projectType}) across 4 milestones (${db.getTasks(build.id).length} dependent tasks, ${build.architectureDecisions?.length || 0} ADRs)`
+      details: `Universal architecture blueprint established (${build.projectType}, ${complexity.level}) across 4 milestones (${db.getTasks(build.id).length} dependent tasks, ${build.architectureDecisions?.length || 0} ADRs, ${blueprint.moduleStructure.length} modules)`
     });
 
     return true;
   }
 
   /**
-   * Helper to detect or default the project type
+   * Strongly typed, extensible project type detection.
+   * Backward-compatible with legacy project types and safe fallback for custom types.
    */
-  static detectProjectType(idea: string, currentType?: ProjectType): ProjectType {
-    if (currentType && currentType !== 'fullstack') return currentType;
-    const lower = idea.toLowerCase();
-    if (lower.includes('landing') || lower.includes('hero') || lower.includes('marketing') || lower.includes('product page')) {
-      return 'landing_page';
-    }
-    if (lower.includes('dashboard') || lower.includes('analytics') || lower.includes('metrics') || lower.includes('admin panel')) {
-      return 'saas_dashboard';
-    }
-    if (lower.includes('shop') || lower.includes('store') || lower.includes('ecommerce') || lower.includes('cart') || lower.includes('checkout')) {
-      return 'ecommerce';
-    }
-    if (lower.includes('portfolio') || lower.includes('resume') || lower.includes('cv') || lower.includes('personal site')) {
-      return 'portfolio';
-    }
-    if (lower.includes('blog') || lower.includes('article') || lower.includes('content') || lower.includes('magazine')) {
-      return 'blog_content';
-    }
-    if (lower.includes('api') || lower.includes('microservice') || lower.includes('rest') || lower.includes('endpoint')) {
-      return 'api_service';
-    }
-    if (lower.includes('internal') || lower.includes('console') || lower.includes('admin tool') || lower.includes('crud') || lower.includes('management tool')) {
-      return 'internal_tool';
-    }
-    return currentType || 'fullstack';
+  static detectProjectType(idea: string, currentType?: ProjectType): CanonicalProjectType {
+    return SoftwareRequirementsAnalyzer.detectCategory(idea.toLowerCase(), currentType);
   }
 
   /**
-   * Helper to select tech stack tuned to project type
+   * Helper to select tech stack tuned to project type using intelligent registry.
    */
   static selectOptimalTechStack(type: ProjectType): TechStackConfig {
-    if (type === 'landing_page' || type === 'portfolio' || type === 'blog_content') {
-      return {
-        frontend: 'React 19 + TypeScript + Tailwind CSS (Zero-Runtime)',
-        backend: 'Node.js Express + Static Preview Generator',
-        database: 'Client-Side Local Storage & Markdown Store',
-        testing: 'Node.js Native Test Runner (node:test + assert)',
-        security: 'OWASP Defensive Validation, Clean CSP Headers'
-      };
-    }
-    if (type === 'saas_dashboard' || type === 'ecommerce' || type === 'internal_tool') {
-      return {
-        frontend: 'React 19 + TypeScript + Tailwind CSS + Lucide Icons',
-        backend: 'Node.js Express + REST API Server',
-        database: 'In-Memory Key-Value & Document Store',
-        testing: 'Node.js Native Test Runner (node:test + assert)',
-        security: 'OWASP Defensive Validation, Rate Limiter & AES-256'
-      };
-    }
+    const canonical = normalizeProjectType(type);
+    const analysis = SoftwareRequirementsAnalyzer.analyze(`Project classification: ${canonical}`, canonical);
+    const stackResult = IntelligentStackSelector.selectStack(analysis);
+    const rec = stackResult.recommendedStack;
     return {
-      frontend: 'React 19 + TypeScript + Tailwind CSS',
-      backend: 'Node.js Express + TypeScript Server API',
-      database: 'In-Memory Key-Value & Document Store',
-      testing: 'Node.js Native Test Runner (node:test + assert)',
+      frontend: rec.frontend || rec.uiFramework || rec.desktopFramework || 'N/A',
+      backend: rec.backend || rec.runtime || 'N/A',
+      database: rec.database || 'In-Memory Key-Value & Document Store',
+      testing: rec.testing || 'Node.js Native Test Runner (node:test + assert)',
       security: 'OWASP Defensive Validation, Rate Limiter & AES-256'
     };
   }
@@ -447,10 +469,23 @@ Output ONLY JSON matching this structure:
   }
 
   /**
-   * Helper to generate Requirements Checklist
+   * Helper to generate Requirements Checklist from confirmed requirements or category template
    */
-  static generateRequirementsChecklist(idea: string, type: ProjectType): RequirementItem[] {
-    if (type === 'landing_page') {
+  static generateRequirementsChecklist(idea: string, type: ProjectType, analysis?: any): RequirementItem[] {
+    if (analysis && Array.isArray(analysis.confirmedRequirements) && analysis.confirmedRequirements.length > 0) {
+      return analysis.confirmedRequirements.map((req: any, index: number) => ({
+        id: req.id || `req_${index + 1}`,
+        title: req.statement.slice(0, 40),
+        category: req.category || 'functional',
+        description: req.statement,
+        priority: req.priority || 'must_have',
+        satisfied: false,
+        status: 'pending' as const
+      }));
+    }
+
+    const canonical = normalizeProjectType(type);
+    if (canonical === 'landing_page') {
       return [
         { id: 'req_1', title: 'Hero Section', category: 'frontend', description: 'Responsive Hero Banner with CTA action and value proposition', priority: 'must_have', satisfied: false, status: 'pending' },
         { id: 'req_2', title: 'Feature Grid', category: 'frontend', description: 'Feature showcase grid with icons and benefits', priority: 'must_have', satisfied: false, status: 'pending' },
@@ -459,7 +494,7 @@ Output ONLY JSON matching this structure:
         { id: 'req_5', title: 'Lead Capture', category: 'security', description: 'Validated lead capture / contact form with error handling', priority: 'must_have', satisfied: false, status: 'pending' }
       ];
     }
-    if (type === 'saas_dashboard') {
+    if (canonical === 'saas') {
       return [
         { id: 'req_1', title: 'Sidebar Navigation', category: 'frontend', description: 'Responsive sidebar navigation with view routing', priority: 'must_have', satisfied: false, status: 'pending' },
         { id: 'req_2', title: 'KPI Metrics', category: 'frontend', description: 'KPI summary metrics cards with real-time indicators', priority: 'must_have', satisfied: false, status: 'pending' },
@@ -468,7 +503,7 @@ Output ONLY JSON matching this structure:
         { id: 'req_5', title: 'Settings & Security', category: 'security', description: 'Configuration settings modal with form validation', priority: 'nice_to_have', satisfied: false, status: 'pending' }
       ];
     }
-    if (type === 'ecommerce') {
+    if (canonical === 'ecommerce') {
       return [
         { id: 'req_1', title: 'Product Catalog', category: 'frontend', description: 'Product catalog grid with category filters and search', priority: 'must_have', satisfied: false, status: 'pending' },
         { id: 'req_2', title: 'Product Details', category: 'core', description: 'Product detail view with specifications and stock status', priority: 'must_have', satisfied: false, status: 'pending' },
@@ -477,7 +512,7 @@ Output ONLY JSON matching this structure:
         { id: 'req_5', title: 'Store Test Suite', category: 'testing', description: 'Automated unit tests validating cart total and price calculations', priority: 'must_have', satisfied: false, status: 'pending' }
       ];
     }
-    if (type === 'portfolio') {
+    if (canonical === 'portfolio') {
       return [
         { id: 'req_1', title: 'Bio Banner', category: 'frontend', description: 'Professional biography banner with skills overview', priority: 'must_have', satisfied: false, status: 'pending' },
         { id: 'req_2', title: 'Project Showcase', category: 'frontend', description: 'Interactive project portfolio gallery with modal previews', priority: 'must_have', satisfied: false, status: 'pending' },
@@ -486,7 +521,7 @@ Output ONLY JSON matching this structure:
       ];
     }
     return [
-      { id: 'req_1', title: 'Domain Contracts', category: 'core', description: 'Domain TypeScript contracts and data transfer objects', priority: 'must_have', satisfied: false, status: 'pending' },
+      { id: 'req_1', title: 'Domain Contracts', category: 'core', description: 'Domain contracts and data transfer objects', priority: 'must_have', satisfied: false, status: 'pending' },
       { id: 'req_2', title: 'Business Logic', category: 'backend', description: 'Core business logic engine with clean function interfaces', priority: 'must_have', satisfied: false, status: 'pending' },
       { id: 'req_3', title: 'Data Persistence', category: 'backend', description: 'Data storage service with transactional consistency', priority: 'must_have', satisfied: false, status: 'pending' },
       { id: 'req_4', title: 'UI Components', category: 'frontend', description: 'Responsive user interface component with loading and error states', priority: 'must_have', satisfied: false, status: 'pending' },

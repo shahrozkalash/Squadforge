@@ -92,7 +92,7 @@ export class ArchitectureDependencyPlanner {
       missingRuntimeRequirements.push('Android SDK (API 34) and Java Development Kit (JDK 17+)');
       installationPrerequisites.push('Download Android command-line tools and install platforms;android-34');
       unverifiableDependencies.push('Android Gradle Plugin and APK compiler cannot be verified without Android SDK.');
-    } else if (stack.desktopFramework?.includes('Tauri')) {
+    } else if (stack.desktopFramework?.includes('Tauri') || stack.primaryLanguage?.includes('Rust') || /\b(tauri|rust)\b/i.test(originalPrompt)) {
       nativeCompilationRequired = true;
       requiredDependencies.push({
         name: '@tauri-apps/api',
@@ -111,6 +111,22 @@ export class ArchitectureDependencyPlanner {
 
       missingRuntimeRequirements.push('Rustc / Cargo toolchain >= 1.77 and native OS WebView development libraries');
       installationPrerequisites.push('Install rustup and system webview packages (e.g. libwebkit2gtk-4.1-dev on Linux)');
+    } else if (stack.desktopFramework?.includes('Electron')) {
+      requiredDependencies.push({
+        name: 'electron',
+        version: '^33.0.0',
+        category: 'dev',
+        purpose: 'Cross-platform desktop application shell bundling Chromium and Node.js',
+        verifiedInEnvironment: false
+      });
+      requiredDependencies.push({
+        name: 'electron-builder',
+        version: '^25.0.0',
+        category: 'dev',
+        purpose: 'Multi-platform desktop installer and package builder',
+        verifiedInEnvironment: false
+      });
+      installationPrerequisites.push('Run: npm install --save-dev electron electron-builder');
     } else if (category === 'cli_tool' && stack.primaryLanguage === 'Python') {
       requiredDependencies.push({
         name: 'typer',

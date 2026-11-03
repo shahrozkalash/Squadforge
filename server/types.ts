@@ -449,8 +449,21 @@ export type LegacyProjectType =
 
 export type ProjectType = CanonicalProjectType | LegacyProjectType | (string & {});
 
+export const CANONICAL_PROJECT_TYPES: CanonicalProjectType[] = [
+  'landing_page', 'portfolio', 'blog', 'ecommerce', 'saas', 'web_application',
+  'api_service', 'backend_service', 'desktop_application', 'windows_application',
+  'cross_platform_desktop', 'android_application', 'cross_platform_mobile',
+  'cli_tool', 'developer_tool', 'automation_tool', 'data_application',
+  'creative_application', 'multimedia_application', '3d_application',
+  'engineering_application', 'game_application', 'fullstack', 'custom'
+];
+
+export const LEGACY_PROJECT_TYPES: LegacyProjectType[] = [
+  'saas_dashboard', 'blog_content', 'blog_publication', 'fullstack_app', 'internal_tool'
+];
+
 export function normalizeProjectType(rawType?: string | null): CanonicalProjectType {
-  if (!rawType || typeof rawType !== 'string') return 'fullstack';
+  if (!rawType || typeof rawType !== 'string') return 'custom';
   const clean = rawType.toLowerCase().trim();
   
   if (clean === 'saas_dashboard') return 'saas';
@@ -458,16 +471,7 @@ export function normalizeProjectType(rawType?: string | null): CanonicalProjectT
   if (clean === 'fullstack_app') return 'fullstack';
   if (clean === 'internal_tool') return 'developer_tool';
   
-  const canonicalSet: Set<string> = new Set([
-    'landing_page', 'portfolio', 'blog', 'ecommerce', 'saas', 'web_application',
-    'api_service', 'backend_service', 'desktop_application', 'windows_application',
-    'cross_platform_desktop', 'android_application', 'cross_platform_mobile',
-    'cli_tool', 'developer_tool', 'automation_tool', 'data_application',
-    'creative_application', 'multimedia_application', '3d_application',
-    'engineering_application', 'game_application', 'fullstack', 'custom'
-  ]);
-  
-  if (canonicalSet.has(clean)) {
+  if (CANONICAL_PROJECT_TYPES.includes(clean as CanonicalProjectType)) {
     return clean as CanonicalProjectType;
   }
   

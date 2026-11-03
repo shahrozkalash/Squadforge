@@ -104,7 +104,7 @@ export class IntelligentStackSelector {
     return {
       recommendedStack: recommended,
       alternativeStack: alternative,
-      explanation: 'Preserved previously established technology stack to prevent breaking existing code, dependencies, and configuration. Stack migration was not explicitly requested.',
+      explanation: 'Preserving established technology stack to prevent breaking existing code, dependencies, and configuration. Stack migration was not explicitly requested.',
       compatibilityWarnings: [],
       knownLimitations: ['Preserves current architecture decisions; manual refactoring required to adopt new frameworks.'],
       requiredDevelopmentTools: ['Node.js >= 20.x', 'npm'],
@@ -154,7 +154,7 @@ export class IntelligentStackSelector {
   private static selectAndroidStack(analysis: RequirementsAnalysis): StackSelectionResult {
     const recommended: TechStackBlueprint = {
       name: 'Native Android (Kotlin + Jetpack Compose)',
-      mobileFramework: 'Jetpack Compose Material 3',
+      mobileFramework: 'Android Jetpack Compose (Material 3)',
       primaryLanguage: 'Kotlin',
       runtime: 'Android OS (API 24+ Android 7.0+)',
       database: 'Room Persistence Library (SQLite)',
@@ -224,7 +224,7 @@ export class IntelligentStackSelector {
   }
 
   private static selectDesktopStack(analysis: RequirementsAnalysis): StackSelectionResult {
-    const isPerformanceHeavy = /\b(3d|video|audio|low latency|system|heavy)\b/i.test(analysis.originalPrompt);
+    const isPerformanceHeavy = /\b(3d|video|audio|low latency|system|heavy|tauri|rust|lightweight|low memory)\b/i.test(analysis.originalPrompt);
 
     if (isPerformanceHeavy) {
       const recommended: TechStackBlueprint = {
@@ -240,14 +240,15 @@ export class IntelligentStackSelector {
       };
 
       const alternative: TechStackBlueprint = {
-        name: 'Qt 6 (C++ / QML)',
-        desktopFramework: 'Qt 6 Widgets / QML',
-        primaryLanguage: 'Modern C++20',
-        runtime: 'Qt 6 Runtime Libraries',
-        database: 'QSqlDatabase (SQLite)',
-        testing: 'GoogleTest + QTest',
-        buildTool: 'CMake + Ninja',
-        packageManager: 'vcpkg'
+        name: 'Electron + React + TypeScript',
+        desktopFramework: 'Electron Desktop Shell',
+        uiFramework: 'React 19 + Tailwind CSS',
+        primaryLanguage: 'TypeScript',
+        runtime: 'Bundled Chromium + Node.js 22 Runtime',
+        database: 'better-sqlite3 / embedded JSON store',
+        testing: 'Vitest + Playwright',
+        buildTool: 'electron-builder + Vite',
+        packageManager: 'npm'
       };
 
       return {
@@ -648,11 +649,22 @@ export class IntelligentStackSelector {
   }
 
   private static selectFullstackWebStack(analysis: RequirementsAnalysis): StackSelectionResult {
+    const hasPostgresReq = /\b(postgres|postgresql)\b/i.test(analysis.originalPrompt) || 
+      analysis.dataStorageRequirements.some(r => /postgres/i.test(r));
+
+    const recommendedDb = hasPostgresReq
+      ? 'PostgreSQL 16 + Drizzle ORM'
+      : 'SQLite Persistent Database (node:sqlite) + In-Memory Caches';
+
+    const alternativeDb = hasPostgresReq
+      ? 'SQLite Persistent Database (node:sqlite)'
+      : 'PostgreSQL + Drizzle ORM';
+
     const recommended: TechStackBlueprint = {
-      name: 'Full-Stack React 19 + Node.js Express + TypeScript',
+      name: hasPostgresReq ? 'Enterprise Full-Stack (React 19 + Node.js + PostgreSQL)' : 'Full-Stack React 19 + Node.js Express + TypeScript',
       frontend: 'React 19 + TypeScript + Tailwind CSS + Lucide Icons',
       backend: 'Node.js Express + TypeScript Server API',
-      database: 'SQLite Persistent Database (node:sqlite) + In-Memory Caches',
+      database: recommendedDb,
       primaryLanguage: 'TypeScript',
       runtime: 'Node.js >= 20.x',
       testing: 'Node.js Native Test Runner (node:test + assert)',
@@ -664,7 +676,7 @@ export class IntelligentStackSelector {
       name: 'Next.js 15 Full-Stack App Router',
       frontend: 'Next.js 15 (React 19) + Tailwind CSS',
       backend: 'Next.js Server Actions + Route Handlers',
-      database: 'PostgreSQL + Drizzle ORM',
+      database: alternativeDb,
       primaryLanguage: 'TypeScript',
       runtime: 'Node.js >= 20.x',
       testing: 'Vitest + Playwright',

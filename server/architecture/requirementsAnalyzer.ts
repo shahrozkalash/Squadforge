@@ -96,7 +96,7 @@ export class SoftwareRequirementsAnalyzer {
     }
 
     // Mobile
-    if (/\b(android app|apk|kotlin app|jetpack compose)\b/i.test(text)) {
+    if (/\b(android|apk|kotlin|jetpack compose)\b/i.test(text)) {
       return 'android_application';
     }
     if (/\b(mobile app|react native|flutter|ios app|smartphone app)\b/i.test(text)) {
@@ -301,7 +301,7 @@ export class SoftwareRequirementsAnalyzer {
     }
 
     const ui: string[] = [];
-    if (platforms.includes('mobile') || platforms.includes('android') || platforms.includes('ios')) {
+    if (platforms.includes('android') || platforms.includes('ios') || platforms.includes('cross_platform')) {
       ui.push('Touch-optimized mobile UI with intuitive navigation and gesture support');
       ui.push('Adaptive layouts supporting varying screen densities and orientations');
     } else if (platforms.includes('windows') || platforms.includes('macos') || platforms.includes('linux')) {
@@ -337,7 +337,7 @@ export class SoftwareRequirementsAnalyzer {
 
   private static extractDataStorageRequirements(text: string, category: CanonicalProjectType): string[] {
     const storage: string[] = [];
-    if (/\b(sql|postgres|mysql|relational)\b/i.test(text)) {
+    if (/\b(sql|sqlite|postgres|mysql|relational)\b/i.test(text)) {
       storage.push('Relational database (PostgreSQL / SQLite) with structured schema and migrations');
     } else if (/\b(mongo|document|nosql)\b/i.test(text)) {
       storage.push('Document or key-value store for unstructured JSON records');

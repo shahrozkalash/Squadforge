@@ -1204,4 +1204,146 @@ export class ProjectMemoryService {
     const memory = this.getMemory(buildId, userId);
     return memory?.moduleRelationships || [];
   }
+
+  /**
+   * Records an architecture blueprint with strict user isolation and build synchronization.
+   */
+  static recordArchitectureBlueprint(buildId: string, userId: string, blueprint: ArchitectureBlueprint): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    memory.architectureBlueprint = blueprint;
+    memory.targetPlatforms = blueprint.targetPlatforms;
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
+    const build = db.getBuild(buildId);
+    if (build && build.userId === userId) {
+      build.architectureBlueprint = blueprint;
+      db.saveBuild(build);
+    }
+    return true;
+  }
+
+  /**
+   * Retrieves the architecture blueprint with strict user isolation.
+   */
+  static getArchitectureBlueprint(buildId: string, userId: string): ArchitectureBlueprint | undefined {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.architectureBlueprint;
+  }
+
+  /**
+   * Records requirements analysis with strict user isolation and build synchronization.
+   */
+  static recordRequirementsAnalysis(buildId: string, userId: string, analysis: RequirementsAnalysis): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    memory.requirementsAnalysis = analysis;
+    memory.unresolvedQuestions = analysis.unresolvedQuestions;
+    memory.confirmedRequirements = analysis.confirmedRequirements;
+    memory.technicalAssumptions = analysis.assumptions;
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
+    const build = db.getBuild(buildId);
+    if (build && build.userId === userId) {
+      build.requirementsAnalysis = analysis;
+      db.saveBuild(build);
+    }
+    return true;
+  }
+
+  /**
+   * Retrieves requirements analysis with strict user isolation.
+   */
+  static getRequirementsAnalysis(buildId: string, userId: string): RequirementsAnalysis | undefined {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.requirementsAnalysis;
+  }
+
+  /**
+   * Records project complexity assessment with strict user isolation and build synchronization.
+   */
+  static recordComplexityAssessment(buildId: string, userId: string, assessment: ProjectComplexityAssessment): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    memory.complexityAssessment = assessment;
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
+    const build = db.getBuild(buildId);
+    if (build && build.userId === userId) {
+      build.complexityAssessment = assessment;
+      db.saveBuild(build);
+    }
+    return true;
+  }
+
+  /**
+   * Retrieves project complexity assessment with strict user isolation.
+   */
+  static getComplexityAssessment(buildId: string, userId: string): ProjectComplexityAssessment | undefined {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.complexityAssessment;
+  }
+
+  /**
+   * Records file structure plan with strict user isolation and build synchronization.
+   */
+  static recordFileStructurePlan(buildId: string, userId: string, plan: FileStructurePlan): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    memory.fileStructurePlan = plan;
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
+    const build = db.getBuild(buildId);
+    if (build && build.userId === userId) {
+      build.fileStructurePlan = plan;
+      db.saveBuild(build);
+    }
+    return true;
+  }
+
+  /**
+   * Retrieves file structure plan with strict user isolation.
+   */
+  static getFileStructurePlan(buildId: string, userId: string): FileStructurePlan | undefined {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.fileStructurePlan;
+  }
+
+  /**
+   * Records architecture dependency plan with strict user isolation and build synchronization.
+   */
+  static recordDependencyPlan(buildId: string, userId: string, plan: ArchitectureDependencyPlan): boolean {
+    const memory = this.getOrInitializeMemory(buildId, userId);
+    if (!memory) return false;
+
+    memory.dependencyPlan = plan;
+    memory.lastUpdated = Date.now();
+    db.saveProjectMemory(memory);
+
+    const build = db.getBuild(buildId);
+    if (build && build.userId === userId) {
+      build.dependencyPlan = plan;
+      db.saveBuild(build);
+    }
+    return true;
+  }
+
+  /**
+   * Retrieves architecture dependency plan with strict user isolation.
+   */
+  static getDependencyPlan(buildId: string, userId: string): ArchitectureDependencyPlan | undefined {
+    const memory = this.getMemory(buildId, userId);
+    return memory?.dependencyPlan;
+  }
 }
+
+export const projectMemoryService = ProjectMemoryService;
+
