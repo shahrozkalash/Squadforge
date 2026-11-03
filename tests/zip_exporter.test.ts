@@ -174,4 +174,340 @@ describe('SquadForge ZIP Archive & Local Development Exporter', () => {
     // 4 sample files + README.md + LOCAL_SETUP.md + .env.example + .gitignore + Dockerfile + docker-compose.yml + ARCHITECTURE.md = 11
     assert.equal(result.fileCount, 11);
   });
+
+  describe('PHASE 3: Path Security, File Integrity & Resource Limits', () => {
+    test('Strict path validation rejects traversal, absolute paths, and dangerous Windows formats', async () => {
+      const maliciousPaths = [
+        '../etc/passwd',
+        '../../root/secret.txt',
+        'src/../../escape.js',
+        'C:\\Windows\\System32\\cmd.exe',
+        'D:/secret.env',
+        'src\\..\\..\\malicious.ts',
+        'foo\0bar.ts',
+        '',
+        '   ',
+        '.',
+        './'
+      ];
+
+      for (const p of maliciousPaths) {
+        const files: ProjectFile[] = [
+          {
+            path: p,
+            content: 'bad content',
+            version: 1,
+            ownerModel: 'gemini',
+            history: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now()
+          }
+        ];
+
+        await assert.rejects(
+          async () => {
+            await buildProjectZipBlob(sampleBuild, files);
+          },
+          (err: Error) => {
+            assert.match(err.message, /Security rejection|prohibited|empty/i);
+            return true;
+          },
+          `Should reject malicious path: ${p}`
+        );
+      }
+    });
+
+    test('Duplicate and case-colliding file paths are strictly rejected', async () => {
+      const duplicateFiles: ProjectFile[] = [
+        {
+          path: 'src/App.tsx',
+          content: 'export const App = () => 1;',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        },
+        {
+          path: 'src/App.tsx',
+          content: 'export const App = () => 2;',
+          version: 2,
+          ownerModel: 'claude',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      await assert.rejects(
+        async () => {
+          await buildProjectZipBlob(sampleBuild, duplicateFiles);
+        },
+        (err: Error) => {
+          assert.match(err.message, /duplicate file path/i);
+          return true;
+        }
+      );
+
+      const caseCollisionFiles: ProjectFile[] = [
+        {
+          path: 'src/App.tsx',
+          content: 'export const App = () => 1;',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        },
+        {
+          path: 'src/app.tsx',
+          content: 'export const App = () => 2;',
+          version: 2,
+          ownerModel: 'claude',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      await assert.rejects(
+        async () => {
+          await buildProjectZipBlob(sampleBuild, caseCollisionFiles);
+        },
+        (err: Error) => {
+          assert.match(err.message, /case conflict|path collision/i);
+          return true;
+        }
+      );
+    });
+
+    test('Enforces individual file size and total archive limits', async () => {
+      const oversizedFile: ProjectFile[] = [
+        {
+          path: 'large_asset.bin',
+          content: 'X'.repeat(2000),
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      // Test maxFileSizeBytes constraint
+      await assert.rejects(
+        async () => {
+          await buildProjectZipBlob(sampleBuild, oversizedFile, { maxFileSizeBytes: 1000 });
+        },
+        (err: Error) => {
+          assert.match(err.message, /exceeds maximum permitted file size/i);
+          return true;
+        }
+      );
+
+      // Test maxTotalSizeBytes constraint
+      await assert.rejects(
+        async () => {
+          await buildProjectZipBlob(sampleBuild, oversizedFile, { maxTotalSizeBytes: 1500 });
+        },
+        (err: Error) => {
+          assert.match(err.message, /exceeds maximum archive size limit/i);
+          return true;
+        }
+      );
+    });
+
+    test('Never silently overwrites user-generated project files', async () => {
+      const userCustomFiles: ProjectFile[] = [
+        {
+          path: 'README.md',
+          content: '# Custom User Handwritten Readme\nDo not overwrite me!',
+          version: 1,
+          ownerModel: 'user',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        },
+        {
+          path: 'Dockerfile',
+          content: '# Custom Production Dockerfile\nFROM debian:bookworm\n',
+          version: 1,
+          ownerModel: 'user',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      const res = await buildProjectZipBlob(sampleBuild, userCustomFiles, {
+        includeSetupGuide: true,
+        includeDockerConfig: true
+      });
+
+      // Load zip contents to inspect
+      const JSZip = (await import('jszip')).default;
+      const loaded = await JSZip.loadAsync(res.blob);
+
+      const readmeContent = await loaded.file('README.md')?.async('string');
+      assert.equal(readmeContent, '# Custom User Handwritten Readme\nDo not overwrite me!');
+
+      const dockerContent = await loaded.file('Dockerfile')?.async('string');
+      assert.equal(dockerContent, '# Custom Production Dockerfile\nFROM debian:bookworm\n');
+    });
+  });
+
+  describe('PHASE 4: Stack-Aware Local Development Export', () => {
+    test('Python FastAPI project gets Python 3.11 Dockerfile and uvicorn CMD (not Node)', async () => {
+      const fastApiFiles: ProjectFile[] = [
+        {
+          path: 'requirements.txt',
+          content: 'fastapi==0.110.0\nuvicorn==0.28.0\npydantic==2.6.4\n',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        },
+        {
+          path: 'main.py',
+          content: 'from fastapi import FastAPI\napp = FastAPI()\n@app.get("/")\ndef root(): return {"status": "ok"}\n',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      const res = await buildProjectZipBlob(null, fastApiFiles);
+      assert.equal(res.stack, 'python-fastapi');
+
+      const JSZip = (await import('jszip')).default;
+      const loaded = await JSZip.loadAsync(res.blob);
+
+      const dockerfile = await loaded.file('Dockerfile')?.async('string');
+      assert.match(dockerfile!, /FROM python:3\.11-slim/);
+      assert.match(dockerfile!, /uvicorn/);
+      assert.match(dockerfile!, /main:app/);
+      assert.match(dockerfile!, /8000/);
+      assert.doesNotMatch(dockerfile!, /node:22/i);
+      assert.doesNotMatch(dockerfile!, /npm run dev/i);
+    });
+
+    test('Go project gets Go 1.22 Dockerfile with go mod download', async () => {
+      const goFiles: ProjectFile[] = [
+        {
+          path: 'go.mod',
+          content: 'module example.com/myapp\n\ngo 1.22\n',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        },
+        {
+          path: 'main.go',
+          content: 'package main\nimport "fmt"\nfunc main() { fmt.Println("hello") }\n',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      const res = await buildProjectZipBlob(null, goFiles);
+      assert.equal(res.stack, 'go');
+
+      const JSZip = (await import('jszip')).default;
+      const loaded = await JSZip.loadAsync(res.blob);
+      const dockerfile = await loaded.file('Dockerfile')?.async('string');
+      assert.match(dockerfile!, /FROM golang:1\.22-alpine/);
+      assert.match(dockerfile!, /go.*run/);
+    });
+  });
+
+  describe('PHASE 5: Environment Variable Intelligence & Secret Exclusion', () => {
+    test('Excludes raw secret .env and .env.local files from being exported', async () => {
+      const filesWithSecrets: ProjectFile[] = [
+        {
+          path: 'src/index.ts',
+          content: 'console.log("app");',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        },
+        {
+          path: '.env',
+          content: 'SUPER_SECRET_KEY=sk-super-secret-1234567890\nPASSWORD=super_secret_pw\n',
+          version: 1,
+          ownerModel: 'user',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        },
+        {
+          path: '.env.local',
+          content: 'LOCAL_SECRET=secret_token_abc\n',
+          version: 1,
+          ownerModel: 'user',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      const res = await buildProjectZipBlob(sampleBuild, filesWithSecrets);
+      const JSZip = (await import('jszip')).default;
+      const loaded = await JSZip.loadAsync(res.blob);
+
+      // Verify that raw .env and .env.local DO NOT exist in the ZIP!
+      assert.equal(loaded.file('.env'), null, 'Raw .env file with secrets must never exist in ZIP export');
+      assert.equal(loaded.file('.env.local'), null, 'Raw .env.local file with secrets must never exist in ZIP export');
+
+      // But safe .env.example MUST exist
+      const envExample = await loaded.file('.env.example')?.async('string');
+      assert.ok(envExample);
+      assert.doesNotMatch(envExample!, /sk-super-secret-1234567890/);
+      assert.doesNotMatch(envExample!, /super_secret_pw/);
+    });
+
+    test('Scans source code for referenced variables and creates documented template', async () => {
+      const codeFiles: ProjectFile[] = [
+        {
+          path: 'src/aiService.ts',
+          content: 'const key = process.env.GEMINI_API_KEY;\nconst url = process.env.APP_URL;\n',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        },
+        {
+          path: 'src/server.ts',
+          content: 'const port = process.env.PORT || 8080;\nconst secret = process.env.ENCRYPTION_SECRET;\n',
+          version: 1,
+          ownerModel: 'gemini',
+          history: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      const res = await buildProjectZipBlob(sampleBuild, codeFiles);
+      const JSZip = (await import('jszip')).default;
+      const loaded = await JSZip.loadAsync(res.blob);
+
+      const envExample = await loaded.file('.env.example')?.async('string');
+      assert.ok(envExample);
+      assert.match(envExample!, /GEMINI_API_KEY=/);
+      assert.match(envExample!, /ENCRYPTION_SECRET=/);
+      assert.match(envExample!, /PORT=/);
+      assert.match(envExample!, /APP_URL=/);
+      // Explanations provided
+      assert.match(envExample!, /Google Gemini API key/i);
+    });
+  });
 });

@@ -84,12 +84,14 @@ export const ProjectCodeView: React.FC = () => {
     a.download = currentFile.path.split('/').pop() || 'file.txt';
     document.body.appendChild(a);
     a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    setTimeout(() => {
+      if (document.body.contains(a)) document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }, 60000);
   };
 
   const handleDownloadProject = async () => {
-    if (!files || files.length === 0) return;
+    if (!files || files.length === 0 || isDownloading) return;
     setIsDownloading(true);
     setDownloadSuccess(false);
 
@@ -109,8 +111,10 @@ export const ProjectCodeView: React.FC = () => {
       a.download = filename;
       document.body.appendChild(a);
       a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      setTimeout(() => {
+        if (document.body.contains(a)) document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 60000);
 
       setDownloadSuccess(true);
       setTimeout(() => setDownloadSuccess(false), 3000);

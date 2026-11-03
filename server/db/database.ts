@@ -544,6 +544,13 @@ export class DatabaseManager {
   private postRollbackHooks: Array<() => void> = [];
 
   /**
+   * Returns current active transaction nesting depth (0 if outside any transaction)
+   */
+  getTransactionDepth(): number {
+    return this.transactionDepth;
+  }
+
+  /**
    * Registers a callback to be executed strictly AFTER the outermost transaction commits.
    * If not inside an active transaction, executes immediately.
    */
@@ -572,21 +579,37 @@ export class DatabaseManager {
     const isOuter = this.transactionDepth === 0;
     const currentDepth = this.transactionDepth;
     const savepointName = `sp_${currentDepth}`;
-    this.transactionDepth++;
 
     const initialCommitHookCount = this.postCommitHooks.length;
     const initialRollbackHookCount = this.postRollbackHooks.length;
 
-    if (isOuter) {
-      this.db.exec('BEGIN IMMEDIATE;');
-    } else {
-      this.db.exec(`SAVEPOINT ${savepointName};`);
+    // 1. Transaction initialization: execute BEGIN or SAVEPOINT before modifying depth
+    let started = false;
+    try {
+      if (isOuter) {
+        this.db.exec('BEGIN IMMEDIATE;');
+      } else {
+        this.db.exec(`SAVEPOINT ${savepointName};`);
+      }
+      this.transactionDepth++;
+      started = true;
+    } catch (initErr) {
+      // Transaction initialization failed: transactionDepth remains unchanged.
+      // Re-throw error without invoking rollback because no transaction or savepoint started.
+      throw initErr;
     }
 
     try {
       const result = fn();
       if (isOuter) {
-        this.db.exec('COMMIT;');
+        try {
+          this.db.exec('COMMIT;');
+        } catch (commitErr) {
+          // Explicit commit failure handling: outer commit failed!
+          throw commitErr;
+        }
+
+        // Post-commit hooks execute ONLY after successful outer commit
         const hooks = this.postCommitHooks;
         this.postCommitHooks = [];
         this.postRollbackHooks = [];
@@ -598,37 +621,53 @@ export class DatabaseManager {
           }
         }
       } else {
-        this.db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+        try {
+          this.db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+        } catch (releaseErr) {
+          throw releaseErr;
+        }
       }
       return result;
     } catch (err) {
       // Discard commit hooks registered during this savepoint/transaction level
       const rollbackHooksToRun = this.postRollbackHooks.slice(initialRollbackHookCount);
+      // Preserve outer transaction commit hooks!
       this.postCommitHooks = this.postCommitHooks.slice(0, initialCommitHookCount);
+      // Preserve outer transaction rollback hooks!
       this.postRollbackHooks = this.postRollbackHooks.slice(0, initialRollbackHookCount);
 
-      try {
-        if (isOuter) {
+      if (isOuter) {
+        try {
           this.db.exec('ROLLBACK;');
-          for (const hook of rollbackHooksToRun) {
-            try { hook(); } catch {}
-          }
-        } else {
-          this.db.exec(`ROLLBACK TO SAVEPOINT ${savepointName};`);
-          this.db.exec(`RELEASE SAVEPOINT ${savepointName};`);
-          for (const hook of rollbackHooksToRun) {
-            try { hook(); } catch {}
+        } catch (rbErr) {
+          console.error('[DATABASE] Outer ROLLBACK failed:', rbErr);
+        }
+        for (const hook of rollbackHooksToRun) {
+          try { hook(); } catch (hookErr) {
+            console.error('[DATABASE] Error in outer rollback hook:', hookErr);
           }
         }
-      } catch {
-        // Rollback failed, possibly already rolled back by SQLite
+      } else {
+        try {
+          this.db.exec(`ROLLBACK TO SAVEPOINT ${savepointName};`);
+          this.db.exec(`RELEASE SAVEPOINT ${savepointName};`);
+        } catch (spErr) {
+          console.error(`[DATABASE] Rollback/release savepoint ${savepointName} failed:`, spErr);
+        }
+        for (const hook of rollbackHooksToRun) {
+          try { hook(); } catch (hookErr) {
+            console.error('[DATABASE] Error in savepoint rollback hook:', hookErr);
+          }
+        }
       }
       throw err;
     } finally {
-      this.transactionDepth--;
-      if (this.transactionDepth === 0) {
-        this.postCommitHooks = [];
-        this.postRollbackHooks = [];
+      if (started) {
+        this.transactionDepth--;
+        if (this.transactionDepth === 0) {
+          this.postCommitHooks = [];
+          this.postRollbackHooks = [];
+        }
       }
     }
   }
@@ -646,9 +685,6 @@ export class DatabaseManager {
     const expiry = now + durationMs;
 
     try {
-      // Clean up expired locks first
-      this.cleanExpiredCoordinationLocks(now);
-
       const res = this.db.prepare(`
         INSERT INTO coordination_locks (lock_key, owner_id, acquired_at, expires_at)
         VALUES (?, ?, ?, ?)
@@ -656,7 +692,7 @@ export class DatabaseManager {
           owner_id = excluded.owner_id,
           acquired_at = excluded.acquired_at,
           expires_at = excluded.expires_at
-        WHERE expires_at < ?
+        WHERE coordination_locks.expires_at < ?
       `).run(lockKey, ownerId, now, expiry, now);
 
       return res.changes > 0;
