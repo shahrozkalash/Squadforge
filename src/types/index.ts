@@ -218,6 +218,7 @@ export interface SwarmEvent {
   taskId?: string;
   filePath?: string;
   details: string;
+  message?: string;
   meta?: Record<string, any>;
 }
 
@@ -1224,12 +1225,15 @@ export interface FileConflict {
   id: string;
   buildId: string;
   filePath: string;
+  targetFile?: string;
   baseVersion: number;
+  baseFileVersion?: number;
   conflictingVersions: number[];
   competingPatches: CompetingPatchHunk[];
   reason: string;
   overlappingHunks: OverlappingHunk[];
   resolutionStatus: 'open' | 'investigating' | 'resolved' | 'abandoned';
+  status?: 'open' | 'investigating' | 'resolved' | 'abandoned' | 'detected' | 'resolving';
   resolvedBy?: string;
   resolvedContent?: string;
   resolvedVersion?: number;
@@ -1240,6 +1244,7 @@ export interface FileConflict {
 export type AIChallengeSubject = 
   | 'Architecture'
   | 'Database design'
+  | 'database_design'
   | 'API contracts'
   | 'Security'
   | 'Performance'
@@ -1263,6 +1268,9 @@ export interface AIChallengeArgument {
   roundNumber: number;
   authorAgent: string;
   authorRole: AgentRole;
+  agentRole?: AgentRole;
+  round?: number;
+  argument?: string;
   argumentType: 'pro' | 'con' | 'alternative' | 'counter_evidence';
   claim: string;
   evidence: string;
@@ -1283,6 +1291,7 @@ export interface AIChallenge {
   challengerRole: AgentRole;
   currentRound: number;
   maxRounds: number;
+  roundsCount?: number;
   status: 'active' | 'evaluating' | 'concluded';
   outcome: AIChallengeOutcome;
   finalDecision?: string;
@@ -1330,6 +1339,7 @@ export interface CollaborativeDefect {
   proposedSolutions: DefectSolution[];
   selectedPatchId?: string;
   testEvidence?: string;
+  verificationEvidence?: string;
   verificationDetails?: {
     syntaxPassed: boolean;
     testsPassed: boolean;
@@ -1359,8 +1369,10 @@ export interface HumanApprovalRequest {
   patchId?: string;
   requestingAgent: string;
   requestingRole: AgentRole;
+  requestedByRole?: AgentRole;
   operationType: ApprovalOperationType;
   explanation: string;
+  rationale?: string;
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   affectedFiles: string[];
   proposedChanges: string;
@@ -1375,6 +1387,8 @@ export interface HumanApprovalRequest {
 
 export type KnowledgeCategory = 
   | 'architecture_decision'
+  | 'adr'
+  | 'pattern'
   | 'interface_contract'
   | 'implementation_discovery'
   | 'resolved_defect'
@@ -1407,6 +1421,7 @@ export interface SharedKnowledgeItem {
 
 export interface CollaborationOverview {
   activeAgents: AgentProfile[];
+  agentProfiles?: AgentProfile[];
   messageCount: number;
   pendingReviewsCount: number;
   proposedPatchesCount: number;
