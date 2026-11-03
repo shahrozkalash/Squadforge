@@ -10,7 +10,16 @@ import {
   RequirementStatus,
   ProjectRevision,
   Task,
-  ProjectFile
+  ProjectFile,
+  ArchitectureBlueprint,
+  RequirementsAnalysis,
+  ProjectComplexityAssessment,
+  FileStructurePlan,
+  ArchitectureDependencyPlan,
+  TargetPlatform,
+  ConfirmedRequirement,
+  TechnicalAssumption,
+  UnresolvedQuestion
 } from '../types.js';
 
 export type { ArchitectureDecision, ADRStatus, ADRHistoryEntry, RequirementItem, ProjectRevision };
@@ -67,6 +76,15 @@ export interface ProjectMemory {
   knownDefects: ProjectDefect[];
   moduleRelationships: ModuleRelationship[];
   revisions: ProjectRevision[];
+  architectureBlueprint?: ArchitectureBlueprint;
+  requirementsAnalysis?: RequirementsAnalysis;
+  complexityAssessment?: ProjectComplexityAssessment;
+  fileStructurePlan?: FileStructurePlan;
+  dependencyPlan?: ArchitectureDependencyPlan;
+  targetPlatforms?: TargetPlatform[];
+  unresolvedQuestions?: UnresolvedQuestion[];
+  confirmedRequirements?: ConfirmedRequirement[];
+  technicalAssumptions?: TechnicalAssumption[];
   lastUpdated: number;
 }
 
@@ -107,6 +125,21 @@ export class ProjectMemoryService {
       stored.moduleRelationships = Array.isArray(stored.moduleRelationships) ? stored.moduleRelationships : [];
       stored.revisions = Array.isArray(stored.revisions) ? stored.revisions : [];
       stored.conventions = Array.isArray(stored.conventions) ? stored.conventions : [];
+      if (!stored.architectureBlueprint && build.architectureBlueprint) {
+        stored.architectureBlueprint = build.architectureBlueprint;
+      }
+      if (!stored.requirementsAnalysis && build.requirementsAnalysis) {
+        stored.requirementsAnalysis = build.requirementsAnalysis;
+      }
+      if (!stored.complexityAssessment && build.complexityAssessment) {
+        stored.complexityAssessment = build.complexityAssessment;
+      }
+      if (!stored.fileStructurePlan && build.fileStructurePlan) {
+        stored.fileStructurePlan = build.fileStructurePlan;
+      }
+      if (!stored.dependencyPlan && build.dependencyPlan) {
+        stored.dependencyPlan = build.dependencyPlan;
+      }
       return stored;
     }
 
@@ -155,6 +188,15 @@ export class ProjectMemoryService {
       knownDefects: [],
       moduleRelationships: [],
       revisions: build.revisions || [],
+      architectureBlueprint: build.architectureBlueprint,
+      requirementsAnalysis: build.requirementsAnalysis,
+      complexityAssessment: build.complexityAssessment,
+      fileStructurePlan: build.fileStructurePlan,
+      dependencyPlan: build.dependencyPlan,
+      targetPlatforms: build.architectureBlueprint?.targetPlatforms,
+      unresolvedQuestions: build.requirementsAnalysis?.unresolvedQuestions,
+      confirmedRequirements: build.requirementsAnalysis?.confirmedRequirements,
+      technicalAssumptions: build.requirementsAnalysis?.assumptions,
       lastUpdated: Date.now()
     };
 

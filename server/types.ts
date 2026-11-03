@@ -407,19 +407,72 @@ export interface Build {
   previewDiagnostic?: string;
   previewRuntimeErrors?: string[];
   previewEntryPoint?: string;
+  architectureBlueprint?: ArchitectureBlueprint;
+  requirementsAnalysis?: RequirementsAnalysis;
+  complexityAssessment?: ProjectComplexityAssessment;
+  fileStructurePlan?: FileStructurePlan;
+  dependencyPlan?: ArchitectureDependencyPlan;
 }
 
-export type ProjectType = 
+export type CanonicalProjectType = 
   | 'landing_page' 
-  | 'saas_dashboard' 
-  | 'ecommerce' 
   | 'portfolio' 
-  | 'blog_content'
-  | 'blog_publication'
-  | 'fullstack' 
-  | 'fullstack_app'
+  | 'blog' 
+  | 'ecommerce' 
+  | 'saas' 
+  | 'web_application' 
   | 'api_service' 
+  | 'backend_service' 
+  | 'desktop_application' 
+  | 'windows_application' 
+  | 'cross_platform_desktop' 
+  | 'android_application' 
+  | 'cross_platform_mobile' 
+  | 'cli_tool' 
+  | 'developer_tool' 
+  | 'automation_tool' 
+  | 'data_application' 
+  | 'creative_application' 
+  | 'multimedia_application' 
+  | '3d_application' 
+  | 'engineering_application' 
+  | 'game_application' 
+  | 'fullstack' 
+  | 'custom';
+
+export type LegacyProjectType = 
+  | 'saas_dashboard' 
+  | 'blog_content' 
+  | 'blog_publication' 
+  | 'fullstack_app' 
   | 'internal_tool';
+
+export type ProjectType = CanonicalProjectType | LegacyProjectType | (string & {});
+
+export function normalizeProjectType(rawType?: string | null): CanonicalProjectType {
+  if (!rawType || typeof rawType !== 'string') return 'fullstack';
+  const clean = rawType.toLowerCase().trim();
+  
+  if (clean === 'saas_dashboard') return 'saas';
+  if (clean === 'blog_content' || clean === 'blog_publication') return 'blog';
+  if (clean === 'fullstack_app') return 'fullstack';
+  if (clean === 'internal_tool') return 'developer_tool';
+  
+  const canonicalSet: Set<string> = new Set([
+    'landing_page', 'portfolio', 'blog', 'ecommerce', 'saas', 'web_application',
+    'api_service', 'backend_service', 'desktop_application', 'windows_application',
+    'cross_platform_desktop', 'android_application', 'cross_platform_mobile',
+    'cli_tool', 'developer_tool', 'automation_tool', 'data_application',
+    'creative_application', 'multimedia_application', '3d_application',
+    'engineering_application', 'game_application', 'fullstack', 'custom'
+  ]);
+  
+  if (canonicalSet.has(clean)) {
+    return clean as CanonicalProjectType;
+  }
+  
+  return 'custom';
+}
 
 export type ADRStatus = 'proposed' | 'accepted' | 'rejected' | 'superseded';
 
@@ -886,3 +939,300 @@ export interface SwarmUsageStats {
   activeQuotas: Record<string, ProviderQuotaStatus>;
   localLLM: LocalLLMConfig;
 }
+
+// ============================================================================
+// Phase 7: Universal Software Architecture Engine Types
+// ============================================================================
+
+export type TargetPlatform = 
+  | 'web' 
+  | 'windows' 
+  | 'macos' 
+  | 'linux' 
+  | 'android' 
+  | 'ios' 
+  | 'cross_platform' 
+  | 'cli' 
+  | 'cloud' 
+  | 'embedded';
+
+export interface ConfirmedRequirement {
+  id: string;
+  statement: string;
+  category: 'functional' | 'ui' | 'backend' | 'data' | 'security' | 'integration' | 'performance';
+  priority: 'must_have' | 'should_have' | 'nice_to_have';
+  source: 'user_prompt';
+}
+
+export interface TechnicalAssumption {
+  id: string;
+  statement: string;
+  category: string;
+  rationale: string;
+  confidence: 'high' | 'medium' | 'low';
+  validated: boolean;
+}
+
+export interface UnresolvedQuestion {
+  id: string;
+  question: string;
+  category: string;
+  impact: string;
+  suggestedResolution?: string;
+}
+
+export interface RequirementsAnalysis {
+  mainPurpose: string;
+  targetUsers: string[];
+  applicationCategory: CanonicalProjectType;
+  targetPlatforms: TargetPlatform[];
+  requiredFeatures: string[];
+  coreFunctionality: string[];
+  uiRequirements: string[];
+  backendRequirements: string[];
+  dataStorageRequirements: string[];
+  externalIntegrations: string[];
+  performanceRequirements: string[];
+  securityRequirements: string[];
+  deploymentRequirements: string[];
+  technicalConstraints: string[];
+  confirmedRequirements: ConfirmedRequirement[];
+  assumptions: TechnicalAssumption[];
+  unresolvedQuestions: UnresolvedQuestion[];
+  originalPrompt: string;
+  analyzedAt: number;
+}
+
+export type TechCategory = 
+  | 'frontend' 
+  | 'backend' 
+  | 'fullstack' 
+  | 'desktop' 
+  | 'mobile' 
+  | 'systems' 
+  | 'database' 
+  | 'graphics_3d' 
+  | 'tooling' 
+  | 'testing' 
+  | 'security';
+
+export type CompatibilityStatus = 
+  | 'verified' 
+  | 'candidate' 
+  | 'experimental' 
+  | 'external_runtime_required';
+
+export interface TechRegistryEntry {
+  id: string;
+  displayName: string;
+  category: TechCategory;
+  supportedPlatforms: TargetPlatform[];
+  programmingLanguages: string[];
+  projectTypes: CanonicalProjectType[];
+  compatibilityRequirements?: string[];
+  runtimeRequirements: string[];
+  buildTooling: string[];
+  packageManager?: string;
+  testingEcosystem: string[];
+  deploymentOptions: string[];
+  knownLimitations: string[];
+  documentationReference: string;
+  compatibilityStatus: CompatibilityStatus;
+}
+
+export interface TechStackBlueprint {
+  name: string;
+  frontend?: string;
+  backend?: string;
+  desktopFramework?: string;
+  mobileFramework?: string;
+  runtime?: string;
+  database?: string;
+  testing?: string;
+  buildTool?: string;
+  packageManager?: string;
+  primaryLanguage: string;
+  uiFramework?: string;
+  graphicsApi?: string;
+}
+
+export interface StackSelectionResult {
+  recommendedStack: TechStackBlueprint;
+  alternativeStack: TechStackBlueprint;
+  explanation: string;
+  compatibilityWarnings: string[];
+  knownLimitations: string[];
+  requiredDevelopmentTools: string[];
+  runtimeRequirements: string[];
+  buildAndTestingRequirements: string[];
+  isPreservedStack?: boolean;
+}
+
+export interface ArchitectureLayer {
+  name: string;
+  responsibility: string;
+  components: string[];
+  technologies: string[];
+}
+
+export interface ArchitectureModule {
+  id: string;
+  name: string;
+  description: string;
+  layer: string;
+  responsibilities: string[];
+  files: string[];
+  dependencies: string[];
+  exports: string[];
+}
+
+export interface ApiContract {
+  endpoint: string;
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'IPC' | 'WS' | 'CLI_ARG';
+  description: string;
+  requestPayload?: string;
+  responsePayload?: string;
+}
+
+export interface DataFlowStep {
+  step: number;
+  from: string;
+  to: string;
+  data: string;
+  mechanism: string;
+}
+
+export interface SecurityBoundary {
+  name: string;
+  trustZone: 'public' | 'authenticated' | 'internal' | 'native_os' | 'storage';
+  controls: string[];
+}
+
+export interface ArchitectureRisk {
+  id: string;
+  title: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  mitigation: string;
+}
+
+export interface ArchitectureBlueprint {
+  projectClassification: CanonicalProjectType;
+  projectSummary: string;
+  targetPlatforms: TargetPlatform[];
+  technologyDecisions: Record<string, string>;
+  applicationLayers: ArchitectureLayer[];
+  moduleStructure: ArchitectureModule[];
+  componentResponsibilities: Record<string, string[]>;
+  frontendArchitecture?: {
+    framework: string;
+    routing: string;
+    stateManagement: string;
+    styling: string;
+    responsiveBreakpoints: string[];
+  };
+  backendArchitecture?: {
+    framework: string;
+    pattern: string;
+    apiStyle: 'rest' | 'graphql' | 'grpc' | 'ipc' | 'cli' | 'event_driven';
+    endpoints?: string[];
+  };
+  databaseArchitecture?: {
+    engine: string;
+    paradigm: 'relational' | 'document' | 'key_value' | 'sqlite' | 'embedded' | 'in_memory' | 'none';
+    schemaSummary: string;
+  };
+  apiContracts?: ApiContract[];
+  dataFlow: DataFlowStep[];
+  authRequirements?: {
+    mechanism: string;
+    roles: string[];
+    tokenHandling: string;
+  };
+  fileStorageRequirements?: {
+    strategy: string;
+    allowedFormats: string[];
+    maxSizeBytes?: number;
+  };
+  externalIntegrations: string[];
+  errorHandlingStrategy: string;
+  securityBoundaries: SecurityBoundary[];
+  testingStrategy: {
+    unit: string;
+    integration: string;
+    e2e?: string;
+    automatedCoverageGoalPercent: number;
+  };
+  buildStrategy: {
+    tool: string;
+    artifactType: string;
+    productionCommand: string;
+  };
+  deploymentStrategy: {
+    target: string;
+    containerized: boolean;
+    configFiles: string[];
+  };
+  architectureRisks: ArchitectureRisk[];
+  technicalAssumptions: string[];
+  generatedAt: number;
+}
+
+export type ProjectComplexityLevel = 
+  | 'small' 
+  | 'medium' 
+  | 'large' 
+  | 'very_large' 
+  | 'enterprise_scale';
+
+export interface ProjectComplexityAssessment {
+  level: ProjectComplexityLevel;
+  score: number; // 1 to 100
+  estimatedModulesCount: number;
+  approximateImplementationStages: string[];
+  requiredSpecialistRoles: AgentRole[];
+  integrationComplexity: 'low' | 'moderate' | 'high' | 'critical';
+  testingComplexity: 'low' | 'moderate' | 'high' | 'critical';
+  expectedRuntimeRequirements: string[];
+  externalDependenciesCount: number;
+  majorTechnicalRisks: string[];
+  rationale: string;
+}
+
+export interface PlannedDirectory {
+  path: string;
+  purpose: string;
+}
+
+export interface PlannedFile {
+  path: string;
+  responsibility: string;
+  role: AgentRole;
+  priority: number;
+}
+
+export interface FileStructurePlan {
+  rootDirectories: PlannedDirectory[];
+  suggestedFiles: PlannedFile[];
+  ecosystemConventions: string[];
+}
+
+export interface ArchitectureDependencyItem {
+  name: string;
+  version?: string;
+  category: 'runtime' | 'dev' | 'system' | 'sdk';
+  purpose: string;
+  verifiedInEnvironment: boolean;
+}
+
+export interface ArchitectureDependencyPlan {
+  requiredDependencies: ArchitectureDependencyItem[];
+  optionalDependencies: ArchitectureDependencyItem[];
+  incompatibleVersionsDetected: string[];
+  osSpecificDependencies: Array<{ os: string; dependencies: string[] }>;
+  missingRuntimeRequirements: string[];
+  unnecessaryDuplicates: string[];
+  nativeCompilationRequired: boolean;
+  installationPrerequisites: string[];
+  unverifiableDependencies: string[];
+}
+

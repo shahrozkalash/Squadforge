@@ -516,6 +516,30 @@ export class DatabaseManager {
             db.exec('ALTER TABLE file_versions ADD COLUMN content_hash TEXT;');
           }
         }
+      },
+      {
+        id: 7,
+        name: '007_universal_architecture_engine',
+        up: (db: DatabaseSync) => {
+          const tableInfo = db.prepare('PRAGMA table_info(builds)').all() as Array<{ name: string }>;
+          const existingCols = new Set(tableInfo.map(c => c.name));
+
+          if (!existingCols.has('architecture_blueprint')) {
+            db.exec('ALTER TABLE builds ADD COLUMN architecture_blueprint TEXT;');
+          }
+          if (!existingCols.has('requirements_analysis')) {
+            db.exec('ALTER TABLE builds ADD COLUMN requirements_analysis TEXT;');
+          }
+          if (!existingCols.has('complexity_assessment')) {
+            db.exec('ALTER TABLE builds ADD COLUMN complexity_assessment TEXT;');
+          }
+          if (!existingCols.has('file_structure_plan')) {
+            db.exec('ALTER TABLE builds ADD COLUMN file_structure_plan TEXT;');
+          }
+          if (!existingCols.has('dependency_plan')) {
+            db.exec('ALTER TABLE builds ADD COLUMN dependency_plan TEXT;');
+          }
+        }
       }
     ];
 

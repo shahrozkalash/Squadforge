@@ -313,7 +313,12 @@ export class PersistentDatabase {
         previewMode: b.preview_mode || undefined,
         previewDiagnostic: b.preview_diagnostic || undefined,
         previewRuntimeErrors: safeJsonParse<any>(b.preview_runtime_errors, undefined),
-        previewEntryPoint: b.preview_entry_point || undefined
+        previewEntryPoint: b.preview_entry_point || undefined,
+        architectureBlueprint: safeJsonParse<any>(b.architecture_blueprint, undefined),
+        requirementsAnalysis: safeJsonParse<any>(b.requirements_analysis, undefined),
+        complexityAssessment: safeJsonParse<any>(b.complexity_assessment, undefined),
+        fileStructurePlan: safeJsonParse<any>(b.file_structure_plan, undefined),
+        dependencyPlan: safeJsonParse<any>(b.dependency_plan, undefined)
       };
       this.builds.set(build.id, build);
     }
@@ -1928,8 +1933,9 @@ export class PersistentDatabase {
           verification_feedback, verification_attempts, max_verification_attempts,
           budget_warning_emitted, github_repo, github_branch, github_pr_url,
           project_type, architecture_decisions, requirements_checklist, revisions, live_preview_html,
-          preview_mode, preview_diagnostic, preview_runtime_errors, preview_entry_point
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          preview_mode, preview_diagnostic, preview_runtime_errors, preview_entry_point,
+          architecture_blueprint, requirements_analysis, complexity_assessment, file_structure_plan, dependency_plan
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           user_id = excluded.user_id,
           idea = excluded.idea,
@@ -1966,7 +1972,12 @@ export class PersistentDatabase {
           preview_mode = excluded.preview_mode,
           preview_diagnostic = excluded.preview_diagnostic,
           preview_runtime_errors = excluded.preview_runtime_errors,
-          preview_entry_point = excluded.preview_entry_point
+          preview_entry_point = excluded.preview_entry_point,
+          architecture_blueprint = excluded.architecture_blueprint,
+          requirements_analysis = excluded.requirements_analysis,
+          complexity_assessment = excluded.complexity_assessment,
+          file_structure_plan = excluded.file_structure_plan,
+          dependency_plan = excluded.dependency_plan
       `).run(
         build.id, build.userId, build.idea, build.status, build.createdAt, (build.updatedAt || build.createdAt || this.getTime()),
         build.completedAt || null, JSON.stringify(build.selectedModels || []),
@@ -1989,7 +2000,12 @@ export class PersistentDatabase {
         build.previewMode || null,
         build.previewDiagnostic || null,
         build.previewRuntimeErrors ? JSON.stringify(build.previewRuntimeErrors) : null,
-        build.previewEntryPoint || null
+        build.previewEntryPoint || null,
+        build.architectureBlueprint ? JSON.stringify(build.architectureBlueprint) : null,
+        build.requirementsAnalysis ? JSON.stringify(build.requirementsAnalysis) : null,
+        build.complexityAssessment ? JSON.stringify(build.complexityAssessment) : null,
+        build.fileStructurePlan ? JSON.stringify(build.fileStructurePlan) : null,
+        build.dependencyPlan ? JSON.stringify(build.dependencyPlan) : null
       );
     } catch (err: any) {
       this.handleDatabaseWriteError('saveBuild', err);
