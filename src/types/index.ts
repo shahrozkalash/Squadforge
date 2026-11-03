@@ -19,7 +19,10 @@ export type AgentRole =
   | 'debugging_specialist'
   | 'security_specialist'
   | 'devops_release_specialist'
-  | 'fullstack_developer';
+  | 'fullstack_developer'
+  | 'ui_ux_designer'
+  | 'performance_engineer'
+  | 'documentation_engineer';
 
 export interface AgentSpec {
   role: AgentRole;
@@ -1022,4 +1025,396 @@ export interface ArchitectureDependencyPlan {
   installationPrerequisites: string[];
   unverifiableDependencies: string[];
 }
+
+// ==========================================
+// PHASE 8: COLLABORATIVE AI DEVELOPMENT SYSTEM
+// ==========================================
+
+export type AgentLifecycleState = 
+  | 'idle'
+  | 'assigned'
+  | 'analyzing'
+  | 'working'
+  | 'awaiting_review'
+  | 'revising'
+  | 'blocked'
+  | 'awaiting_approval'
+  | 'completed'
+  | 'failed';
+
+export interface AgentWorkHistoryItem {
+  timestamp: number;
+  action: string;
+  details: string;
+  taskId?: string;
+  relatedFile?: string;
+}
+
+export interface AgentProfile {
+  id: string;
+  buildId: string;
+  role: AgentRole;
+  name: string;
+  modelId: string;
+  status: AgentLifecycleState;
+  capabilities: string[];
+  responsibilities: string[];
+  assignedTaskIds: string[];
+  currentTaskId: string | null;
+  workloadScore: number;
+  collaborationPermissions: string[];
+  workHistory: AgentWorkHistoryItem[];
+  lastActive: number;
+  modelStatus: string;
+  metadata?: Record<string, any>;
+}
+
+export type AgentMessageType = 
+  | 'task_assignment'
+  | 'task_update'
+  | 'progress_report'
+  | 'implementation_proposal'
+  | 'review_request'
+  | 'review_response'
+  | 'code_comment'
+  | 'bug_report'
+  | 'debugging_request'
+  | 'architecture_question'
+  | 'architecture_proposal'
+  | 'architecture_decision'
+  | 'patch_proposal'
+  | 'patch_update'
+  | 'test_report'
+  | 'conflict_report'
+  | 'approval_request'
+  | 'approval_response'
+  | 'knowledge_share';
+
+export interface AgentMessage {
+  id: string;
+  buildId: string;
+  projectId: string;
+  sender: string;
+  senderRole: AgentRole;
+  recipient: string;
+  relatedTaskId?: string;
+  relatedFiles: string[];
+  relevantFileVersions?: Record<string, number>;
+  messageType: AgentMessageType;
+  content: string;
+  structuredMetadata?: Record<string, any>;
+  parentMessageId?: string;
+  depth: number;
+  timestamp: number;
+  processingStatus: 'delivered' | 'processed' | 'pending' | 'flagged';
+}
+
+export type CodeReviewVerdict = 
+  | 'approved'
+  | 'approved_with_suggestions'
+  | 'changes_requested'
+  | 'rejected'
+  | 'blocked';
+
+export interface CodeReviewChecks {
+  logicCorrectness: boolean;
+  errorHandling: boolean;
+  security: boolean;
+  inputValidation: boolean;
+  apiCompatibility: boolean;
+  databaseIntegrity: boolean;
+  performance: boolean;
+  maintainability: boolean;
+  architectureConsistency: boolean;
+  dependencyRisks: boolean;
+  testCoverage: boolean;
+  requirementCompliance: boolean;
+}
+
+export interface CodeReviewComment {
+  id: string;
+  reviewId: string;
+  buildId: string;
+  filePath: string;
+  startLine: number;
+  endLine: number;
+  severity: 'nit' | 'suggestion' | 'warning' | 'critical';
+  explanation: string;
+  suggestedCorrection?: string;
+  relatedRequirement?: string;
+  status: 'open' | 'addressed' | 'dismissed';
+  author: string;
+  authorRole: AgentRole;
+  timestamp: number;
+}
+
+export interface CodeReview {
+  id: string;
+  buildId: string;
+  taskId: string;
+  patchId?: string;
+  authorAgent: string;
+  authorRole: AgentRole;
+  reviewerAgent: string;
+  reviewerRole: AgentRole;
+  changedFiles: string[];
+  baseVersions: Record<string, number>;
+  proposedChanges: Array<{ filePath: string; action: string; diffSnippet?: string }>;
+  requirementsAddressed: string[];
+  implementationExplanation: string;
+  testEvidence: string;
+  verdict: CodeReviewVerdict;
+  status: 'pending' | 'under_review' | 'completed' | 'revising';
+  reviewChecks: CodeReviewChecks;
+  comments: CodeReviewComment[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PatchProposalHunk {
+  actionType: 'patch' | 'create' | 'delete' | 'rename';
+  find?: string;
+  replace?: string;
+  content?: string;
+  oldPath?: string;
+  newPath?: string;
+}
+
+export interface PatchProposal {
+  id: string;
+  buildId: string;
+  authorAgent: string;
+  authorRole: AgentRole;
+  relatedTaskId: string;
+  targetFile: string;
+  baseFileVersion: number;
+  baseContentHash: string;
+  proposedChanges: PatchProposalHunk;
+  changeExplanation: string;
+  expectedBehavior: string;
+  validationResults: {
+    syntaxValid: boolean;
+    pathAllowed: boolean;
+    hashMatched: boolean;
+    versionCurrent: boolean;
+    errors: string[];
+  };
+  reviewStatus: 'pending' | 'reviewed' | 'approved' | 'changes_requested' | 'rejected';
+  applicationStatus: 'proposed' | 'validating' | 'approved' | 'applied' | 'rejected' | 'conflict';
+  appliedFileVersion?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CompetingPatchHunk {
+  patchId: string;
+  authorAgent: string;
+  authorRole?: AgentRole;
+  proposedHunk: string;
+  timestamp: number;
+}
+
+export interface OverlappingHunk {
+  startLine: number;
+  endLine: number;
+  conflictSummary: string;
+}
+
+export interface FileConflict {
+  id: string;
+  buildId: string;
+  filePath: string;
+  baseVersion: number;
+  conflictingVersions: number[];
+  competingPatches: CompetingPatchHunk[];
+  reason: string;
+  overlappingHunks: OverlappingHunk[];
+  resolutionStatus: 'open' | 'investigating' | 'resolved' | 'abandoned';
+  resolvedBy?: string;
+  resolvedContent?: string;
+  resolvedVersion?: number;
+  createdAt: number;
+  resolvedAt?: number;
+}
+
+export type AIChallengeSubject = 
+  | 'Architecture'
+  | 'Database design'
+  | 'API contracts'
+  | 'Security'
+  | 'Performance'
+  | 'Algorithms'
+  | 'Dependencies'
+  | 'Implementation strategy'
+  | 'Testing strategy'
+  | 'Maintainability';
+
+export type AIChallengeOutcome = 
+  | 'pending'
+  | 'accepted'
+  | 'accepted_with_changes'
+  | 'rejected'
+  | 'deferred'
+  | 'escalated_to_human';
+
+export interface AIChallengeArgument {
+  id: string;
+  challengeId: string;
+  roundNumber: number;
+  authorAgent: string;
+  authorRole: AgentRole;
+  argumentType: 'pro' | 'con' | 'alternative' | 'counter_evidence';
+  claim: string;
+  evidence: string;
+  proposedAlternative?: string;
+  identifiedRisks: string[];
+  timestamp: number;
+}
+
+export interface AIChallenge {
+  id: string;
+  buildId: string;
+  taskId?: string;
+  subject: AIChallengeSubject;
+  originalProposal: string;
+  proposerAgent: string;
+  proposerRole: AgentRole;
+  challengerAgent: string;
+  challengerRole: AgentRole;
+  currentRound: number;
+  maxRounds: number;
+  status: 'active' | 'evaluating' | 'concluded';
+  outcome: AIChallengeOutcome;
+  finalDecision?: string;
+  decisionRationale?: string;
+  participants: string[];
+  arguments: AIChallengeArgument[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type DefectSeverity = 'low' | 'medium' | 'high' | 'critical';
+export type DefectStatus = 
+  | 'open'
+  | 'investigating'
+  | 'identified'
+  | 'fixing'
+  | 'awaiting_review'
+  | 'verifying'
+  | 'resolved'
+  | 'reopened';
+
+export interface DefectSolution {
+  solutionId: string;
+  author: string;
+  authorRole?: AgentRole;
+  proposal: string;
+  patchId?: string;
+  score?: number;
+}
+
+export interface CollaborativeDefect {
+  id: string;
+  buildId: string;
+  taskId?: string;
+  title: string;
+  description: string;
+  severity: DefectSeverity;
+  status: DefectStatus;
+  reproductionSteps: string[];
+  expectedBehavior: string;
+  actualBehavior: string;
+  affectedFiles: string[];
+  assignedAgents: string[];
+  rootCause?: string;
+  proposedSolutions: DefectSolution[];
+  selectedPatchId?: string;
+  testEvidence?: string;
+  verificationDetails?: {
+    syntaxPassed: boolean;
+    testsPassed: boolean;
+    evidenceText: string;
+    verifiedAt: number;
+  };
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt?: number;
+}
+
+export type ApprovalOperationType = 
+  | 'destructive_file_op'
+  | 'major_architecture_change'
+  | 'database_migration'
+  | 'security_sensitive_change'
+  | 'large_dependency_change'
+  | 'project_rollback'
+  | 'multi_file_wide_modification';
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled';
+
+export interface HumanApprovalRequest {
+  id: string;
+  buildId: string;
+  taskId?: string;
+  patchId?: string;
+  requestingAgent: string;
+  requestingRole: AgentRole;
+  operationType: ApprovalOperationType;
+  explanation: string;
+  riskLevel: 'low' | 'medium' | 'high' | 'critical';
+  affectedFiles: string[];
+  proposedChanges: string;
+  reviewResults?: string;
+  testResults?: string;
+  status: ApprovalStatus;
+  approvedBy?: string;
+  resolutionNotes?: string;
+  createdAt: number;
+  resolvedAt?: number;
+}
+
+export type KnowledgeCategory = 
+  | 'architecture_decision'
+  | 'interface_contract'
+  | 'implementation_discovery'
+  | 'resolved_defect'
+  | 'known_limitation'
+  | 'reusable_solution'
+  | 'dependency_decision'
+  | 'testing_requirement'
+  | 'important_warning'
+  | 'unresolved_question';
+
+export interface SharedKnowledgeItem {
+  id: string;
+  projectId: string;
+  buildId: string;
+  sourceAgent: string;
+  sourceRole: AgentRole;
+  sourceTaskId?: string;
+  category: KnowledgeCategory;
+  title: string;
+  content: string;
+  relevantFiles: string[];
+  version: number;
+  previousVersionId?: string;
+  supersedesId?: string;
+  status: 'active' | 'superseded' | 'deprecated';
+  supersedeReason?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CollaborationOverview {
+  activeAgents: AgentProfile[];
+  messageCount: number;
+  pendingReviewsCount: number;
+  proposedPatchesCount: number;
+  activeChallengesCount: number;
+  openDefectsCount: number;
+  activeConflictsCount: number;
+  pendingApprovalsCount: number;
+  knowledgeItemsCount: number;
+}
+
 

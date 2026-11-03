@@ -680,4 +680,124 @@ export class TaskManager {
 
     return fullTask;
   }
+
+  /**
+   * Delegates a task intelligently to a specialized agent role based on required capabilities and workload
+   */
+  static delegateTask(
+    buildId: string,
+    taskId: string,
+    delegatorRole: AgentRole,
+    targetRole: AgentRole,
+    rationale: string
+  ): { success: boolean; task?: Task; error?: string } {
+    const task = db.getTask(buildId, taskId);
+    if (!task) return { success: false, error: 'Task not found' };
+
+    // Prevent delegation of already completed tasks
+    if (task.status === 'completed' || task.status === 'done') {
+      return { success: false, error: 'Cannot delegate an already completed task' };
+    }
+
+    // Check workload of target agent
+    const targetProfile = db.getAgentProfile(buildId, targetRole);
+    if (targetProfile && targetProfile.workloadScore >= 95) {
+      return {
+        success: false,
+        error: `Agent ${targetRole} is currently overloaded (workload: ${targetProfile.workloadScore}%). Reassignment deferred.`
+      };
+    }
+
+    db.updateTask(buildId, taskId, {
+      assignedRole: targetRole,
+      status: 'pending',
+      claimedBy: null,
+      leaseExpiresAt: null
+    });
+
+    // Update agent profiles
+    if (targetProfile) {
+      targetProfile.assignedTaskIds = Array.from(new Set([...targetProfile.assignedTaskIds, taskId]));
+      targetProfile.workloadScore = Math.min(100, targetProfile.workloadScore + 15);
+      db.saveAgentProfile(targetProfile);
+    }
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'task_delegated',
+      taskId,
+      details: `Task delegated from [${delegatorRole}] to [${targetRole}]: "${task.title}". Rationale: ${rationale}`
+    });
+
+    return { success: true, task: db.getTask(buildId, taskId) || undefined };
+  }
+
+  /**
+   * Accepts a delegated task assignment
+   */
+  static acceptTask(buildId: string, taskId: string, agentRole: AgentRole): { success: boolean; task?: Task; error?: string } {
+    const task = db.getTask(buildId, taskId);
+    if (!task) return { success: false, error: 'Task not found' };
+
+    db.updateAgentStatus(buildId, agentRole, 'working', `Accepted assignment: "${task.title}"`, taskId);
+    return { success: true, task };
+  }
+
+  /**
+   * Rejects a delegated task assignment with reason, returning it to open board
+   */
+  static rejectTask(buildId: string, taskId: string, agentRole: AgentRole, reason: string): { success: boolean; task?: Task; error?: string } {
+    const task = db.getTask(buildId, taskId);
+    if (!task) return { success: false, error: 'Task not found' };
+
+    db.updateTask(buildId, taskId, {
+      status: 'pending',
+      claimedBy: null,
+      leaseExpiresAt: null,
+      assignedRole: undefined
+    });
+
+    db.updateAgentStatus(buildId, agentRole, 'idle', `Rejected task: "${task.title}". Reason: ${reason}`);
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'task_rejected',
+      taskId,
+      details: `[${agentRole}] rejected task "${task.title}": ${reason}. Returned to open pool.`
+    });
+
+    return { success: true, task: db.getTask(buildId, taskId) || undefined };
+  }
+
+  /**
+   * Escalates a task to the project manager or software architect
+   */
+  static escalateTask(buildId: string, taskId: string, senderRole: AgentRole, reason: string): { success: boolean; task?: Task; error?: string } {
+    const task = db.getTask(buildId, taskId);
+    if (!task) return { success: false, error: 'Task not found' };
+
+    const escalateToRole: AgentRole = senderRole === 'project_manager' ? 'software_architect' : 'project_manager';
+
+    db.updateTask(buildId, taskId, {
+      assignedRole: escalateToRole,
+      priority: 1 // Elevate to top priority fix/escalation
+    });
+
+    db.updateAgentStatus(buildId, senderRole, 'blocked', `Escalated task "${task.title}" to ${escalateToRole}: ${reason}`, taskId);
+
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'task_delegated',
+      taskId,
+      details: `[ESCALATION] [${senderRole}] escalated task "${task.title}" to [${escalateToRole}]: ${reason}`
+    });
+
+    return { success: true, task: db.getTask(buildId, taskId) || undefined };
+  }
 }

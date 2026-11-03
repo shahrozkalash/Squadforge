@@ -1343,6 +1343,153 @@ export class ProjectMemoryService {
     const memory = this.getMemory(buildId, userId);
     return memory?.dependencyPlan;
   }
+
+  // ==========================================
+  // PHASE 8: SHARED TECHNICAL KNOWLEDGE METHODS
+  // ==========================================
+
+  /**
+   * Records a shared technical knowledge item with duplicate and contradiction detection
+   */
+  static recordKnowledgeItem(
+    buildId: string,
+    userId: string,
+    item: {
+      sourceAgent: string;
+      sourceRole: import('../types.js').AgentRole;
+      sourceTaskId?: string;
+      category: import('../types.js').KnowledgeCategory;
+      title: string;
+      content: string;
+      relevantFiles?: string[];
+    }
+  ): { success: boolean; item?: import('../types.js').SharedKnowledgeItem; error?: string } {
+    const build = db.getBuild(buildId);
+    if (!build || build.userId !== userId) {
+      return { success: false, error: 'Unauthorized or build not found' };
+    }
+
+    // Duplicate detection: check if exact title and category already exists in active items
+    const existing = db.getKnowledgeItems(buildId, { category: item.category, status: 'active' });
+    const duplicate = existing.find(e => e.title.toLowerCase().trim() === item.title.toLowerCase().trim());
+    if (duplicate) {
+      return {
+        success: false,
+        error: `Duplicate knowledge item: A knowledge item with title "${item.title}" already exists (ID: ${duplicate.id}). Use supersedeKnowledgeItem to update it.`
+      };
+    }
+
+    const id = `know_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const createdItem: import('../types.js').SharedKnowledgeItem = {
+      id,
+      projectId: buildId,
+      buildId,
+      sourceAgent: item.sourceAgent,
+      sourceRole: item.sourceRole,
+      sourceTaskId: item.sourceTaskId,
+      category: item.category,
+      title: item.title,
+      content: item.content,
+      relevantFiles: item.relevantFiles || [],
+      version: 1,
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    db.saveKnowledgeItem(createdItem);
+
+    // Swarm event
+    db.addEvent({
+      id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      buildId,
+      timestamp: Date.now(),
+      type: 'knowledge_shared',
+      modelId: item.sourceAgent,
+      taskId: item.sourceTaskId,
+      filePath: item.relevantFiles?.[0],
+      details: `[${item.sourceRole}] shared knowledge (${item.category}): "${item.title}"`
+    });
+
+    return { success: true, item: createdItem };
+  }
+
+  /**
+   * Supersedes an existing knowledge item with a new version without erasing history
+   */
+  static supersedeKnowledgeItem(
+    buildId: string,
+    userId: string,
+    params: {
+      targetId: string;
+      sourceAgent: string;
+      sourceRole: import('../types.js').AgentRole;
+      newContent: string;
+      newTitle?: string;
+      supersedeReason: string;
+    }
+  ): { success: boolean; newItem?: import('../types.js').SharedKnowledgeItem; error?: string } {
+    const build = db.getBuild(buildId);
+    if (!build || build.userId !== userId) {
+      return { success: false, error: 'Unauthorized or build not found' };
+    }
+
+    const target = db.getKnowledgeItem(params.targetId);
+    if (!target) {
+      return { success: false, error: `Knowledge item ${params.targetId} not found` };
+    }
+
+    // Mark previous as superseded (preserve history)
+    target.status = 'superseded';
+    target.supersedeReason = params.supersedeReason;
+    target.updatedAt = Date.now();
+    db.saveKnowledgeItem(target);
+
+    // Create new version linked to previous
+    const newId = `know_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const newItem: import('../types.js').SharedKnowledgeItem = {
+      id: newId,
+      projectId: buildId,
+      buildId,
+      sourceAgent: params.sourceAgent,
+      sourceRole: params.sourceRole,
+      sourceTaskId: target.sourceTaskId,
+      category: target.category,
+      title: params.newTitle || target.title,
+      content: params.newContent,
+      relevantFiles: target.relevantFiles,
+      version: target.version + 1,
+      previousVersionId: target.id,
+      supersedesId: target.id,
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    db.saveKnowledgeItem(newItem);
+
+    return { success: true, newItem };
+  }
+
+  /**
+   * Searches and filters shared technical knowledge
+   */
+  static searchKnowledge(
+    buildId: string,
+    userId: string,
+    filter?: { category?: string; search?: string; status?: string }
+  ): import('../types.js').SharedKnowledgeItem[] {
+    const build = db.getBuild(buildId);
+    if (!build || build.userId !== userId) {
+      return [];
+    }
+
+    return db.getKnowledgeItems(buildId, {
+      category: filter?.category,
+      search: filter?.search,
+      status: filter?.status || 'active'
+    });
+  }
 }
 
 export const projectMemoryService = ProjectMemoryService;

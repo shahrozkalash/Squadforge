@@ -8,6 +8,7 @@ import { ProjectCodeView } from './components/ProjectCodeView.js';
 import { MergeHistoryView } from './components/MergeHistoryView.js';
 import { BuildHistoryView } from './components/BuildHistoryView.js';
 import { ArchitectureView } from './components/ArchitectureView.js';
+import { CollaborationView } from './components/CollaborationView.js';
 import { SettingsView } from './components/SettingsView.js';
 import { UsageDashboardView } from './components/UsageDashboardView.js';
 import { AuthModal } from './components/AuthModal.js';
@@ -45,6 +46,10 @@ function DashboardContent() {
 
         {currentTab === 'live' && (
           <LiveSwarmView onViewCode={() => setCurrentTab('code')} />
+        )}
+
+        {currentTab === 'collaboration' && (
+          <CollaborationView />
         )}
 
         {currentTab === 'architecture' && (

@@ -20,7 +20,19 @@ import {
   PatchAction,
   CreateFileAction,
   DeleteFileAction,
-  RenameFileAction
+  RenameFileAction,
+  AgentProfile,
+  AgentLifecycleState,
+  AgentMessage,
+  CodeReview,
+  CodeReviewComment,
+  PatchProposal,
+  FileConflict,
+  AIChallenge,
+  AIChallengeArgument,
+  CollaborativeDefect,
+  HumanApprovalRequest,
+  SharedKnowledgeItem
 } from './types.js';
 import { ProjectMemory } from './swarm/projectMemory.js';
 import { 
@@ -3226,6 +3238,1269 @@ export class PersistentDatabase {
     } catch (err: any) {
       this.handleDatabaseWriteError('deleteProjectMemory', err);
     }
+  }
+
+  // =========================================================================
+  // PHASE 8: COLLABORATIVE AGENT SWARM STORAGE & QUERY METHODS
+  // =========================================================================
+
+  // --- 1. Agent Collaboration Profiles ---
+  public saveAgentProfile(profile: AgentProfile): AgentProfile {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO agent_collaboration_profiles (
+          id, build_id, role, name, model_id, status, capabilities,
+          responsibilities, assigned_task_ids, current_task_id,
+          workload_score, collaboration_permissions, work_history,
+          last_active, model_status, metadata
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        profile.id,
+        profile.buildId,
+        profile.role,
+        profile.name,
+        profile.modelId,
+        profile.status,
+        JSON.stringify(profile.capabilities || []),
+        JSON.stringify(profile.responsibilities || []),
+        JSON.stringify(profile.assignedTaskIds || []),
+        profile.currentTaskId || null,
+        profile.workloadScore || 0.0,
+        JSON.stringify(profile.collaborationPermissions || []),
+        JSON.stringify(profile.workHistory || []),
+        profile.lastActive || Date.now(),
+        profile.modelStatus || 'idle',
+        profile.metadata ? JSON.stringify(profile.metadata) : null
+      );
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveAgentProfile', err);
+    }
+    return profile;
+  }
+
+  public getAgentProfiles(buildId: string): AgentProfile[] {
+    try {
+      const rows = this.dbManager.db.prepare(
+        'SELECT * FROM agent_collaboration_profiles WHERE build_id = ? ORDER BY role ASC'
+      ).all(buildId) as any[];
+
+      return rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        role: r.role,
+        name: r.name,
+        modelId: r.model_id,
+        status: r.status,
+        capabilities: safeJsonParse<string[]>(r.capabilities, []),
+        responsibilities: safeJsonParse<string[]>(r.responsibilities, []),
+        assignedTaskIds: safeJsonParse<string[]>(r.assigned_task_ids, []),
+        currentTaskId: r.current_task_id || null,
+        workloadScore: r.workload_score || 0,
+        collaborationPermissions: safeJsonParse<string[]>(r.collaboration_permissions, []),
+        workHistory: safeJsonParse<any[]>(r.work_history, []),
+        lastActive: r.last_active,
+        modelStatus: r.model_status || 'idle',
+        metadata: r.metadata ? safeJsonParse(r.metadata, undefined) : undefined
+      }));
+    } catch (err: any) {
+      console.warn(`[STORAGE] getAgentProfiles error for ${buildId}:`, err?.message);
+      return [];
+    }
+  }
+
+  public getAgentProfile(buildId: string, roleOrId: string): AgentProfile | undefined {
+    try {
+      const row = this.dbManager.db.prepare(
+        'SELECT * FROM agent_collaboration_profiles WHERE build_id = ? AND (id = ? OR role = ?) LIMIT 1'
+      ).get(buildId, roleOrId, roleOrId) as any;
+
+      if (!row) return undefined;
+      return {
+        id: row.id,
+        buildId: row.build_id,
+        role: row.role,
+        name: row.name,
+        modelId: row.model_id,
+        status: row.status,
+        capabilities: safeJsonParse<string[]>(row.capabilities, []),
+        responsibilities: safeJsonParse<string[]>(row.responsibilities, []),
+        assignedTaskIds: safeJsonParse<string[]>(row.assigned_task_ids, []),
+        currentTaskId: row.current_task_id || null,
+        workloadScore: row.workload_score || 0,
+        collaborationPermissions: safeJsonParse<string[]>(row.collaboration_permissions, []),
+        workHistory: safeJsonParse<any[]>(row.work_history, []),
+        lastActive: row.last_active,
+        modelStatus: row.model_status || 'idle',
+        metadata: row.metadata ? safeJsonParse(row.metadata, undefined) : undefined
+      };
+    } catch (err: any) {
+      console.warn('[STORAGE] getAgentProfile error:', err?.message);
+      return undefined;
+    }
+  }
+
+  public updateAgentStatus(buildId: string, roleOrId: string, status: AgentLifecycleState, summary?: string, taskId?: string): void {
+    const existing = this.getAgentProfile(buildId, roleOrId);
+    if (!existing) return;
+
+    existing.status = status;
+    existing.lastActive = this.getTime();
+    if (taskId !== undefined) {
+      existing.currentTaskId = taskId;
+    }
+    if (summary) {
+      existing.workHistory = [
+        {
+          timestamp: existing.lastActive,
+          action: `status_change:${status}`,
+          details: summary,
+          taskId: existing.currentTaskId || undefined
+        },
+        ...(existing.workHistory || []).slice(0, 24)
+      ];
+    }
+    this.saveAgentProfile(existing);
+  }
+
+  // --- 2. Agent Messages ---
+  public saveAgentMessage(msg: AgentMessage): AgentMessage {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO agent_messages (
+          id, build_id, project_id, sender, sender_role, recipient,
+          related_task_id, related_files, relevant_file_versions,
+          message_type, content, structured_metadata, parent_message_id,
+          depth, timestamp, processing_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        msg.id,
+        msg.buildId,
+        msg.projectId,
+        msg.sender,
+        msg.senderRole,
+        msg.recipient || 'broadcast',
+        msg.relatedTaskId || null,
+        JSON.stringify(msg.relatedFiles || []),
+        msg.relevantFileVersions ? JSON.stringify(msg.relevantFileVersions) : null,
+        msg.messageType,
+        msg.content,
+        msg.structuredMetadata ? JSON.stringify(msg.structuredMetadata) : null,
+        msg.parentMessageId || null,
+        msg.depth || 0,
+        msg.timestamp || this.getTime(),
+        msg.processingStatus || 'delivered'
+      );
+
+      this.broadcast(msg.buildId, 'agent_message', msg);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveAgentMessage', err);
+    }
+    return msg;
+  }
+
+  public getAgentMessages(
+    buildId: string, 
+    options?: { messageType?: string; sender?: string; taskId?: string; search?: string; limit?: number; offset?: number }
+  ): { messages: AgentMessage[]; total: number } {
+    try {
+      let query = 'SELECT * FROM agent_messages WHERE build_id = ?';
+      const params: any[] = [buildId];
+
+      if (options?.messageType) {
+        query += ' AND message_type = ?';
+        params.push(options.messageType);
+      }
+      if (options?.sender) {
+        query += ' AND (sender = ? OR sender_role = ?)';
+        params.push(options.sender, options.sender);
+      }
+      if (options?.taskId) {
+        query += ' AND related_task_id = ?';
+        params.push(options.taskId);
+      }
+      if (options?.search) {
+        query += ' AND content LIKE ?';
+        params.push(`%${options.search}%`);
+      }
+
+      // Count total
+      const countQuery = query.replace('SELECT *', 'SELECT COUNT(*) as total');
+      const countRow = this.dbManager.db.prepare(countQuery).get(...params) as { total: number };
+      const total = countRow?.total || 0;
+
+      query += ' ORDER BY timestamp DESC';
+      if (options?.limit) {
+        query += ' LIMIT ? OFFSET ?';
+        params.push(options.limit, options.offset || 0);
+      }
+
+      const rows = this.dbManager.db.prepare(query).all(...params) as any[];
+      const messages: AgentMessage[] = rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        projectId: r.project_id,
+        sender: r.sender,
+        senderRole: r.sender_role,
+        recipient: r.recipient,
+        relatedTaskId: r.related_task_id || undefined,
+        relatedFiles: safeJsonParse<string[]>(r.related_files, []),
+        relevantFileVersions: r.relevant_file_versions ? safeJsonParse(r.relevant_file_versions, undefined) : undefined,
+        messageType: r.message_type,
+        content: r.content,
+        structuredMetadata: r.structured_metadata ? safeJsonParse(r.structured_metadata, undefined) : undefined,
+        parentMessageId: r.parent_message_id || undefined,
+        depth: r.depth || 0,
+        timestamp: r.timestamp,
+        processingStatus: r.processing_status
+      }));
+
+      return { messages, total };
+    } catch (err: any) {
+      console.warn(`[STORAGE] getAgentMessages error:`, err?.message);
+      return { messages: [], total: 0 };
+    }
+  }
+
+  public getAgentMessage(id: string): AgentMessage | undefined {
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM agent_messages WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        buildId: r.build_id,
+        projectId: r.project_id,
+        sender: r.sender,
+        senderRole: r.sender_role,
+        recipient: r.recipient,
+        relatedTaskId: r.related_task_id || undefined,
+        relatedFiles: safeJsonParse<string[]>(r.related_files, []),
+        relevantFileVersions: r.relevant_file_versions ? safeJsonParse(r.relevant_file_versions, undefined) : undefined,
+        messageType: r.message_type,
+        content: r.content,
+        structuredMetadata: r.structured_metadata ? safeJsonParse(r.structured_metadata, undefined) : undefined,
+        parentMessageId: r.parent_message_id || undefined,
+        depth: r.depth || 0,
+        timestamp: r.timestamp,
+        processingStatus: r.processing_status
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  // --- 3. Code Reviews ---
+  public saveCodeReview(review: CodeReview): CodeReview {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO code_reviews (
+          id, build_id, task_id, patch_id, author_agent, author_role,
+          reviewer_agent, reviewer_role, changed_files, base_versions,
+          proposed_changes, requirements_addressed, implementation_explanation,
+          test_evidence, verdict, status, review_checks, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        review.id,
+        review.buildId,
+        review.taskId,
+        review.patchId || null,
+        review.authorAgent,
+        review.authorRole,
+        review.reviewerAgent,
+        review.reviewerRole,
+        JSON.stringify(review.changedFiles || []),
+        JSON.stringify(review.baseVersions || {}),
+        JSON.stringify(review.proposedChanges || []),
+        JSON.stringify(review.requirementsAddressed || []),
+        review.implementationExplanation,
+        review.testEvidence,
+        review.verdict,
+        review.status,
+        JSON.stringify(review.reviewChecks || {}),
+        review.createdAt,
+        review.updatedAt || review.createdAt
+      );
+
+      // Persist any included comments
+      if (Array.isArray(review.comments) && review.comments.length > 0) {
+        for (const comment of review.comments) {
+          this.addReviewComment(comment);
+        }
+      }
+
+      this.broadcast(review.buildId, 'code_review_updated', review);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveCodeReview', err);
+    }
+    return review;
+  }
+
+  public getCodeReviews(
+    buildId: string, 
+    options?: { taskId?: string; status?: string; limit?: number; offset?: number }
+  ): { reviews: CodeReview[]; total: number } {
+    try {
+      let query = 'SELECT * FROM code_reviews WHERE build_id = ?';
+      const params: any[] = [buildId];
+
+      if (options?.taskId) {
+        query += ' AND task_id = ?';
+        params.push(options.taskId);
+      }
+      if (options?.status) {
+        query += ' AND status = ?';
+        params.push(options.status);
+      }
+
+      const countRow = this.dbManager.db.prepare(query.replace('SELECT *', 'SELECT COUNT(*) as total')).get(...params) as { total: number };
+      const total = countRow?.total || 0;
+
+      query += ' ORDER BY created_at DESC';
+      if (options?.limit) {
+        query += ' LIMIT ? OFFSET ?';
+        params.push(options.limit, options.offset || 0);
+      }
+
+      const rows = this.dbManager.db.prepare(query).all(...params) as any[];
+      const reviews: CodeReview[] = rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id,
+        patchId: r.patch_id || undefined,
+        authorAgent: r.author_agent,
+        authorRole: r.author_role,
+        reviewerAgent: r.reviewer_agent,
+        reviewerRole: r.reviewer_role,
+        changedFiles: safeJsonParse<string[]>(r.changed_files, []),
+        baseVersions: safeJsonParse<Record<string, number>>(r.base_versions, {}),
+        proposedChanges: safeJsonParse<any[]>(r.proposed_changes, []),
+        requirementsAddressed: safeJsonParse<string[]>(r.requirements_addressed, []),
+        implementationExplanation: r.implementation_explanation,
+        testEvidence: r.test_evidence,
+        verdict: r.verdict,
+        status: r.status,
+        reviewChecks: safeJsonParse<any>(r.review_checks, {
+          logicCorrectness: true,
+          errorHandling: true,
+          security: true,
+          inputValidation: true,
+          apiCompatibility: true,
+          databaseIntegrity: true,
+          performance: true,
+          maintainability: true,
+          architectureConsistency: true,
+          dependencyRisks: true,
+          testCoverage: true,
+          requirementCompliance: true
+        }),
+        comments: this.getReviewComments(r.id),
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      }));
+
+      return { reviews, total };
+    } catch {
+      return { reviews: [], total: 0 };
+    }
+  }
+
+  public getCodeReview(id: string): CodeReview | undefined {
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM code_reviews WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id,
+        patchId: r.patch_id || undefined,
+        authorAgent: r.author_agent,
+        authorRole: r.author_role,
+        reviewerAgent: r.reviewer_agent,
+        reviewerRole: r.reviewer_role,
+        changedFiles: safeJsonParse<string[]>(r.changed_files, []),
+        baseVersions: safeJsonParse<Record<string, number>>(r.base_versions, {}),
+        proposedChanges: safeJsonParse<any[]>(r.proposed_changes, []),
+        requirementsAddressed: safeJsonParse<string[]>(r.requirements_addressed, []),
+        implementationExplanation: r.implementation_explanation,
+        testEvidence: r.test_evidence,
+        verdict: r.verdict,
+        status: r.status,
+        reviewChecks: safeJsonParse<any>(r.review_checks, {}),
+        comments: this.getReviewComments(r.id),
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public updateCodeReview(id: string, updates: Partial<CodeReview>): CodeReview | undefined {
+    const existing = this.getCodeReview(id);
+    if (!existing) return undefined;
+
+    const merged: CodeReview = {
+      ...existing,
+      ...updates,
+      updatedAt: this.getTime()
+    };
+    return this.saveCodeReview(merged);
+  }
+
+  public addReviewComment(comment: CodeReviewComment): CodeReviewComment {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO code_review_comments (
+          id, review_id, build_id, file_path, start_line, end_line,
+          severity, explanation, suggested_correction, related_requirement,
+          status, author, author_role, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        comment.id,
+        comment.reviewId,
+        comment.buildId,
+        comment.filePath,
+        comment.startLine,
+        comment.endLine,
+        comment.severity,
+        comment.explanation,
+        comment.suggestedCorrection || null,
+        comment.relatedRequirement || null,
+        comment.status || 'open',
+        comment.author,
+        comment.authorRole,
+        comment.timestamp || this.getTime()
+      );
+    } catch (err: any) {
+      this.handleDatabaseWriteError('addReviewComment', err);
+    }
+    return comment;
+  }
+
+  public getReviewComments(reviewId: string): CodeReviewComment[] {
+    try {
+      const rows = this.dbManager.db.prepare(
+        'SELECT * FROM code_review_comments WHERE review_id = ? ORDER BY start_line ASC'
+      ).all(reviewId) as any[];
+
+      return rows.map(r => ({
+        id: r.id,
+        reviewId: r.review_id,
+        buildId: r.build_id,
+        filePath: r.file_path,
+        startLine: r.start_line,
+        endLine: r.end_line,
+        severity: r.severity,
+        explanation: r.explanation,
+        suggestedCorrection: r.suggested_correction || undefined,
+        relatedRequirement: r.related_requirement || undefined,
+        status: r.status,
+        author: r.author,
+        authorRole: r.author_role,
+        timestamp: r.timestamp
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public updateReviewComment(commentId: string, updates: Partial<CodeReviewComment>): CodeReviewComment | undefined {
+    try {
+      const row = this.dbManager.db.prepare('SELECT * FROM code_review_comments WHERE id = ?').get(commentId) as any;
+      if (!row) return undefined;
+
+      const updated: CodeReviewComment = {
+        id: row.id,
+        reviewId: row.review_id,
+        buildId: row.build_id,
+        filePath: updates.filePath || row.file_path,
+        startLine: updates.startLine !== undefined ? updates.startLine : row.start_line,
+        endLine: updates.endLine !== undefined ? updates.endLine : row.end_line,
+        severity: updates.severity || row.severity,
+        explanation: updates.explanation || row.explanation,
+        suggestedCorrection: updates.suggestedCorrection !== undefined ? updates.suggestedCorrection : (row.suggested_correction || undefined),
+        relatedRequirement: updates.relatedRequirement !== undefined ? updates.relatedRequirement : (row.related_requirement || undefined),
+        status: updates.status || row.status,
+        author: row.author,
+        authorRole: row.author_role,
+        timestamp: row.timestamp
+      };
+
+      this.addReviewComment(updated);
+      return updated;
+    } catch {
+      return undefined;
+    }
+  }
+
+  // --- 4. Patch Proposals ---
+  public savePatchProposal(patch: PatchProposal): PatchProposal {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO patch_proposals (
+          id, build_id, author_agent, author_role, related_task_id,
+          target_file, base_file_version, base_content_hash, proposed_changes,
+          change_explanation, expected_behavior, validation_results,
+          review_status, application_status, applied_file_version,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        patch.id,
+        patch.buildId,
+        patch.authorAgent,
+        patch.authorRole,
+        patch.relatedTaskId,
+        patch.targetFile,
+        patch.baseFileVersion,
+        patch.baseContentHash,
+        JSON.stringify(patch.proposedChanges || {}),
+        patch.changeExplanation,
+        patch.expectedBehavior,
+        JSON.stringify(patch.validationResults || {}),
+        patch.reviewStatus,
+        patch.applicationStatus,
+        patch.appliedFileVersion || null,
+        patch.createdAt,
+        patch.updatedAt || patch.createdAt
+      );
+
+      this.broadcast(patch.buildId, 'patch_proposal_updated', patch);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('savePatchProposal', err);
+    }
+    return patch;
+  }
+
+  public getPatchProposals(buildId: string, options?: { targetFile?: string; status?: string }): PatchProposal[] {
+    try {
+      let query = 'SELECT * FROM patch_proposals WHERE build_id = ?';
+      const params: any[] = [buildId];
+
+      if (options?.targetFile) {
+        query += ' AND target_file = ?';
+        params.push(options.targetFile);
+      }
+      if (options?.status) {
+        query += ' AND application_status = ?';
+        params.push(options.status);
+      }
+
+      query += ' ORDER BY created_at DESC';
+      const rows = this.dbManager.db.prepare(query).all(...params) as any[];
+
+      return rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        authorAgent: r.author_agent,
+        authorRole: r.author_role,
+        relatedTaskId: r.related_task_id,
+        targetFile: r.target_file,
+        baseFileVersion: r.base_file_version,
+        baseContentHash: r.base_content_hash,
+        proposedChanges: safeJsonParse<any>(r.proposed_changes, { actionType: 'patch' }),
+        changeExplanation: r.change_explanation,
+        expectedBehavior: r.expected_behavior,
+        validationResults: safeJsonParse<any>(r.validation_results, {
+          syntaxValid: true,
+          pathAllowed: true,
+          hashMatched: true,
+          versionCurrent: true,
+          errors: []
+        }),
+        reviewStatus: r.review_status,
+        applicationStatus: r.application_status,
+        appliedFileVersion: r.applied_file_version || undefined,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public getPatchProposal(id: string): PatchProposal | undefined {
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM patch_proposals WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        buildId: r.build_id,
+        authorAgent: r.author_agent,
+        authorRole: r.author_role,
+        relatedTaskId: r.related_task_id,
+        targetFile: r.target_file,
+        baseFileVersion: r.base_file_version,
+        baseContentHash: r.base_content_hash,
+        proposedChanges: safeJsonParse<any>(r.proposed_changes, { actionType: 'patch' }),
+        changeExplanation: r.change_explanation,
+        expectedBehavior: r.expected_behavior,
+        validationResults: safeJsonParse<any>(r.validation_results, {
+          syntaxValid: true,
+          pathAllowed: true,
+          hashMatched: true,
+          versionCurrent: true,
+          errors: []
+        }),
+        reviewStatus: r.review_status,
+        applicationStatus: r.application_status,
+        appliedFileVersion: r.applied_file_version || undefined,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public updatePatchProposal(id: string, updates: Partial<PatchProposal>): PatchProposal | undefined {
+    const existing = this.getPatchProposal(id);
+    if (!existing) return undefined;
+
+    const merged: PatchProposal = {
+      ...existing,
+      ...updates,
+      updatedAt: this.getTime()
+    };
+    return this.savePatchProposal(merged);
+  }
+
+  // --- 5. File Conflicts ---
+  public saveFileConflict(conflict: FileConflict): FileConflict {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO file_conflicts (
+          id, build_id, file_path, base_version, conflicting_versions,
+          competing_patches, reason, overlapping_hunks, resolution_status,
+          resolved_by, resolved_content, resolved_version, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        conflict.id,
+        conflict.buildId,
+        conflict.filePath,
+        conflict.baseVersion,
+        JSON.stringify(conflict.conflictingVersions || []),
+        JSON.stringify(conflict.competingPatches || []),
+        conflict.reason,
+        JSON.stringify(conflict.overlappingHunks || []),
+        conflict.resolutionStatus,
+        conflict.resolvedBy || null,
+        conflict.resolvedContent || null,
+        conflict.resolvedVersion || null,
+        conflict.createdAt,
+        conflict.resolvedAt || null
+      );
+
+      this.broadcast(conflict.buildId, 'file_conflict_updated', conflict);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveFileConflict', err);
+    }
+    return conflict;
+  }
+
+  public getFileConflicts(buildId: string, status?: string): FileConflict[] {
+    try {
+      let query = 'SELECT * FROM file_conflicts WHERE build_id = ?';
+      const params: any[] = [buildId];
+
+      if (status) {
+        query += ' AND resolution_status = ?';
+        params.push(status);
+      }
+      query += ' ORDER BY created_at DESC';
+
+      const rows = this.dbManager.db.prepare(query).all(...params) as any[];
+      return rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        filePath: r.file_path,
+        baseVersion: r.base_version,
+        conflictingVersions: safeJsonParse<number[]>(r.conflicting_versions, []),
+        competingPatches: safeJsonParse<any[]>(r.competing_patches, []),
+        reason: r.reason,
+        overlappingHunks: safeJsonParse<any[]>(r.overlapping_hunks, []),
+        resolutionStatus: r.resolution_status,
+        resolvedBy: r.resolved_by || undefined,
+        resolvedContent: r.resolved_content || undefined,
+        resolvedVersion: r.resolved_version || undefined,
+        createdAt: r.created_at,
+        resolvedAt: r.resolved_at || undefined
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public getFileConflict(id: string): FileConflict | undefined {
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM file_conflicts WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        buildId: r.build_id,
+        filePath: r.file_path,
+        baseVersion: r.base_version,
+        conflictingVersions: safeJsonParse<number[]>(r.conflicting_versions, []),
+        competingPatches: safeJsonParse<any[]>(r.competing_patches, []),
+        reason: r.reason,
+        overlappingHunks: safeJsonParse<any[]>(r.overlapping_hunks, []),
+        resolutionStatus: r.resolution_status,
+        resolvedBy: r.resolved_by || undefined,
+        resolvedContent: r.resolved_content || undefined,
+        resolvedVersion: r.resolved_version || undefined,
+        createdAt: r.created_at,
+        resolvedAt: r.resolved_at || undefined
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public updateFileConflict(id: string, updates: Partial<FileConflict>): FileConflict | undefined {
+    const existing = this.getFileConflict(id);
+    if (!existing) return undefined;
+
+    const merged: FileConflict = {
+      ...existing,
+      ...updates
+    };
+    return this.saveFileConflict(merged);
+  }
+
+  // --- 6. AI Challenges ---
+  public saveAIChallenge(challenge: AIChallenge): AIChallenge {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO ai_challenges (
+          id, build_id, task_id, subject, original_proposal,
+          proposer_agent, proposer_role, challenger_agent, challenger_role,
+          current_round, max_rounds, status, outcome, final_decision,
+          decision_rationale, participants, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        challenge.id,
+        challenge.buildId,
+        challenge.taskId || null,
+        challenge.subject,
+        challenge.originalProposal,
+        challenge.proposerAgent,
+        challenge.proposerRole,
+        challenge.challengerAgent,
+        challenge.challengerRole,
+        challenge.currentRound || 1,
+        challenge.maxRounds || 3,
+        challenge.status || 'active',
+        challenge.outcome || 'pending',
+        challenge.finalDecision || null,
+        challenge.decisionRationale || null,
+        JSON.stringify(challenge.participants || []),
+        challenge.createdAt,
+        challenge.updatedAt || challenge.createdAt
+      );
+
+      // Save arguments
+      if (Array.isArray(challenge.arguments)) {
+        for (const arg of challenge.arguments) {
+          this.addChallengeArgument(arg);
+        }
+      }
+
+      this.broadcast(challenge.buildId, 'ai_challenge_updated', challenge);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveAIChallenge', err);
+    }
+    return challenge;
+  }
+
+  public getAIChallenges(buildId: string): AIChallenge[] {
+    try {
+      const rows = this.dbManager.db.prepare(
+        'SELECT * FROM ai_challenges WHERE build_id = ? ORDER BY created_at DESC'
+      ).all(buildId) as any[];
+
+      return rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id || undefined,
+        subject: r.subject,
+        originalProposal: r.original_proposal,
+        proposerAgent: r.proposer_agent,
+        proposerRole: r.proposer_role,
+        challengerAgent: r.challenger_agent,
+        challengerRole: r.challenger_role,
+        currentRound: r.current_round,
+        maxRounds: r.max_rounds,
+        status: r.status,
+        outcome: r.outcome,
+        finalDecision: r.final_decision || undefined,
+        decisionRationale: r.decision_rationale || undefined,
+        participants: safeJsonParse<string[]>(r.participants, []),
+        arguments: this.getChallengeArguments(r.id),
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public getAIChallenge(id: string): AIChallenge | undefined {
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM ai_challenges WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id || undefined,
+        subject: r.subject,
+        originalProposal: r.original_proposal,
+        proposerAgent: r.proposer_agent,
+        proposerRole: r.proposer_role,
+        challengerAgent: r.challenger_agent,
+        challengerRole: r.challenger_role,
+        currentRound: r.current_round,
+        maxRounds: r.max_rounds,
+        status: r.status,
+        outcome: r.outcome,
+        finalDecision: r.final_decision || undefined,
+        decisionRationale: r.decision_rationale || undefined,
+        participants: safeJsonParse<string[]>(r.participants, []),
+        arguments: this.getChallengeArguments(r.id),
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public updateAIChallenge(id: string, updates: Partial<AIChallenge>): AIChallenge | undefined {
+    const existing = this.getAIChallenge(id);
+    if (!existing) return undefined;
+
+    const merged: AIChallenge = {
+      ...existing,
+      ...updates,
+      updatedAt: this.getTime()
+    };
+    return this.saveAIChallenge(merged);
+  }
+
+  public addChallengeArgument(arg: AIChallengeArgument): AIChallengeArgument {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO ai_challenge_arguments (
+          id, challenge_id, build_id, round_number, author_agent,
+          author_role, argument_type, claim, evidence, proposed_alternative,
+          identified_risks, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        arg.id,
+        arg.challengeId,
+        (arg as any).buildId || this.getAIChallenge(arg.challengeId)?.buildId || '',
+        arg.roundNumber,
+        arg.authorAgent,
+        arg.authorRole,
+        arg.argumentType,
+        arg.claim,
+        arg.evidence,
+        arg.proposedAlternative || null,
+        JSON.stringify(arg.identifiedRisks || []),
+        arg.timestamp || this.getTime()
+      );
+    } catch (err: any) {
+      this.handleDatabaseWriteError('addChallengeArgument', err);
+    }
+    return arg;
+  }
+
+  public getChallengeArguments(challengeId: string): AIChallengeArgument[] {
+    try {
+      const rows = this.dbManager.db.prepare(
+        'SELECT * FROM ai_challenge_arguments WHERE challenge_id = ? ORDER BY round_number ASC, timestamp ASC'
+      ).all(challengeId) as any[];
+
+      return rows.map(r => ({
+        id: r.id,
+        challengeId: r.challenge_id,
+        roundNumber: r.round_number,
+        authorAgent: r.author_agent,
+        authorRole: r.author_role,
+        argumentType: r.argument_type,
+        claim: r.claim,
+        evidence: r.evidence,
+        proposedAlternative: r.proposed_alternative || undefined,
+        identifiedRisks: safeJsonParse<string[]>(r.identified_risks, []),
+        timestamp: r.timestamp
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  // --- 7. Collaborative Defects ---
+  public saveDefect(defect: CollaborativeDefect): CollaborativeDefect {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO collaborative_defects (
+          id, build_id, task_id, title, description, severity, status,
+          reproduction_steps, expected_behavior, actual_behavior,
+          affected_files, assigned_agents, root_cause, proposed_solutions,
+          selected_patch_id, test_evidence, verification_details,
+          created_at, updated_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        defect.id,
+        defect.buildId,
+        defect.taskId || null,
+        defect.title,
+        defect.description,
+        defect.severity,
+        defect.status,
+        JSON.stringify(defect.reproductionSteps || []),
+        defect.expectedBehavior,
+        defect.actualBehavior,
+        JSON.stringify(defect.affectedFiles || []),
+        JSON.stringify(defect.assignedAgents || []),
+        defect.rootCause || null,
+        JSON.stringify(defect.proposedSolutions || []),
+        defect.selectedPatchId || null,
+        defect.testEvidence || null,
+        defect.verificationDetails ? JSON.stringify(defect.verificationDetails) : null,
+        defect.createdAt,
+        defect.updatedAt || defect.createdAt,
+        defect.resolvedAt || null
+      );
+
+      this.broadcast(defect.buildId, 'defect_updated', defect);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveDefect', err);
+    }
+    return defect;
+  }
+
+  public getDefects(buildId: string, options?: { status?: string; severity?: string }): CollaborativeDefect[] {
+    try {
+      let query = 'SELECT * FROM collaborative_defects WHERE build_id = ?';
+      const params: any[] = [buildId];
+
+      if (options?.status) {
+        query += ' AND status = ?';
+        params.push(options.status);
+      }
+      if (options?.severity) {
+        query += ' AND severity = ?';
+        params.push(options.severity);
+      }
+      query += ' ORDER BY created_at DESC';
+
+      const rows = this.dbManager.db.prepare(query).all(...params) as any[];
+      return rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id || undefined,
+        title: r.title,
+        description: r.description,
+        severity: r.severity,
+        status: r.status,
+        reproductionSteps: safeJsonParse<string[]>(r.reproduction_steps, []),
+        expectedBehavior: r.expected_behavior,
+        actualBehavior: r.actual_behavior,
+        affectedFiles: safeJsonParse<string[]>(r.affected_files, []),
+        assignedAgents: safeJsonParse<string[]>(r.assigned_agents, []),
+        rootCause: r.root_cause || undefined,
+        proposedSolutions: safeJsonParse<any[]>(r.proposed_solutions, []),
+        selectedPatchId: r.selected_patch_id || undefined,
+        testEvidence: r.test_evidence || undefined,
+        verificationDetails: r.verification_details ? safeJsonParse(r.verification_details, undefined) : undefined,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+        resolvedAt: r.resolved_at || undefined
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public getDefect(id: string): CollaborativeDefect | undefined {
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM collaborative_defects WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id || undefined,
+        title: r.title,
+        description: r.description,
+        severity: r.severity,
+        status: r.status,
+        reproductionSteps: safeJsonParse<string[]>(r.reproduction_steps, []),
+        expectedBehavior: r.expected_behavior,
+        actualBehavior: r.actual_behavior,
+        affectedFiles: safeJsonParse<string[]>(r.affected_files, []),
+        assignedAgents: safeJsonParse<string[]>(r.assigned_agents, []),
+        rootCause: r.root_cause || undefined,
+        proposedSolutions: safeJsonParse<any[]>(r.proposed_solutions, []),
+        selectedPatchId: r.selected_patch_id || undefined,
+        testEvidence: r.test_evidence || undefined,
+        verificationDetails: r.verification_details ? safeJsonParse(r.verification_details, undefined) : undefined,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+        resolvedAt: r.resolved_at || undefined
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public updateDefect(id: string, updates: Partial<CollaborativeDefect>): CollaborativeDefect | undefined {
+    const existing = this.getDefect(id);
+    if (!existing) return undefined;
+
+    const merged: CollaborativeDefect = {
+      ...existing,
+      ...updates,
+      updatedAt: this.getTime()
+    };
+    return this.saveDefect(merged);
+  }
+
+  // --- 8. Human Approval Requests ---
+  public saveApprovalRequest(req: HumanApprovalRequest): HumanApprovalRequest {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO approval_requests (
+          id, build_id, task_id, patch_id, requesting_agent, requesting_role,
+          operation_type, explanation, risk_level, affected_files,
+          proposed_changes, review_results, test_results, status,
+          approved_by, resolution_notes, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        req.id,
+        req.buildId,
+        req.taskId || null,
+        req.patchId || null,
+        req.requestingAgent,
+        req.requestingRole,
+        req.operationType,
+        req.explanation,
+        req.riskLevel || 'medium',
+        JSON.stringify(req.affectedFiles || []),
+        req.proposedChanges,
+        req.reviewResults || null,
+        req.testResults || null,
+        req.status || 'pending',
+        req.approvedBy || null,
+        req.resolutionNotes || null,
+        req.createdAt,
+        req.resolvedAt || null
+      );
+
+      this.broadcast(req.buildId, 'approval_request_updated', req);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveApprovalRequest', err);
+    }
+    return req;
+  }
+
+  public getApprovalRequests(buildId: string, status?: string): HumanApprovalRequest[] {
+    try {
+      let query = 'SELECT * FROM approval_requests WHERE build_id = ?';
+      const params: any[] = [buildId];
+
+      if (status) {
+        query += ' AND status = ?';
+        params.push(status);
+      }
+      query += ' ORDER BY created_at DESC';
+
+      const rows = this.dbManager.db.prepare(query).all(...params) as any[];
+      return rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id || undefined,
+        patchId: r.patch_id || undefined,
+        requestingAgent: r.requesting_agent,
+        requestingRole: r.requesting_role,
+        operationType: r.operation_type,
+        explanation: r.explanation,
+        riskLevel: r.risk_level,
+        affectedFiles: safeJsonParse<string[]>(r.affected_files, []),
+        proposedChanges: r.proposed_changes,
+        reviewResults: r.review_results || undefined,
+        testResults: r.test_results || undefined,
+        status: r.status,
+        approvedBy: r.approved_by || undefined,
+        resolutionNotes: r.resolution_notes || undefined,
+        createdAt: r.created_at,
+        resolvedAt: r.resolved_at || undefined
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public getApprovalRequest(id: string): HumanApprovalRequest | undefined {
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM approval_requests WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id || undefined,
+        patchId: r.patch_id || undefined,
+        requestingAgent: r.requesting_agent,
+        requestingRole: r.requesting_role,
+        operationType: r.operation_type,
+        explanation: r.explanation,
+        riskLevel: r.risk_level,
+        affectedFiles: safeJsonParse<string[]>(r.affected_files, []),
+        proposedChanges: r.proposed_changes,
+        reviewResults: r.review_results || undefined,
+        testResults: r.test_results || undefined,
+        status: r.status,
+        approvedBy: r.approved_by || undefined,
+        resolutionNotes: r.resolution_notes || undefined,
+        createdAt: r.created_at,
+        resolvedAt: r.resolved_at || undefined
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public updateApprovalRequest(id: string, updates: Partial<HumanApprovalRequest>): HumanApprovalRequest | undefined {
+    const existing = this.getApprovalRequest(id);
+    if (!existing) return undefined;
+
+    const merged: HumanApprovalRequest = {
+      ...existing,
+      ...updates
+    };
+    return this.saveApprovalRequest(merged);
+  }
+
+  // --- 9. Shared Technical Knowledge ---
+  public saveKnowledgeItem(item: SharedKnowledgeItem): SharedKnowledgeItem {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO shared_knowledge_items (
+          id, project_id, build_id, source_agent, source_role, source_task_id,
+          category, title, content, relevant_files, version,
+          previous_version_id, supersedes_id, status, supersede_reason,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        item.id,
+        item.projectId,
+        item.buildId,
+        item.sourceAgent,
+        item.sourceRole,
+        item.sourceTaskId || null,
+        item.category,
+        item.title,
+        item.content,
+        JSON.stringify(item.relevantFiles || []),
+        item.version || 1,
+        item.previousVersionId || null,
+        item.supersedesId || null,
+        item.status || 'active',
+        item.supersedeReason || null,
+        item.createdAt,
+        item.updatedAt || item.createdAt
+      );
+
+      this.broadcast(item.buildId, 'knowledge_item_updated', item);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveKnowledgeItem', err);
+    }
+    return item;
+  }
+
+  public getKnowledgeItems(
+    buildId: string, 
+    options?: { category?: string; status?: string; search?: string }
+  ): SharedKnowledgeItem[] {
+    try {
+      let query = 'SELECT * FROM shared_knowledge_items WHERE build_id = ?';
+      const params: any[] = [buildId];
+
+      if (options?.category) {
+        query += ' AND category = ?';
+        params.push(options.category);
+      }
+      if (options?.status) {
+        query += ' AND status = ?';
+        params.push(options.status);
+      }
+      if (options?.search) {
+        query += ' AND (title LIKE ? OR content LIKE ?)';
+        params.push(`%${options.search}%`, `%${options.search}%`);
+      }
+
+      query += ' ORDER BY created_at DESC';
+      const rows = this.dbManager.db.prepare(query).all(...params) as any[];
+
+      return rows.map(r => ({
+        id: r.id,
+        projectId: r.project_id,
+        buildId: r.build_id,
+        sourceAgent: r.source_agent,
+        sourceRole: r.source_role,
+        sourceTaskId: r.source_task_id || undefined,
+        category: r.category,
+        title: r.title,
+        content: r.content,
+        relevantFiles: safeJsonParse<string[]>(r.relevant_files, []),
+        version: r.version,
+        previousVersionId: r.previous_version_id || undefined,
+        supersedesId: r.supersedes_id || undefined,
+        status: r.status,
+        supersedeReason: r.supersede_reason || undefined,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public getKnowledgeItem(id: string): SharedKnowledgeItem | undefined {
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM shared_knowledge_items WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+      return {
+        id: r.id,
+        projectId: r.project_id,
+        buildId: r.build_id,
+        sourceAgent: r.source_agent,
+        sourceRole: r.source_role,
+        sourceTaskId: r.source_task_id || undefined,
+        category: r.category,
+        title: r.title,
+        content: r.content,
+        relevantFiles: safeJsonParse<string[]>(r.relevant_files, []),
+        version: r.version,
+        previousVersionId: r.previous_version_id || undefined,
+        supersedesId: r.supersedes_id || undefined,
+        status: r.status,
+        supersedeReason: r.supersede_reason || undefined,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  public updateKnowledgeItem(id: string, updates: Partial<SharedKnowledgeItem>): SharedKnowledgeItem | undefined {
+    const existing = this.getKnowledgeItem(id);
+    if (!existing) return undefined;
+
+    const merged: SharedKnowledgeItem = {
+      ...existing,
+      ...updates,
+      updatedAt: this.getTime()
+    };
+    return this.saveKnowledgeItem(merged);
   }
 }
 

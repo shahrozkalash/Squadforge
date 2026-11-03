@@ -540,6 +540,260 @@ export class DatabaseManager {
             db.exec('ALTER TABLE builds ADD COLUMN dependency_plan TEXT;');
           }
         }
+      },
+      {
+        id: 8,
+        name: '008_collaborative_agent_swarm',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            -- Agent Collaboration Profiles
+            CREATE TABLE IF NOT EXISTS agent_collaboration_profiles (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              role TEXT NOT NULL,
+              name TEXT NOT NULL,
+              model_id TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'idle',
+              capabilities TEXT NOT NULL DEFAULT '[]',
+              responsibilities TEXT NOT NULL DEFAULT '[]',
+              assigned_task_ids TEXT NOT NULL DEFAULT '[]',
+              current_task_id TEXT,
+              workload_score REAL NOT NULL DEFAULT 0.0,
+              collaboration_permissions TEXT NOT NULL DEFAULT '[]',
+              work_history TEXT NOT NULL DEFAULT '[]',
+              last_active INTEGER NOT NULL,
+              model_status TEXT NOT NULL DEFAULT 'idle',
+              metadata TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_profiles_build ON agent_collaboration_profiles(build_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_profiles_role ON agent_collaboration_profiles(role);
+
+            -- Persistent Agent Messages
+            CREATE TABLE IF NOT EXISTS agent_messages (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              project_id TEXT NOT NULL,
+              sender TEXT NOT NULL,
+              sender_role TEXT NOT NULL,
+              recipient TEXT NOT NULL DEFAULT 'broadcast',
+              related_task_id TEXT,
+              related_files TEXT NOT NULL DEFAULT '[]',
+              relevant_file_versions TEXT,
+              message_type TEXT NOT NULL,
+              content TEXT NOT NULL,
+              structured_metadata TEXT,
+              parent_message_id TEXT,
+              depth INTEGER NOT NULL DEFAULT 0,
+              timestamp INTEGER NOT NULL,
+              processing_status TEXT NOT NULL DEFAULT 'delivered'
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_build ON agent_messages(build_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_type ON agent_messages(message_type);
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_task ON agent_messages(related_task_id);
+            CREATE INDEX IF NOT EXISTS idx_agent_messages_timestamp ON agent_messages(timestamp);
+
+            -- Code Reviews
+            CREATE TABLE IF NOT EXISTS code_reviews (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+              patch_id TEXT,
+              author_agent TEXT NOT NULL,
+              author_role TEXT NOT NULL,
+              reviewer_agent TEXT NOT NULL,
+              reviewer_role TEXT NOT NULL,
+              changed_files TEXT NOT NULL DEFAULT '[]',
+              base_versions TEXT NOT NULL DEFAULT '{}',
+              proposed_changes TEXT NOT NULL DEFAULT '[]',
+              requirements_addressed TEXT NOT NULL DEFAULT '[]',
+              implementation_explanation TEXT NOT NULL,
+              test_evidence TEXT NOT NULL,
+              verdict TEXT NOT NULL DEFAULT 'approved',
+              status TEXT NOT NULL DEFAULT 'pending',
+              review_checks TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_reviews_build ON code_reviews(build_id);
+            CREATE INDEX IF NOT EXISTS idx_code_reviews_task ON code_reviews(task_id);
+
+            -- Code Review Comments
+            CREATE TABLE IF NOT EXISTS code_review_comments (
+              id TEXT PRIMARY KEY,
+              review_id TEXT NOT NULL REFERENCES code_reviews(id) ON DELETE CASCADE,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              file_path TEXT NOT NULL,
+              start_line INTEGER NOT NULL,
+              end_line INTEGER NOT NULL,
+              severity TEXT NOT NULL DEFAULT 'suggestion',
+              explanation TEXT NOT NULL,
+              suggested_correction TEXT,
+              related_requirement TEXT,
+              status TEXT NOT NULL DEFAULT 'open',
+              author TEXT NOT NULL,
+              author_role TEXT NOT NULL,
+              timestamp INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_comments_review ON code_review_comments(review_id);
+            CREATE INDEX IF NOT EXISTS idx_review_comments_build ON code_review_comments(build_id);
+
+            -- Patch Proposals
+            CREATE TABLE IF NOT EXISTS patch_proposals (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              author_agent TEXT NOT NULL,
+              author_role TEXT NOT NULL,
+              related_task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+              target_file TEXT NOT NULL,
+              base_file_version INTEGER NOT NULL,
+              base_content_hash TEXT NOT NULL,
+              proposed_changes TEXT NOT NULL,
+              change_explanation TEXT NOT NULL,
+              expected_behavior TEXT NOT NULL,
+              validation_results TEXT NOT NULL,
+              review_status TEXT NOT NULL DEFAULT 'pending',
+              application_status TEXT NOT NULL DEFAULT 'proposed',
+              applied_file_version INTEGER,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_patch_proposals_build ON patch_proposals(build_id);
+            CREATE INDEX IF NOT EXISTS idx_patch_proposals_file ON patch_proposals(build_id, target_file);
+
+            -- File Conflicts
+            CREATE TABLE IF NOT EXISTS file_conflicts (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              file_path TEXT NOT NULL,
+              base_version INTEGER NOT NULL,
+              conflicting_versions TEXT NOT NULL DEFAULT '[]',
+              competing_patches TEXT NOT NULL DEFAULT '[]',
+              reason TEXT NOT NULL,
+              overlapping_hunks TEXT NOT NULL DEFAULT '[]',
+              resolution_status TEXT NOT NULL DEFAULT 'open',
+              resolved_by TEXT,
+              resolved_content TEXT,
+              resolved_version INTEGER,
+              created_at INTEGER NOT NULL,
+              resolved_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_file_conflicts_build ON file_conflicts(build_id);
+
+            -- AI Challenges
+            CREATE TABLE IF NOT EXISTS ai_challenges (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              task_id TEXT,
+              subject TEXT NOT NULL,
+              original_proposal TEXT NOT NULL,
+              proposer_agent TEXT NOT NULL,
+              proposer_role TEXT NOT NULL,
+              challenger_agent TEXT NOT NULL,
+              challenger_role TEXT NOT NULL,
+              current_round INTEGER NOT NULL DEFAULT 1,
+              max_rounds INTEGER NOT NULL DEFAULT 3,
+              status TEXT NOT NULL DEFAULT 'active',
+              outcome TEXT NOT NULL DEFAULT 'pending',
+              final_decision TEXT,
+              decision_rationale TEXT,
+              participants TEXT NOT NULL DEFAULT '[]',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ai_challenges_build ON ai_challenges(build_id);
+
+            -- AI Challenge Arguments
+            CREATE TABLE IF NOT EXISTS ai_challenge_arguments (
+              id TEXT PRIMARY KEY,
+              challenge_id TEXT NOT NULL REFERENCES ai_challenges(id) ON DELETE CASCADE,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              round_number INTEGER NOT NULL,
+              author_agent TEXT NOT NULL,
+              author_role TEXT NOT NULL,
+              argument_type TEXT NOT NULL,
+              claim TEXT NOT NULL,
+              evidence TEXT NOT NULL,
+              proposed_alternative TEXT,
+              identified_risks TEXT NOT NULL DEFAULT '[]',
+              timestamp INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_challenge_args_challenge ON ai_challenge_arguments(challenge_id);
+
+            -- Collaborative Defects
+            CREATE TABLE IF NOT EXISTS collaborative_defects (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              task_id TEXT,
+              title TEXT NOT NULL,
+              description TEXT NOT NULL,
+              severity TEXT NOT NULL DEFAULT 'medium',
+              status TEXT NOT NULL DEFAULT 'open',
+              reproduction_steps TEXT NOT NULL DEFAULT '[]',
+              expected_behavior TEXT NOT NULL,
+              actual_behavior TEXT NOT NULL,
+              affected_files TEXT NOT NULL DEFAULT '[]',
+              assigned_agents TEXT NOT NULL DEFAULT '[]',
+              root_cause TEXT,
+              proposed_solutions TEXT NOT NULL DEFAULT '[]',
+              selected_patch_id TEXT,
+              test_evidence TEXT,
+              verification_details TEXT,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              resolved_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_collab_defects_build ON collaborative_defects(build_id);
+            CREATE INDEX IF NOT EXISTS idx_collab_defects_status ON collaborative_defects(status);
+
+            -- Human Approval Requests
+            CREATE TABLE IF NOT EXISTS approval_requests (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              task_id TEXT,
+              patch_id TEXT,
+              requesting_agent TEXT NOT NULL,
+              requesting_role TEXT NOT NULL,
+              operation_type TEXT NOT NULL,
+              explanation TEXT NOT NULL,
+              risk_level TEXT NOT NULL DEFAULT 'medium',
+              affected_files TEXT NOT NULL DEFAULT '[]',
+              proposed_changes TEXT NOT NULL,
+              review_results TEXT,
+              test_results TEXT,
+              status TEXT NOT NULL DEFAULT 'pending',
+              approved_by TEXT,
+              resolution_notes TEXT,
+              created_at INTEGER NOT NULL,
+              resolved_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_approval_requests_build ON approval_requests(build_id);
+            CREATE INDEX IF NOT EXISTS idx_approval_requests_status ON approval_requests(status);
+
+            -- Shared Knowledge Items
+            CREATE TABLE IF NOT EXISTS shared_knowledge_items (
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              source_agent TEXT NOT NULL,
+              source_role TEXT NOT NULL,
+              source_task_id TEXT,
+              category TEXT NOT NULL,
+              title TEXT NOT NULL,
+              content TEXT NOT NULL,
+              relevant_files TEXT NOT NULL DEFAULT '[]',
+              version INTEGER NOT NULL DEFAULT 1,
+              previous_version_id TEXT,
+              supersedes_id TEXT,
+              status TEXT NOT NULL DEFAULT 'active',
+              supersede_reason TEXT,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_shared_knowledge_build ON shared_knowledge_items(build_id);
+            CREATE INDEX IF NOT EXISTS idx_shared_knowledge_category ON shared_knowledge_items(category);
+            CREATE INDEX IF NOT EXISTS idx_shared_knowledge_status ON shared_knowledge_items(status);
+          `);
+        }
       }
     ];
 

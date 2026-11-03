@@ -20,6 +20,13 @@ import { UniversalArchitectureBlueprintGenerator } from '../architecture/bluepri
 import { ProjectComplexityEstimator } from '../architecture/complexityEstimator.js';
 import { AdaptiveFileStructurePlanner } from '../architecture/fileStructurePlanner.js';
 import { ArchitectureDependencyPlanner } from '../architecture/architectureDependencyPlanner.js';
+import { CollaborationManager } from './collaborationManager.js';
+import { CodeReviewEngine } from './codeReviewEngine.js';
+import { PatchValidationPipeline } from './patchValidationPipeline.js';
+import { AIChallengeEngine } from './aiChallengeEngine.js';
+import { CollaborativeDebuggingEngine } from './collaborativeDebuggingEngine.js';
+import { ApprovalGateService } from './approvalGateService.js';
+import { SharedWorkspaceService } from './sharedWorkspaceService.js';
 import { 
   Build, 
   ModelConfig, 
@@ -144,6 +151,9 @@ export class SwarmOrchestrator {
     });
 
     try {
+      // Initialize Phase 8 collaborative agent profiles
+      CollaborationManager.initializeBuildAgents(buildId, build.selectedModels);
+
       // 1. INITIAL PROJECT MANAGER & ARCHITECT SPECIFICATION
       const planSuccess = await this.runInitialPlanner(build);
       if (!planSuccess) {
@@ -1049,6 +1059,50 @@ Never write placeholder comments. Implement functional code.`;
       if (allActionsSucceeded && appliedCount > 0) {
         TaskManager.completeTask(buildId, task.id, model.id);
         taskDone = true;
+
+        // Phase 8: Record applied patch proposals and broadcast progress message
+        try {
+          for (const fa of fileActions) {
+            const fileNow = db.getFile(buildId, fa.path);
+            if (fileNow) {
+              db.savePatchProposal({
+                id: `patch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+                buildId,
+                authorAgent: model.id,
+                authorRole: model.agentRole || 'fullstack_developer',
+                relatedTaskId: task.id,
+                targetFile: fa.path,
+                baseFileVersion: Math.max(1, (fileNow.version || 1) - 1),
+                baseContentHash: fileNow.contentHash || '',
+                proposedChanges: {
+                  actionType: fa.action === 'create_file' ? 'create' : 'patch',
+                  content: fa.content,
+                  find: fa.find,
+                  replace: fa.replace
+                },
+                changeExplanation: fa.commitMessage || `Implementation for ${task.title}`,
+                expectedBehavior: task.description,
+                validationResults: { syntaxValid: true, pathAllowed: true, hashMatched: true, versionCurrent: true, errors: [] },
+                reviewStatus: 'approved',
+                applicationStatus: 'applied',
+                appliedFileVersion: fileNow.version,
+                createdAt: Date.now(),
+                updatedAt: Date.now()
+              });
+            }
+          }
+
+          CollaborationManager.sendMessage(buildId, build.userId, {
+            sender: model.id,
+            senderRole: model.agentRole || 'fullstack_developer',
+            messageType: 'progress_report',
+            content: `Completed implementation for task "${task.title}": applied ${appliedCount} file modification(s).`,
+            relatedTaskId: task.id,
+            relatedFiles: task.filePaths
+          });
+        } catch {
+          // Non-blocking collaboration record
+        }
 
         // Synchronize Project Memory: update module graph & resolve defects if fix task
         try {

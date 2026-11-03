@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext.js';
 import { useSwarm } from '../context/SwarmContext.js';
 import { Github, Play, Square, Activity, GitBranch, LogOut } from 'lucide-react';
 
-export type NavTab = 'dashboard' | 'live' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
+export type NavTab = 'dashboard' | 'live' | 'collaboration' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
 
 interface NavbarProps {
   currentTab: NavTab;
@@ -19,9 +19,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenTestModal
 }) => {
   const { user, logout } = useAuth();
-  const { activeBuild, stopBuild } = useSwarm();
+  const { activeBuild, stopBuild, approvalRequests } = useSwarm();
 
   const isRunning = activeBuild?.status === 'running' || activeBuild?.status === 'planning' || activeBuild?.status === 'verifying';
+  const pendingApprovalsCount = approvalRequests?.filter(a => a.status === 'pending').length || 0;
 
   return (
     <header className="flex items-center justify-between gap-8 px-6 py-3.5 border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-md sticky top-0 z-40">
@@ -58,6 +59,19 @@ export const Navbar: React.FC<NavbarProps> = ({
           Swarm Live
           {isRunning && (
             <span className="inline-block ml-1.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />
+          )}
+        </button>
+        <button
+          onClick={() => onSelectTab('collaboration')}
+          className={`hover:text-white transition-colors whitespace-nowrap shrink-0 relative flex items-center gap-1.5 ${
+            currentTab === 'collaboration' ? 'text-amber-400 border-b border-amber-400 pb-0.5' : ''
+          }`}
+        >
+          <span>Collaboration</span>
+          {pendingApprovalsCount > 0 && (
+            <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 rounded-full">
+              {pendingApprovalsCount}
+            </span>
           )}
         </button>
         <button

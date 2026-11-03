@@ -132,6 +132,42 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
       'Author component and API integration logic',
       'Validate end-to-end user workflows'
     ]
+  },
+  ui_ux_designer: {
+    role: 'ui_ux_designer',
+    title: 'UI/UX Designer Agent',
+    description: 'Designs design systems, accessibility hierarchies, layout proportions, typography, and visual user experience.',
+    assignedModelId: 'llama',
+    responsibilities: [
+      'Establish design system tokens, color palettes, and typography scale',
+      'Design accessible layouts with clear visual hierarchy and state feedback',
+      'Audit interactive user flows, empty states, and loading transitions',
+      'Ensure responsiveness across mobile, tablet, and desktop viewports'
+    ]
+  },
+  performance_engineer: {
+    role: 'performance_engineer',
+    title: 'Performance Engineer Agent',
+    description: 'Profiles latency, query execution times, asset bundles, memory consumption, and caching strategies.',
+    assignedModelId: 'qwen',
+    responsibilities: [
+      'Benchmark API route latency and database query plans',
+      'Audit client bundle sizes and tree-shaking opportunities',
+      'Identify memory leaks, unindexed queries, and excessive re-renders',
+      'Recommend caching, debouncing, and pagination strategies'
+    ]
+  },
+  documentation_engineer: {
+    role: 'documentation_engineer',
+    title: 'Documentation Engineer Agent',
+    description: 'Authors technical architecture documentation, API specifications, ADR records, and developer guides.',
+    assignedModelId: 'gpt-4o',
+    responsibilities: [
+      'Document architecture decisions and contract specifications',
+      'Generate clear API reference documentation and code comments',
+      'Maintain system manuals, setup guides, and environment requirements',
+      'Capture implementation discoveries and lessons learned'
+    ]
   }
 };
 
@@ -367,6 +403,69 @@ export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
     avatarColor: 'bg-violet-500/20 text-violet-300 border-violet-500/30',
     badge: 'FS',
     description: 'Fullstack Developer: end-to-end features, frontend-backend API contracts, and user workflows'
+  },
+  {
+    id: 'claude-uiux',
+    displayName: 'Claude 3.5 (UI/UX Designer)',
+    providerModel: 'anthropic/claude-3.5-sonnet',
+    provider: 'openrouter',
+    tier: 'paid',
+    agentRole: 'ui_ux_designer',
+    strengths: ['frontend', 'architecture', 'docs'],
+    capabilityLevel: 'flagship',
+    contextWindow: 200000,
+    maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 3.00,
+      outputCostPerMillion: 15.00,
+      currency: 'USD'
+    },
+    enabled: true,
+    avatarColor: 'bg-pink-500/20 text-pink-300 border-pink-500/30',
+    badge: 'UIUX',
+    description: 'UI/UX Designer: design tokens, accessible hierarchy, responsive flows, and visual craft'
+  },
+  {
+    id: 'deepseek-perf',
+    displayName: 'DeepSeek (Performance Engineer)',
+    providerModel: 'deepseek/deepseek-chat',
+    provider: 'openrouter',
+    tier: 'paid',
+    agentRole: 'performance_engineer',
+    strengths: ['backend', 'database', 'debugging', 'architecture'],
+    capabilityLevel: 'advanced',
+    contextWindow: 64000,
+    maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 0.27,
+      outputCostPerMillion: 1.10,
+      currency: 'USD'
+    },
+    enabled: true,
+    avatarColor: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30',
+    badge: 'PERF',
+    description: 'Performance Engineer: latency profiling, query optimization, bundle budgets, and memory leak analysis'
+  },
+  {
+    id: 'mistral-docs',
+    displayName: 'Mistral Large (Documentation Engineer)',
+    providerModel: 'mistralai/mistral-large',
+    provider: 'openrouter',
+    tier: 'paid',
+    agentRole: 'documentation_engineer',
+    strengths: ['docs', 'architecture', 'backend'],
+    capabilityLevel: 'standard',
+    contextWindow: 128000,
+    maxTokens: 4096,
+    pricing: {
+      inputCostPerMillion: 2.00,
+      outputCostPerMillion: 6.00,
+      currency: 'USD'
+    },
+    enabled: true,
+    avatarColor: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30',
+    badge: 'DOCS',
+    description: 'Documentation Engineer: ADRs, API contracts, architectural manuals, and onboarding guides'
   }
 ];
 

@@ -33,6 +33,13 @@ import { TechnologyStackRegistry } from './server/architecture/techRegistry.js';
 import { SoftwareRequirementsAnalyzer } from './server/architecture/requirementsAnalyzer.js';
 import { IntelligentStackSelector } from './server/architecture/stackSelector.js';
 import { ProjectComplexityEstimator } from './server/architecture/complexityEstimator.js';
+import { CollaborationManager } from './server/swarm/collaborationManager.js';
+import { CodeReviewEngine } from './server/swarm/codeReviewEngine.js';
+import { PatchValidationPipeline } from './server/swarm/patchValidationPipeline.js';
+import { AIChallengeEngine } from './server/swarm/aiChallengeEngine.js';
+import { CollaborativeDebuggingEngine } from './server/swarm/collaborativeDebuggingEngine.js';
+import { ApprovalGateService } from './server/swarm/approvalGateService.js';
+import { SharedWorkspaceService } from './server/swarm/sharedWorkspaceService.js';
 
 dotenv.config();
 
@@ -1614,6 +1621,591 @@ app.put('/api/builds/:id/budget', requireAuth, (req, res) => {
 
   db.saveBuild(build);
   res.json({ success: true, build });
+});
+
+// =========================================================================
+// PHASE 8: COLLABORATIVE AI DEVELOPMENT SYSTEM API ENDPOINTS
+// =========================================================================
+
+// Helper for multi-tenant build verification
+function verifyBuildOwnership(req: express.Request, res: express.Response, buildId: string) {
+  const build = db.getBuild(buildId);
+  if (!build) {
+    res.status(404).json({ error: 'Build not found' });
+    return null;
+  }
+  if (build.userId !== req.user!.id) {
+    res.status(403).json({ error: 'Forbidden: Unauthorized access to build' });
+    return null;
+  }
+  return build;
+}
+
+// 1. Collaboration Overview & Agent Profiles
+app.get('/api/builds/:id/collaboration/overview', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const agents = db.getAgentProfiles(build.id);
+  const { total: messageCount } = db.getAgentMessages(build.id, { limit: 1 });
+  const { reviews } = db.getCodeReviews(build.id);
+  const pendingReviewsCount = reviews.filter(r => r.status === 'pending' || r.status === 'under_review').length;
+  const patches = db.getPatchProposals(build.id);
+  const proposedPatchesCount = patches.filter(p => p.applicationStatus === 'proposed').length;
+  const challenges = db.getAIChallenges(build.id);
+  const activeChallengesCount = challenges.filter(c => c.status === 'active').length;
+  const defects = db.getDefects(build.id);
+  const openDefectsCount = defects.filter(d => d.status !== 'resolved').length;
+  const conflicts = db.getFileConflicts(build.id);
+  const activeConflictsCount = conflicts.filter(c => c.resolutionStatus !== 'resolved').length;
+  const approvals = db.getApprovalRequests(build.id);
+  const pendingApprovalsCount = approvals.filter(a => a.status === 'pending').length;
+  const knowledge = db.getKnowledgeItems(build.id);
+
+  res.json({
+    activeAgents: agents.length > 0 ? agents : CollaborationManager.initializeBuildAgents(build.id, build.selectedModels),
+    messageCount,
+    pendingReviewsCount,
+    proposedPatchesCount,
+    activeChallengesCount,
+    openDefectsCount,
+    activeConflictsCount,
+    pendingApprovalsCount,
+    knowledgeItemsCount: knowledge.length
+  });
+});
+
+app.get('/api/builds/:id/collaboration/agents', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  let agents = db.getAgentProfiles(build.id);
+  if (agents.length === 0) {
+    agents = CollaborationManager.initializeBuildAgents(build.id, build.selectedModels);
+  }
+  res.json({ agents });
+});
+
+// 2. Intelligent Agent Messages
+app.get('/api/builds/:id/collaboration/messages', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { messageType, sender, taskId, search, limit, offset } = req.query;
+  const result = CollaborationManager.getMessages(build.id, req.user!.id, {
+    messageType: messageType as any,
+    sender: sender as string,
+    taskId: taskId as string,
+    search: search as string,
+    limit: limit ? parseInt(limit as string, 10) : 50,
+    offset: offset ? parseInt(offset as string, 10) : 0
+  });
+
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/messages', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const {
+    sender,
+    senderRole,
+    recipient,
+    messageType,
+    content,
+    relatedTaskId,
+    relatedFiles,
+    parentMessageId
+  } = req.body;
+
+  if (!senderRole || !messageType || !content) {
+    return res.status(400).json({ error: 'senderRole, messageType, and content are required' });
+  }
+
+  const result = CollaborationManager.sendMessage(build.id, req.user!.id, {
+    sender: sender || `${senderRole}_agent`,
+    senderRole,
+    recipient,
+    messageType,
+    content,
+    relatedTaskId,
+    relatedFiles,
+    parentMessageId
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 3. Shared Workspace Version-Aware Context
+app.get('/api/builds/:id/collaboration/workspace-context', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const taskId = req.query.taskId as string;
+  const agentRole = (req.query.agentRole as string) || 'fullstack_developer';
+  if (!taskId) {
+    return res.status(400).json({ error: 'taskId query parameter is required' });
+  }
+
+  const result = SharedWorkspaceService.getAgentWorkspaceContext(
+    build.id,
+    req.user!.id,
+    taskId,
+    agentRole as any
+  );
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 4. Code Review Engine
+app.get('/api/builds/:id/collaboration/reviews', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { taskId, status, limit, offset } = req.query;
+  const result = db.getCodeReviews(build.id, {
+    taskId: taskId as string,
+    status: status as string,
+    limit: limit ? parseInt(limit as string, 10) : 50,
+    offset: offset ? parseInt(offset as string, 10) : 0
+  });
+
+  res.json(result);
+});
+
+app.get('/api/builds/:id/collaboration/reviews/:reviewId', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const review = db.getCodeReview(req.params.reviewId);
+  if (!review || review.buildId !== build.id) {
+    return res.status(404).json({ error: 'Code review not found' });
+  }
+
+  res.json({ review });
+});
+
+app.post('/api/builds/:id/collaboration/reviews', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = CodeReviewEngine.submitForReview(build.id, req.user!.id, req.body);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/reviews/:reviewId/verdict', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { reviewerAgent, verdict, checks, summaryComments } = req.body;
+  if (!verdict) {
+    return res.status(400).json({ error: 'verdict is required' });
+  }
+
+  const result = CodeReviewEngine.submitVerdict(build.id, req.user!.id, {
+    reviewId: req.params.reviewId,
+    reviewerAgent: reviewerAgent || 'qa_testing_specialist',
+    verdict,
+    checks,
+    summaryComments
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/reviews/:reviewId/comments', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = CodeReviewEngine.addComment(build.id, req.user!.id, {
+    ...req.body,
+    reviewId: req.params.reviewId
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 5. Patch Proposal & Safe Integration Pipeline
+app.get('/api/builds/:id/collaboration/patches', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { targetFile, status } = req.query;
+  const patches = db.getPatchProposals(build.id, {
+    targetFile: targetFile as string,
+    status: status as string
+  });
+
+  res.json({ patches });
+});
+
+app.post('/api/builds/:id/collaboration/patches', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = PatchValidationPipeline.proposePatch(build.id, req.user!.id, req.body);
+  if (!result.success && !result.conflict) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/patches/:patchId/apply', requireAuth, async (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = await PatchValidationPipeline.applyApprovedPatch(build.id, req.user!.id, req.params.patchId);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 6. File Conflicts & Resolution
+app.get('/api/builds/:id/collaboration/conflicts', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const status = req.query.status as string;
+  const conflicts = db.getFileConflicts(build.id, status);
+  res.json({ conflicts });
+});
+
+app.post('/api/builds/:id/collaboration/conflicts/:conflictId/resolve', requireAuth, async (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { resolvedBy, resolvedContent, resolutionExplanation } = req.body;
+  if (!resolvedContent) {
+    return res.status(400).json({ error: 'resolvedContent is required' });
+  }
+
+  const result = await PatchValidationPipeline.resolveConflict(build.id, req.user!.id, {
+    conflictId: req.params.conflictId,
+    resolvedBy: resolvedBy || 'integration_specialist',
+    resolvedContent,
+    resolutionExplanation: resolutionExplanation || 'Manual conflict resolution'
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 7. AI Challenge Mode
+app.get('/api/builds/:id/collaboration/challenges', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const challenges = db.getAIChallenges(build.id);
+  res.json({ challenges });
+});
+
+app.post('/api/builds/:id/collaboration/challenges', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { subject, originalProposal, proposerAgent, proposerRole, challengerRole, taskId } = req.body;
+  if (!subject || !originalProposal) {
+    return res.status(400).json({ error: 'subject and originalProposal are required' });
+  }
+
+  const result = AIChallengeEngine.startChallenge(build.id, req.user!.id, {
+    subject,
+    originalProposal,
+    proposerAgent: proposerAgent || `${proposerRole || 'software_architect'}_agent`,
+    proposerRole: proposerRole || 'software_architect',
+    challengerRole,
+    taskId
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/challenges/:challengeId/arguments', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = AIChallengeEngine.addArgument(build.id, req.user!.id, {
+    ...req.body,
+    challengeId: req.params.challengeId
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/challenges/:challengeId/conclude', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { outcome, finalDecision, decisionRationale, decisionMaker, decisionMakerRole } = req.body;
+  if (!outcome || !finalDecision) {
+    return res.status(400).json({ error: 'outcome and finalDecision are required' });
+  }
+
+  const result = AIChallengeEngine.concludeChallenge(build.id, req.user!.id, {
+    challengeId: req.params.challengeId,
+    decisionMaker: decisionMaker || 'software_architect',
+    decisionMakerRole: decisionMakerRole || 'software_architect',
+    outcome,
+    finalDecision,
+    decisionRationale: decisionRationale || 'Evaluated technical trade-offs and evidence'
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 8. Collaborative Debugging Engine
+app.get('/api/builds/:id/collaboration/defects', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { status, severity } = req.query;
+  const defects = db.getDefects(build.id, {
+    status: status as string,
+    severity: severity as string
+  });
+
+  res.json({ defects });
+});
+
+app.post('/api/builds/:id/collaboration/defects', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = CollaborativeDebuggingEngine.recordDefect(build.id, req.user!.id, req.body);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/defects/:defectId/solutions', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = CollaborativeDebuggingEngine.proposeSolution(build.id, req.user!.id, {
+    ...req.body,
+    defectId: req.params.defectId
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/defects/:defectId/status', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { status, verificationEvidence, testEvidence } = req.body;
+  if (!status) {
+    return res.status(400).json({ error: 'status is required' });
+  }
+
+  const result = CollaborativeDebuggingEngine.updateStatus(build.id, req.user!.id, {
+    defectId: req.params.defectId,
+    status,
+    verificationEvidence,
+    testEvidence
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 9. Human Approval Workflows
+app.get('/api/builds/:id/collaboration/approvals', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const status = req.query.status as string;
+  const approvals = db.getApprovalRequests(build.id, status);
+  res.json({ approvals });
+});
+
+app.post('/api/builds/:id/collaboration/approvals', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = ApprovalGateService.requestApproval(build.id, req.user!.id, req.body);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { approved, resolutionNotes } = req.body;
+  if (typeof approved !== 'boolean') {
+    return res.status(400).json({ error: 'approved (boolean) is required' });
+  }
+
+  const result = ApprovalGateService.respondToApproval(build.id, req.user!.id, {
+    requestId: req.params.approvalId,
+    approved,
+    approvedBy: req.user!.name || req.user!.email || 'human_reviewer',
+    resolutionNotes
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 10. Shared Technical Knowledge
+app.get('/api/builds/:id/collaboration/knowledge', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { category, search, status } = req.query;
+  const items = ProjectMemoryService.searchKnowledge(build.id, req.user!.id, {
+    category: category as string,
+    search: search as string,
+    status: status as string
+  });
+
+  res.json({ items });
+});
+
+app.post('/api/builds/:id/collaboration/knowledge', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = ProjectMemoryService.recordKnowledgeItem(build.id, req.user!.id, req.body);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/knowledge/:knowledgeId/supersede', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { newContent, newTitle, supersedeReason, sourceAgent, sourceRole } = req.body;
+  if (!newContent || !supersedeReason) {
+    return res.status(400).json({ error: 'newContent and supersedeReason are required' });
+  }
+
+  const result = ProjectMemoryService.supersedeKnowledgeItem(build.id, req.user!.id, {
+    targetId: req.params.knowledgeId,
+    sourceAgent: sourceAgent || 'software_architect',
+    sourceRole: sourceRole || 'software_architect',
+    newContent,
+    newTitle,
+    supersedeReason
+  });
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+// 11. Advanced Task Delegation
+app.post('/api/builds/:id/collaboration/tasks/:taskId/delegate', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { delegatorRole, targetRole, rationale } = req.body;
+  if (!targetRole) {
+    return res.status(400).json({ error: 'targetRole is required' });
+  }
+
+  const result = TaskManager.delegateTask(
+    build.id,
+    req.params.taskId,
+    delegatorRole || 'project_manager',
+    targetRole,
+    rationale || 'Specialized expertise alignment'
+  );
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/tasks/:taskId/accept', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { agentRole } = req.body;
+  const result = TaskManager.acceptTask(build.id, req.params.taskId, agentRole || 'fullstack_developer');
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/tasks/:taskId/reject', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { agentRole, reason } = req.body;
+  const result = TaskManager.rejectTask(
+    build.id,
+    req.params.taskId,
+    agentRole || 'fullstack_developer',
+    reason || 'Role capability mismatch'
+  );
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/tasks/:taskId/escalate', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { senderRole, reason } = req.body;
+  const result = TaskManager.escalateTask(
+    build.id,
+    req.params.taskId,
+    senderRole || 'qa_testing_specialist',
+    reason || 'Requires architectural intervention'
+  );
+
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  res.json(result);
 });
 
 // Mount Vite in dev mode or serve static bundle in production
