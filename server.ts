@@ -39,6 +39,8 @@ import { PatchValidationPipeline } from './server/swarm/patchValidationPipeline.
 import { AIChallengeEngine } from './server/swarm/aiChallengeEngine.js';
 import { CollaborativeDebuggingEngine } from './server/swarm/collaborativeDebuggingEngine.js';
 import { ApprovalGateService } from './server/swarm/approvalGateService.js';
+import { executionManager, previewService, startExecutionServices } from './server/execution/index.js';
+import { createExecutionRouter } from './server/execution/executionRoutes.js';
 import { SharedWorkspaceService } from './server/swarm/sharedWorkspaceService.js';
 import { CodeGenerationEngine } from './server/swarm/codeGenerationEngine.js';
 import { GenerationProfileRegistry } from './server/swarm/generationProfiles.js';
@@ -2322,9 +2324,18 @@ app.post('/api/builds/:id/codegen/preview-context', requireAuth, (req, res) => {
   });
 });
 
+// Project execution runs only through the sandbox backend
+app.use('/api/builds/:id/execution', createExecutionRouter({
+  requireAuth,
+  verifyBuildOwnership,
+  manager: executionManager,
+  previews: previewService
+}));
+
 // Mount Vite in dev mode or serve static bundle in production
 async function startServer() {
   const server = http.createServer(app);
+  const stopExecutionServices = await startExecutionServices();
 
   const isProd = process.env.NODE_ENV === 'production';
   const distPath = path.resolve(process.cwd(), 'dist');
@@ -2359,6 +2370,7 @@ async function startServer() {
 
   const shutdown = (signal: string) => {
     console.log(`Received ${signal}. Shutting down gracefully...`);
+    stopExecutionServices();
     server.close(() => {
       console.log('HTTP server closed.');
       process.exit(0);

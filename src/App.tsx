@@ -10,6 +10,7 @@ import { BuildHistoryView } from './components/BuildHistoryView.js';
 import { ArchitectureView } from './components/ArchitectureView.js';
 import { CollaborationView } from './components/CollaborationView.js';
 import { CodeGenerationView } from './components/CodeGenerationView.js';
+import { ExecutionView } from './components/ExecutionView.js';
 import { SettingsView } from './components/SettingsView.js';
 import { UsageDashboardView } from './components/UsageDashboardView.js';
 import { AuthModal } from './components/AuthModal.js';
@@ -51,6 +52,10 @@ function DashboardContent() {
 
         {currentTab === 'codegen' && (
           <CodeGenerationView />
+        )}
+
+        {currentTab === 'execution' && (
+          <ExecutionView />
         )}
 
         {currentTab === 'collaboration' && (
