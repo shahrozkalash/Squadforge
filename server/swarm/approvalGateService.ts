@@ -29,6 +29,38 @@ export class ApprovalGateService {
   }
 
   /**
+   * Identifies whether a file path touches sensitive security, auth, crypto, or environment files.
+   */
+  static isSensitiveFilePath(filePath: string): boolean {
+    const normalized = filePath.toLowerCase().replace(/\\/g, '/');
+    const sensitivePatterns = [
+      /(?:^|\/)\.env(?:\..+)?$/,
+      /(?:^|\/)server\/(?:crypto|email|db\/database)\.ts$/,
+      /\b(auth|crypto|secret|password|credential|token|session|security|permission)\b/i,
+      /(?:^|\/)migrations\//
+    ];
+    return sensitivePatterns.some(pattern => pattern.test(normalized));
+  }
+
+  /**
+   * Determines if any files in a collection require security-sensitive human approval gate.
+   */
+  static isSensitiveOperation(filePaths: string[]): boolean {
+    return filePaths.some(p => this.isSensitiveFilePath(p));
+  }
+
+  /**
+   * Checks whether an approved human approval request exists for the specified files.
+   */
+  static hasApprovedRequestForFiles(buildId: string, files: string[]): boolean {
+    const approvals = db.getApprovalRequests(buildId);
+    return approvals.some(a => 
+      a.status === 'approved' && 
+      files.some(f => a.affectedFiles.includes(f))
+    );
+  }
+
+  /**
    * Creates a formal human approval request for restricted operations
    */
   static requestApproval(

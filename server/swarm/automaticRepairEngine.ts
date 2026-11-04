@@ -2,33 +2,99 @@ import {
   ProjectFile, 
   AutomaticRepairResult, 
   RepairAttemptLog,
-  ModelConfig 
+  ModelConfig,
+  ProjectContract
 } from '../types.js';
 import { db } from '../store.js';
 import { ExecutionAdapter } from './executionAdapter.js';
 import { IntegrationAgent, IntegrationIssue } from './integrationAgent.js';
+import { ContractFirstEngine } from './contractFirstEngine.js';
 import { CollaborativeDebuggingEngine } from './collaborativeDebuggingEngine.js';
 import { MergeManager } from './mergeManager.js';
-import { callUnifiedGateway, SILENT_WORKER_SYSTEM_PROMPT } from '../gateway.js';
+import { callUnifiedGateway } from '../gateway.js';
 import { PromptCompiler } from './promptCompiler.js';
 import { GenerationProfileRegistry } from './generationProfiles.js';
 import { ProjectContextEngine } from './projectContextEngine.js';
+
+export interface RepairValidationSnapshot {
+  syntaxPassed: boolean;
+  typeCheckPassed: boolean;
+  integrationPassed: boolean;
+  contractPassed: boolean;
+  configPassed: boolean;
+  clean: boolean;
+  syntaxErrorsCount: number;
+  typeErrorsCount: number;
+  integrationErrorsCount: number;
+  contractErrorsCount: number;
+  configErrorsCount: number;
+  diagnostics: string[];
+}
 
 export class AutomaticRepairEngine {
   private static MAX_REPAIR_ATTEMPTS = 3;
 
   /**
+   * Evaluates all 5 validation dimensions across workspace files:
+   * 1. Syntax (esbuild / JSON AST)
+   * 2. TypeScript diagnostics (compiler)
+   * 3. Import & export integrity
+   * 4. Integration contracts
+   * 5. Dependency & config integrity
+   */
+  static evaluateValidationDimensions(
+    files: ProjectFile[],
+    contracts: ProjectContract[] = []
+  ): RepairValidationSnapshot {
+    const syntaxErrors = ExecutionAdapter.validateSyntax(files);
+    const typeCheck = ExecutionAdapter.validateTypes(files);
+    const integration = IntegrationAgent.analyzeProjectContracts(files);
+    const contractValidations = ContractFirstEngine.validateFilesAgainstContracts(files, contracts);
+    const configErrors = ExecutionAdapter.validateConfigs(files);
+
+    const integrationErrors = integration.issues.filter(i => i.severity === 'error');
+    const contractErrors = contractValidations.flatMap(c => c.errors);
+
+    const diagnostics: string[] = [
+      ...syntaxErrors.map(e => `[SYNTAX] ${e.filePath}${e.line ? `:${e.line}` : ''}: ${e.message}`),
+      ...typeCheck.errors.map(e => `[TYPE ${e.code}] ${e.filePath}${e.line ? `:${e.line}` : ''}: ${e.message}`),
+      ...integrationErrors.map(e => `[INTEGRATION] ${e.sourceFile}: ${e.message}`),
+      ...contractErrors.map(e => `[CONTRACT] ${e}`),
+      ...configErrors.map(e => `[CONFIG] ${e}`)
+    ];
+
+    const clean = diagnostics.length === 0;
+
+    return {
+      syntaxPassed: syntaxErrors.length === 0,
+      typeCheckPassed: typeCheck.errors.length === 0,
+      integrationPassed: integrationErrors.length === 0,
+      contractPassed: contractErrors.length === 0,
+      configPassed: configErrors.length === 0,
+      clean,
+      syntaxErrorsCount: syntaxErrors.length,
+      typeErrorsCount: typeCheck.errors.length,
+      integrationErrorsCount: integrationErrors.length,
+      contractErrorsCount: contractErrors.length,
+      configErrorsCount: configErrors.length,
+      diagnostics
+    };
+  }
+
+  /**
    * Performs evidence-based automatic repair on generated code with real compiler/AST diagnostics.
-   * Retries within configurable limit and reports unresolved errors honestly.
+   * Validates syntax, TypeScript diagnostics, import/export integrity, integration contracts,
+   * and dependency integrity. Re-verifies every patch to prevent false success.
    */
   static async repairProjectFiles(params: {
     buildId: string;
     userId: string;
     model: ModelConfig;
     files: ProjectFile[];
+    contracts?: ProjectContract[];
     maxAttempts?: number;
   }): Promise<AutomaticRepairResult> {
-    const { buildId, userId, model, maxAttempts = this.MAX_REPAIR_ATTEMPTS } = params;
+    const { buildId, userId, model, contracts = [], maxAttempts = this.MAX_REPAIR_ATTEMPTS } = params;
     let currentFiles = [...params.files];
     const resolvedDefects: string[] = [];
     const unresolvedDefects: string[] = [];
@@ -38,55 +104,79 @@ export class AutomaticRepairEngine {
     while (attemptsCount < maxAttempts) {
       attemptsCount++;
 
-      // 1. Gather Real Evidence: Check syntax & types via ExecutionAdapter
+      // 1. Gather Real Evidence across all validation dimensions
+      const snapshot = this.evaluateValidationDimensions(currentFiles, contracts);
+
+      // If zero defects across all dimensions, return validated success
+      if (snapshot.clean) {
+        return {
+          success: true,
+          resolvedDefects,
+          unresolvedDefects: [],
+          repairAttemptsCount: attemptsCount - 1,
+          modifiedFiles: Array.from(modifiedFiles),
+          validationEvidence: snapshot
+        };
+      }
+
+      // Extract active issues for targeted repair
+      const activeIssues: Array<{
+        file: string;
+        message: string;
+        line?: number;
+        kind: 'syntax' | 'type' | 'integration' | 'contract' | 'config';
+        key: string;
+      }> = [];
+
       const syntaxErrors = ExecutionAdapter.validateSyntax(currentFiles);
-      const typeCheck = ExecutionAdapter.validateTypes(currentFiles);
-      const integration = IntegrationAgent.analyzeProjectContracts(currentFiles);
-
-      const activeIssues: Array<{ file: string; message: string; line?: number; kind: 'syntax' | 'type' | 'integration' }> = [];
-
       for (const err of syntaxErrors) {
         activeIssues.push({
           file: err.filePath,
           message: `Syntax error: ${err.message}`,
           line: err.line,
-          kind: 'syntax'
+          kind: 'syntax',
+          key: `syntax:${err.filePath}:${err.message}`
         });
       }
 
+      const typeCheck = ExecutionAdapter.validateTypes(currentFiles);
       for (const err of typeCheck.errors) {
         activeIssues.push({
           file: err.filePath,
           message: `Type error [${err.code}]: ${err.message}`,
           line: err.line,
-          kind: 'type'
+          kind: 'type',
+          key: `type:${err.filePath}:${err.code}:${err.message}`
         });
       }
 
+      const integration = IntegrationAgent.analyzeProjectContracts(currentFiles);
       for (const issue of integration.issues) {
         if (issue.severity === 'error') {
           activeIssues.push({
             file: issue.sourceFile,
             message: `Integration defect: ${issue.message}`,
-            kind: 'integration'
+            kind: 'integration',
+            key: `integration:${issue.sourceFile}:${issue.message}`
           });
         }
       }
 
-      // If zero defects, we have validated evidence of cleanliness!
+      const contractValidations = ContractFirstEngine.validateFilesAgainstContracts(currentFiles, contracts);
+      for (const cv of contractValidations) {
+        for (const err of cv.errors) {
+          activeIssues.push({
+            file: cv.contract.filePath,
+            message: `Contract defect: ${err}`,
+            kind: 'contract',
+            key: `contract:${cv.contract.filePath}:${err}`
+          });
+        }
+      }
+
       if (activeIssues.length === 0) {
-        return {
-          success: true,
-          resolvedDefects,
-          unresolvedDefects: [],
-          repairAttemptsCount: attemptsCount - 1, // Prior attempt or initial was clean
-          modifiedFiles: Array.from(modifiedFiles),
-          validationEvidence: {
-            syntaxPassed: true,
-            typeCheckPassed: true,
-            integrationPassed: true
-          }
-        };
+        // Only warnings or configs left
+        break;
       }
 
       // 2. Select highest priority defect to repair
@@ -106,7 +196,7 @@ export class AutomaticRepairEngine {
         userRequirement: `Fix defect in ${targetIssue.file}`,
         profile,
         context,
-        contracts: [],
+        contracts,
         targetFiles: [targetIssue.file],
         passName: 'repair',
         agentRole: 'debugging_specialist',
@@ -138,42 +228,52 @@ export class AutomaticRepairEngine {
 
       const mergeRes = await MergeManager.applyBatchActions(buildId, model.id, actions);
       if (mergeRes.success) {
-        resolvedDefects.push(`${targetIssue.file}: ${targetIssue.message}`);
         modifiedFiles.add(targetIssue.file);
-        // Refresh local currentFiles from db
+        // Refresh local currentFiles from db to inspect real modified state
         currentFiles = db.getAllFiles(buildId);
 
-        // Record defect resolution in collaborative debugging engine if tracked
-        CollaborativeDebuggingEngine.recordDefect(buildId, userId, {
-          title: `Resolved: ${targetIssue.message.slice(0, 80)}`,
-          description: targetIssue.message,
-          severity: 'medium',
-          identifiedByAgent: 'automatic_repair_engine',
-          identifiedByRole: 'debugging_specialist',
-          affectedFiles: [targetIssue.file],
-          symptoms: [targetIssue.message]
-        });
+        // STRENGTHENED REPAIR VERIFICATION:
+        // Do NOT mark defect resolved merely because patch was applied!
+        // Verify against real compiler/integration evidence:
+        const postPatchSnapshot = this.evaluateValidationDimensions(currentFiles, contracts);
+        const defectPersists = postPatchSnapshot.diagnostics.some(d => d.includes(targetIssue.message) || (targetIssue.line && d.includes(`${targetIssue.file}:${targetIssue.line}`)));
+
+        if (!defectPersists) {
+          resolvedDefects.push(`${targetIssue.file}: ${targetIssue.message}`);
+          CollaborativeDebuggingEngine.recordDefect(buildId, userId, {
+            title: `Resolved: ${targetIssue.message.slice(0, 80)}`,
+            description: targetIssue.message,
+            severity: 'medium',
+            reproductionSteps: [`Automated compiler check for ${targetIssue.file}`],
+            expectedBehavior: 'Error-free compilation',
+            actualBehavior: 'Defect successfully resolved with compiler evidence',
+            affectedFiles: [targetIssue.file],
+            assignedAgent: 'debugging_specialist',
+            authorRole: 'debugging_specialist'
+          });
+        } else {
+          unresolvedDefects.push(`Patch applied to ${targetIssue.file} but defect persisted: ${targetIssue.message}`);
+        }
       } else {
         unresolvedDefects.push(`Failed to apply repair patch to ${targetIssue.file}: ${mergeRes.error}`);
       }
     }
 
-    // Final verification after loop
-    const finalSyntax = ExecutionAdapter.validateSyntax(currentFiles);
-    const finalTypes = ExecutionAdapter.validateTypes(currentFiles);
-    const allClean = finalSyntax.length === 0 && finalTypes.errors.length === 0;
+    // Final verification after repair loop across ALL dimensions
+    const finalSnapshot = this.evaluateValidationDimensions(currentFiles, contracts);
+    const allClean = finalSnapshot.clean;
+
+    const remainingDefects = allClean 
+      ? [] 
+      : Array.from(new Set([...unresolvedDefects, ...finalSnapshot.diagnostics]));
 
     return {
       success: allClean,
       resolvedDefects,
-      unresolvedDefects: allClean ? [] : unresolvedDefects,
+      unresolvedDefects: remainingDefects,
       repairAttemptsCount: attemptsCount,
       modifiedFiles: Array.from(modifiedFiles),
-      validationEvidence: {
-        syntaxErrorsCount: finalSyntax.length,
-        typeErrorsCount: finalTypes.errors.length,
-        clean: allClean
-      }
+      validationEvidence: finalSnapshot
     };
   }
 }

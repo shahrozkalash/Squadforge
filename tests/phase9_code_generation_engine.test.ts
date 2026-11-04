@@ -334,20 +334,23 @@ export function formatUserName(first: string, last: string): string {
     });
 
     test('5.2 Applies surgical patch to existing file and increments version safely', async () => {
-      await IncrementalEditor.applyIncrementalEdit(buildId, 'p9_agent', {
-        filePath: 'src/components/HeaderNav.tsx',
+      const filePath = 'src/components/HeaderNavPatch.tsx';
+      const createRes = await IncrementalEditor.applyIncrementalEdit(buildId, 'p9_agent', {
+        filePath,
         action: 'create',
         replacementContent: 'export function HeaderNav() { return <nav>Header</nav>; }',
         expectedBaseVersion: 0,
         expectedContentHash: '',
         explanation: 'Initial creation of HeaderNav component'
       });
+      assert.equal(createRes.success, true);
 
-      const file = db.getFile(buildId, 'src/components/HeaderNav.tsx');
+      const file = db.getFile(buildId, filePath);
       assert.ok(file, 'Base file must exist');
+      const baseVersion = file.version;
 
       const res = await IncrementalEditor.applyIncrementalEdit(buildId, 'p9_agent', {
-        filePath: 'src/components/HeaderNav.tsx',
+        filePath,
         action: 'patch',
         findSnippet: '<nav>Header</nav>',
         replacementContent: '<nav className="flex items-center">Header Links</nav>',
@@ -357,16 +360,26 @@ export function formatUserName(first: string, last: string): string {
       });
 
       assert.equal(res.success, true);
-      assert.ok(res.newVersion! > file.version);
+      assert.ok(res.newVersion! > baseVersion);
       assert.match(res.appliedContent!, /className="flex items-center"/);
     });
 
     test('5.3 Rejects stale patches when base file version has drifted', async () => {
-      const file = db.getFile(buildId, 'src/components/HeaderNav.tsx');
+      const filePath = 'src/components/HeaderNavStale.tsx';
+      await IncrementalEditor.applyIncrementalEdit(buildId, 'p9_agent', {
+        filePath,
+        action: 'create',
+        replacementContent: 'export function HeaderNav() { return <nav>Header</nav>; }',
+        expectedBaseVersion: 0,
+        expectedContentHash: '',
+        explanation: 'Initial creation of HeaderNav component'
+      });
+
+      const file = db.getFile(buildId, filePath);
       assert.ok(file);
 
       const staleRes = await IncrementalEditor.applyIncrementalEdit(buildId, 'p9_agent', {
-        filePath: 'src/components/HeaderNav.tsx',
+        filePath,
         action: 'patch',
         findSnippet: 'Header',
         replacementContent: 'Outdated Header',
@@ -560,6 +573,364 @@ export function formatUserName(first: string, last: string): string {
       const overflowCheck = tokenOptimizer.checkContextWindow(codeSnippet, 5000, 4000);
       assert.equal(overflowCheck.fitsWithinContext, false);
       assert.ok(overflowCheck.reason?.includes('exceeds'));
+    });
+  });
+
+  // ----------------------------------------------------
+  // 9. Phase 9 Final Hardening & Strict Acceptance Suite
+  // ----------------------------------------------------
+  describe('9. Phase 9 Final Hardening & Strict Acceptance Suite', () => {
+    const makeTestBuild = (prefix: string) => {
+      const bId = `bld_${prefix}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      db.saveBuild({
+        id: bId,
+        userId,
+        idea: `Acceptance test for ${prefix}`,
+        status: 'running',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        selectedModels: ['gemini-2.5-pro'],
+        autoPushGithub: false,
+        totalTokens: 0,
+        totalCost: 0,
+        costLimit: 25.0,
+        maxDurationSeconds: 600,
+        patchesAppliedCount: 0
+      });
+      return bId;
+    };
+
+    test('9.1 Failed validation prevents successful finalization', async () => {
+      const testBuildId = makeTestBuild('val_fail');
+      const brokenSyntaxCode = 'export function BrokenSyntax() { const a: number = ; return a; }\n';
+
+      const run = await CodeGenerationEngine.runGenerationPipeline({
+        buildId: testBuildId,
+        userRequest: 'Create broken syntax component',
+        mockAiResponse: {
+          thinking: 'Generate deliberately unparseable TypeScript',
+          actions: [
+            {
+              action: 'create_file',
+              path: 'src/components/BrokenSyntax.tsx',
+              content: brokenSyntaxCode,
+              explanation: 'Deliberate syntax error'
+            }
+          ]
+        }
+      });
+
+      // Strict completion logic: failed validation must not be treated as success
+      assert.notEqual(run.status, 'finalized', 'A run with unresolvable defects must never be marked finalized');
+      assert.equal(run.status, 'failed', 'Unresolved syntax failure must produce a failed run');
+      assert.equal(run.passes[3].status, 'failed', 'Validation pass must be failed');
+      assert.ok(run.passes[3].diagnostics && run.passes[3].diagnostics.length > 0, 'Validation diagnostics must be recorded');
+      assert.equal(run.passes[5].status, 'failed', 'Finalization pass must report failed');
+    });
+
+    test('9.2 Failed automatic repair prevents successful completion', async () => {
+      const testBuildId = makeTestBuild('repair_fail');
+      const brokenCode = 'export function BrokenFunction() { const x: number = "unassignable_type"; return x; }\n';
+
+      const run = await CodeGenerationEngine.runGenerationPipeline({
+        buildId: testBuildId,
+        userRequest: 'Create component with unresolvable type error',
+        mockAiResponse: {
+          thinking: 'Generate type defect',
+          actions: [
+            {
+              action: 'create_file',
+              path: 'src/utils/typeDefect.ts',
+              content: brokenCode,
+              explanation: 'Unassignable type'
+            }
+          ]
+        }
+      });
+
+      assert.notEqual(run.status, 'finalized');
+      assert.ok(run.status === 'failed' || run.status === 'completed_with_warnings');
+      const persisted = db.getGenerationRun(run.id);
+      assert.ok(persisted);
+      assert.equal(persisted?.status, run.status);
+    });
+
+    test('9.3 Integration errors are detected and included in repair verification', () => {
+      const brokenImportFiles: ProjectFile[] = [
+        {
+          id: 'bif1',
+          buildId,
+          path: 'src/services/apiClient.ts',
+          content: 'import { NonExistentService } from "./missingModule.js";\nexport function callApi() { return NonExistentService(); }\n',
+          version: 1,
+          ownerModel: 'gemini',
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        }
+      ];
+
+      const validation = AutomaticRepairEngine.evaluateValidationDimensions(brokenImportFiles, []);
+      assert.equal(validation.clean, false, 'Validation must fail when integration/import is broken');
+      assert.ok(validation.integrationErrorsCount > 0, 'Must record integrationErrorsCount > 0');
+      assert.ok(validation.diagnostics.some(d => d.includes('missingModule') || d.includes('NonExistentService')), 'Diagnostic must report missing module');
+    });
+
+    test('9.4 Sensitive-file approval happens before application', async () => {
+      const testBuildId = makeTestBuild('sensitive_gate');
+      const sensitivePath = 'server/crypto.ts';
+
+      const run = await CodeGenerationEngine.runGenerationPipeline({
+        buildId: testBuildId,
+        userRequest: 'Modify cryptographic authentication service',
+        mockAiResponse: {
+          thinking: 'Attempt modification of security-sensitive file',
+          actions: [
+            {
+              action: 'create_file',
+              path: sensitivePath,
+              content: 'export function insecureBypass() { return true; }\n',
+              explanation: 'Critical security sensitive change'
+            }
+          ]
+        }
+      });
+
+      // Must be held pending approval
+      assert.equal(run.status, 'pending_approval', 'Run touching sensitive file must be held pending approval');
+      assert.equal(run.requiresApproval, true, 'requiresApproval must be flagged');
+
+      // The sensitive file must NOT have been written to the database workspace before approval
+      const fileInWorkspace = db.getFile(testBuildId, sensitivePath);
+      assert.equal(fileInWorkspace, undefined, 'Sensitive file must NOT be applied before approval is granted');
+
+      // An approval request must be registered in the system
+      const approvals = db.getApprovalRequests(testBuildId);
+      assert.ok(approvals.length > 0, 'Human approval request must be registered');
+      assert.ok(approvals.some(a => a.affectedFiles.includes(sensitivePath)), 'Approval must specify affected sensitive file');
+    });
+
+    test('9.5 Rejected approval prevents patch application', async () => {
+      const testBuildId = makeTestBuild('rejected_gate');
+      const sensitivePath = 'server/db/database.ts';
+
+      // Request approval
+      const approvalRes = ApprovalGateService.requestApproval(testBuildId, userId, {
+        requestingAgent: 'codegen_engine',
+        requestingRole: 'backend_developer',
+        operationType: 'security_sensitive_change',
+        explanation: 'Attempt to modify database layer',
+        affectedFiles: [sensitivePath],
+        proposedChanges: 'Drop tables or bypass checks',
+        riskLevel: 'high'
+      });
+      assert.ok(approvalRes.success && approvalRes.request);
+
+      // Human reviewer explicitly rejects the request
+      const respondRes = ApprovalGateService.respondToApproval(
+        testBuildId,
+        approvalRes.request.id,
+        'rejected',
+        userId,
+        'Security rejection: unauthorized modification of database infrastructure'
+      );
+      assert.equal(respondRes.success, true);
+      assert.equal(respondRes.request?.status, 'rejected');
+
+      // Attempting to apply edit on the rejected sensitive file must be refused
+      const editRes = await IncrementalEditor.applyIncrementalEdit(testBuildId, 'codegen_agent', {
+        filePath: sensitivePath,
+        action: 'create',
+        replacementContent: 'export const hacked = true;',
+        expectedBaseVersion: 0,
+        expectedContentHash: '',
+        explanation: 'Unauthorized apply'
+      });
+
+      assert.equal(editRes.success, false, 'Edit must be rejected');
+      assert.match(editRes.error!, /approval required/i);
+      assert.equal(db.getFile(testBuildId, sensitivePath), undefined, 'File must not be written');
+    });
+
+    test('9.6 Stale patches are rejected and file hashes preserved', async () => {
+      const testBuildId = makeTestBuild('stale_patch');
+      const filePath = 'src/models/User.ts';
+
+      // Create base file v1
+      const initialRes = await IncrementalEditor.applyIncrementalEdit(testBuildId, 'agent', {
+        filePath,
+        action: 'create',
+        replacementContent: 'export interface User { id: string; name: string; }\n',
+        expectedBaseVersion: 0,
+        expectedContentHash: '',
+        explanation: 'Initial User model'
+      });
+      assert.equal(initialRes.success, true);
+
+      const fileV1 = db.getFile(testBuildId, filePath);
+      assert.ok(fileV1);
+      const v1Content = fileV1.content;
+      const v1Hash = fileV1.contentHash;
+
+      // Simulate concurrent update v2
+      const updateRes = await IncrementalEditor.applyIncrementalEdit(testBuildId, 'agent', {
+        filePath,
+        action: 'patch',
+        findSnippet: 'name: string;',
+        replacementContent: 'name: string; email: string;',
+        expectedBaseVersion: fileV1.version,
+        expectedContentHash: fileV1.contentHash,
+        explanation: 'Add email field'
+      });
+      assert.equal(updateRes.success, true);
+
+      // Now attempt to apply a stale patch expecting base version 1
+      const staleRes = await IncrementalEditor.applyIncrementalEdit(testBuildId, 'agent', {
+        filePath,
+        action: 'patch',
+        findSnippet: 'name: string;',
+        replacementContent: 'name: string; role: string;',
+        expectedBaseVersion: 1, // Stale! Current is v2
+        expectedContentHash: v1Hash,
+        explanation: 'Stale patch should be rejected'
+      });
+
+      assert.equal(staleRes.success, false);
+      assert.match(staleRes.error!, /Stale patch/);
+
+      // Target file must retain v2 content and NOT revert to stale patch
+      const currentFile = db.getFile(testBuildId, filePath);
+      assert.equal(currentFile?.version, 2);
+      assert.match(currentFile!.content, /email: string;/);
+      assert.doesNotMatch(currentFile!.content, /role: string;/);
+    });
+
+    test('9.7 Failed patch application does not corrupt the workspace', async () => {
+      const testBuildId = makeTestBuild('atomic_rollback');
+      const filePath = 'src/services/payment.ts';
+      const cleanContent = 'export function processPayment(amount: number): boolean {\n  return amount > 0;\n}\n';
+
+      const createRes = await IncrementalEditor.applyIncrementalEdit(testBuildId, 'agent', {
+        filePath,
+        action: 'create',
+        replacementContent: cleanContent,
+        expectedBaseVersion: 0,
+        expectedContentHash: '',
+        explanation: 'Payment service'
+      });
+      assert.equal(createRes.success, true);
+
+      const beforeFile = db.getFile(testBuildId, filePath);
+      assert.ok(beforeFile);
+
+      // Attempt invalid patch with non-existent find snippet
+      const failedPatch = await IncrementalEditor.applyIncrementalEdit(testBuildId, 'agent', {
+        filePath,
+        action: 'patch',
+        findSnippet: 'THIS_SNIPPET_DOES_NOT_EXIST_ANYWHERE',
+        replacementContent: 'MALFORMED_CORRUPTED_CODE',
+        expectedBaseVersion: beforeFile.version,
+        expectedContentHash: beforeFile.contentHash,
+        explanation: 'Should cleanly fail without modifying file'
+      });
+
+      assert.equal(failedPatch.success, false);
+
+      // Verify workspace is completely uncorrupted
+      const afterFile = db.getFile(testBuildId, filePath);
+      assert.ok(afterFile);
+      assert.equal(afterFile.content, cleanContent, 'Content must remain untouched');
+      assert.equal(afterFile.version, beforeFile.version, 'Version must not increment on failure');
+      assert.equal(afterFile.contentHash, beforeFile.contentHash, 'Content hash must match before-state');
+    });
+
+    test('9.8 Progress events represent actual pass transitions', async () => {
+      const testBuildId = makeTestBuild('events_track');
+
+      const run = await CodeGenerationEngine.runGenerationPipeline({
+        buildId: testBuildId,
+        userRequest: 'Build clean Math utilities component',
+        mockAiResponse: {
+          thinking: 'Generate clean math component',
+          actions: [
+            {
+              action: 'create_file',
+              path: 'src/utils/calc.ts',
+              content: 'export function add(a: number, b: number): number {\n  return a + b;\n}\n',
+              explanation: 'Add calculator function'
+            }
+          ]
+        }
+      });
+
+      assert.equal(run.status, 'finalized');
+
+      const events = db.getEvents(testBuildId);
+      const eventTypes = events.map(e => e.type);
+
+      assert.ok(eventTypes.includes('codegen_started'), 'Must emit codegen_started');
+      assert.ok(eventTypes.includes('codegen_pass_started'), 'Must emit codegen_pass_started');
+      assert.ok(eventTypes.includes('codegen_pass_completed'), 'Must emit codegen_pass_completed');
+      assert.ok(eventTypes.includes('codegen_finalized'), 'Must emit codegen_finalized');
+
+      // Verify all 6 passes were tracked
+      assert.equal(run.passes.length, 6);
+      const passNames = run.passes.map(p => p.passName);
+      assert.deepEqual(passNames, ['planning', 'generation', 'integration', 'validation', 'repair', 'finalization']);
+    });
+
+    test('9.9 Failed model responses are handled correctly', async () => {
+      const testBuildId = makeTestBuild('model_fail');
+
+      // Simulate an unparseable or erroring model response
+      const run = await CodeGenerationEngine.runGenerationPipeline({
+        buildId: testBuildId,
+        userRequest: 'Generate feature with failing model',
+        mockAiResponse: {
+          thinking: 'Failure simulation',
+          actions: [] // Empty actions with no valid generation
+        }
+      });
+
+      assert.equal(run.status, 'failed', 'Generation run with 0 files produced must be marked failed');
+      assert.equal(run.passes[1].status, 'failed', 'Generation pass must be marked failed');
+      assert.match(run.passes[1].summary, /No actionable files/);
+
+      const events = db.getEvents(testBuildId);
+      assert.ok(events.some(e => e.type === 'codegen_failed'), 'codegen_failed event must be emitted');
+    });
+
+    test('9.10 Generation history preserves accurate final status in database', async () => {
+      const testBuildId = makeTestBuild('history_persist');
+
+      const run = await CodeGenerationEngine.runGenerationPipeline({
+        buildId: testBuildId,
+        userRequest: 'Build formatted date helper',
+        mockAiResponse: {
+          thinking: 'Date utility component',
+          actions: [
+            {
+              action: 'create_file',
+              path: 'src/utils/dateFormat.ts',
+              content: 'export function formatDate(d: Date): string { return d.toISOString(); }\n',
+              explanation: 'Date formatter'
+            }
+          ]
+        }
+      });
+
+      // Check DB persistence by ID
+      const byId = db.getGenerationRun(run.id);
+      assert.ok(byId, 'Run must exist in DB');
+      assert.equal(byId?.id, run.id);
+      assert.equal(byId?.status, 'finalized');
+      assert.equal(byId?.buildId, testBuildId);
+      assert.equal(byId?.currentPass, 6);
+      assert.equal(byId?.passes.length, 6);
+
+      // Check DB query by Build
+      const byBuild = db.getGenerationRunsByBuild(testBuildId);
+      assert.ok(byBuild.length >= 1);
+      assert.ok(byBuild.some(r => r.id === run.id && r.status === 'finalized'));
     });
   });
 });

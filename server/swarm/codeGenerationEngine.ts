@@ -2,17 +2,20 @@ import crypto from 'node:crypto';
 import { 
   CodeGenerationRun, 
   GenerationPass, 
+  GenerationProfile,
   GenerationProfileType, 
   ProjectFile, 
   ProjectContract, 
   RepairAttemptLog,
   ModelConfig,
-  ModelActionResponse
+  ModelActionResponse,
+  ArchitectureDecision,
+  EventType
 } from '../types.js';
 import { db } from '../store.js';
 import { modelRegistry } from '../modelRegistry.js';
 import { smartRouter } from '../smartRouter.js';
-import { callUnifiedGateway, SILENT_WORKER_SYSTEM_PROMPT } from '../gateway.js';
+import { callUnifiedGateway } from '../gateway.js';
 import { GenerationProfileRegistry } from './generationProfiles.js';
 import { ProjectContextEngine } from './projectContextEngine.js';
 import { ContractFirstEngine } from './contractFirstEngine.js';
@@ -34,6 +37,7 @@ export interface CodeGenerationOptions {
   taskId?: string;
   maxRepairAttempts?: number;
   mockActionResponse?: ModelActionResponse;
+  approvalGranted?: boolean;
 }
 
 export class CodeGenerationEngine {
@@ -47,7 +51,7 @@ export class CodeGenerationEngine {
    * Pass 6: Finalization
    */
   static async runGenerationPipeline(options: CodeGenerationOptions): Promise<CodeGenerationRun> {
-    const { buildId, userId, userRequest, taskId, maxRepairAttempts = 3 } = options;
+    const { buildId, userId, userRequest, taskId, maxRepairAttempts = 3, approvalGranted = false } = options;
 
     const build = db.getBuild(buildId);
     if (!build) {
@@ -111,6 +115,7 @@ export class CodeGenerationEngine {
       // PASS 1: PLANNING & CONTRACT ESTABLISHMENT
       // ==========================================
       passes[0].status = 'in_progress';
+      this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'planning', passNumber: 1 });
       const pass1Start = Date.now();
 
       const existingFiles = db.getAllFiles(buildId);
@@ -152,6 +157,7 @@ export class CodeGenerationEngine {
       // PASS 2: CODE GENERATION
       // ==========================================
       passes[1].status = 'in_progress';
+      this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'generation', passNumber: 2 });
       const pass2Start = Date.now();
 
       const compiledGenerationPrompt = PromptCompiler.compileGenerationPrompt({
@@ -173,7 +179,7 @@ export class CodeGenerationEngine {
       } else {
         const genRes = await callUnifiedGateway({
           modelId: selectedModel.id,
-          taskComplexity: 'advanced',
+          taskComplexity: 'flagship',
           prompt: compiledGenerationPrompt.userPrompt,
           systemInstruction: compiledGenerationPrompt.systemPrompt,
           allowFallback: true,
@@ -190,13 +196,51 @@ export class CodeGenerationEngine {
         actions = genRes.parsedResponse.actions;
       }
 
-      // Filter and apply generated actions
+      // Filter generated file actions
       const fileActions = actions.filter((a: any) => a.action === 'create_file' || a.action === 'patch_file');
 
       if (fileActions.length === 0) {
         throw new Error('Model produced no file creation or patch actions');
       }
 
+      // SENSITIVE FILE DETECTION BEFORE APPLICATION:
+      // Inspect target files before writing to disk or database
+      const proposedPaths = fileActions.map((a: any) => a.path);
+      const sensitiveFiles = proposedPaths.filter((p: string) => ApprovalGateService.isSensitiveFilePath(p));
+
+      if (sensitiveFiles.length > 0 && !approvalGranted && !ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles)) {
+        // Request human approval and hold patch in pending state
+        ApprovalGateService.requestApproval(buildId, userId, {
+          requestingAgent: selectedModel.id,
+          requestingRole: 'security_specialist',
+          operationType: 'security_sensitive_change',
+          explanation: `Generated code touches sensitive security/auth/env files: ${sensitiveFiles.join(', ')}`,
+          affectedFiles: sensitiveFiles,
+          proposedChanges: `Proposed code generation touches: ${sensitiveFiles.join(', ')}`,
+          riskLevel: 'high'
+        });
+
+        passes[1].status = 'failed';
+        passes[1].durationMs = Date.now() - pass2Start;
+        passes[1].summary = `Sensitive file modification detected (${sensitiveFiles.join(', ')}). Awaiting human approval.`;
+        passes[1].diagnostics = sensitiveFiles.map(f => `Pending approval gate: ${f}`);
+
+        runRecord.status = 'pending_approval';
+        runRecord.currentPass = 2;
+        runRecord.error = `Human approval required for sensitive files: ${sensitiveFiles.join(', ')}`;
+        runRecord.completedAt = Date.now();
+        db.saveGenerationRun(runRecord);
+
+        this.emitEvent(buildId, 'codegen_approval_required', {
+          runId,
+          sensitiveFiles,
+          message: 'Generated files require human approval before application'
+        });
+
+        return runRecord;
+      }
+
+      // Apply batch actions atomically
       const batchRes = await MergeManager.applyBatchActions(buildId, selectedModel.id, fileActions);
       if (!batchRes.success) {
         throw new Error(`Failed to apply generated files: ${batchRes.error}`);
@@ -228,6 +272,7 @@ export class CodeGenerationEngine {
       // PASS 3: INTEGRATION
       // ==========================================
       passes[2].status = 'in_progress';
+      this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'integration', passNumber: 3 });
       const pass3Start = Date.now();
 
       const postGenFiles = db.getAllFiles(buildId);
@@ -235,7 +280,7 @@ export class CodeGenerationEngine {
 
       if (!integrationReport.passed && integrationReport.issues.length > 0) {
         passes[2].diagnostics = integrationReport.issues.map(i => `[${i.severity.toUpperCase()}] ${i.sourceFile}: ${i.message}`);
-        passes[2].status = 'in_progress';
+        passes[2].status = 'failed';
         passes[2].summary = `Integration discovered ${integrationReport.issues.length} contract or import issues to resolve`;
       } else {
         passes[2].status = 'passed';
@@ -247,35 +292,37 @@ export class CodeGenerationEngine {
       runRecord.status = 'validating';
       db.saveGenerationRun(runRecord);
 
+      this.emitEvent(buildId, 'codegen_pass_completed', {
+        runId,
+        pass: 'integration',
+        status: passes[2].status,
+        issuesCount: integrationReport.issues.length
+      });
+
       // ==========================================
       // PASS 4: VALIDATION
       // ==========================================
       passes[3].status = 'in_progress';
+      this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'validation', passNumber: 4 });
       const pass4Start = Date.now();
 
       const currentFiles = db.getAllFiles(buildId);
-      const syntaxErrors = ExecutionAdapter.validateSyntax(currentFiles);
-      const typeCheck = ExecutionAdapter.validateTypes(currentFiles);
-      const contractValidations = ContractFirstEngine.validateFilesAgainstContracts(currentFiles, establishedContracts);
-
-      const contractErrors = contractValidations.flatMap(c => c.errors);
-      const hasErrors = syntaxErrors.length > 0 || typeCheck.errors.length > 0 || contractErrors.length > 0;
+      const validationSnapshot = AutomaticRepairEngine.evaluateValidationDimensions(currentFiles, establishedContracts);
+      const hasErrors = !validationSnapshot.clean;
 
       runRecord.validationResults = {
-        syntaxErrors: syntaxErrors.length,
-        typeErrors: typeCheck.errors.length,
-        contractErrors: contractErrors.length,
-        clean: !hasErrors
+        syntaxErrors: validationSnapshot.syntaxErrorsCount,
+        typeErrors: validationSnapshot.typeErrorsCount,
+        integrationErrors: validationSnapshot.integrationErrorsCount,
+        contractErrors: validationSnapshot.contractErrorsCount,
+        configErrors: validationSnapshot.configErrorsCount,
+        clean: validationSnapshot.clean
       };
 
       if (hasErrors) {
         passes[3].status = 'failed';
-        passes[3].summary = `Validation discovered ${syntaxErrors.length} syntax, ${typeCheck.errors.length} type, and ${contractErrors.length} contract errors`;
-        passes[3].diagnostics = [
-          ...syntaxErrors.map(e => `Syntax error in ${e.filePath}: ${e.message}`),
-          ...typeCheck.errors.map(e => `Type error in ${e.filePath}: ${e.message}`),
-          ...contractErrors
-        ];
+        passes[3].summary = `Validation discovered ${validationSnapshot.diagnostics.length} issues across project files`;
+        passes[3].diagnostics = validationSnapshot.diagnostics;
       } else {
         passes[3].status = 'passed';
         passes[3].summary = 'All files passed syntax, TypeScript compilation, and contract validation cleanly';
@@ -286,11 +333,21 @@ export class CodeGenerationEngine {
       runRecord.status = 'repairing';
       db.saveGenerationRun(runRecord);
 
+      this.emitEvent(buildId, 'codegen_pass_completed', {
+        runId,
+        pass: 'validation',
+        status: passes[3].status,
+        errorsCount: validationSnapshot.diagnostics.length
+      });
+
       // ==========================================
       // PASS 5: AUTOMATIC REPAIR
       // ==========================================
       passes[4].status = 'in_progress';
+      this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'repair', passNumber: 5 });
       const pass5Start = Date.now();
+
+      let repairFailed = false;
 
       if (hasErrors) {
         const repairResult = await AutomaticRepairEngine.repairProjectFiles({
@@ -298,6 +355,7 @@ export class CodeGenerationEngine {
           userId,
           model: selectedModel,
           files: currentFiles,
+          contracts: establishedContracts,
           maxAttempts: maxRepairAttempts
         });
 
@@ -317,6 +375,7 @@ export class CodeGenerationEngine {
           passes[4].status = 'passed';
           passes[4].summary = `Automatically repaired ${repairResult.resolvedDefects.length} defects with compiler evidence`;
         } else {
+          repairFailed = true;
           passes[4].status = 'failed';
           passes[4].summary = `Unresolved defects remain after ${repairResult.repairAttemptsCount} repair attempts`;
           passes[4].diagnostics = repairResult.unresolvedDefects;
@@ -331,46 +390,78 @@ export class CodeGenerationEngine {
       runRecord.status = 'finalizing';
       db.saveGenerationRun(runRecord);
 
+      this.emitEvent(buildId, 'codegen_pass_completed', {
+        runId,
+        pass: 'repair',
+        status: passes[4].status,
+        repairedCount: runRecord.repairLogs.length
+      });
+
       // ==========================================
-      // PASS 6: FINALIZATION & APPROVAL GATES
+      // PASS 6: FINALIZATION & STRICT COMPLETION VERIFICATION
       // ==========================================
       passes[5].status = 'in_progress';
+      this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'finalization', passNumber: 6 });
       const pass6Start = Date.now();
 
-      // Check if human approval is required for sensitive files (e.g. env, auth, security)
-      const touchedFiles = [...runRecord.filesCreated, ...runRecord.filesModified];
-      const sensitiveFiles = touchedFiles.filter(f => f.includes('auth') || f.includes('crypto') || f.includes('security') || f.includes('.env'));
+      // Finalization must strictly verify the latest workspace state directly from storage
+      const finalWorkspaceFiles = db.getAllFiles(buildId);
+      const finalVerification = AutomaticRepairEngine.evaluateValidationDimensions(finalWorkspaceFiles, establishedContracts);
 
-      if (sensitiveFiles.length > 0) {
-        ApprovalGateService.requestApproval(buildId, userId, {
-          requestingAgent: 'codegen_engine',
-          requestingRole: 'security_specialist',
-          operationType: 'security_sensitive_change',
-          explanation: `Generated code touches security or authentication layers for: "${userRequest}"`,
-          affectedFiles: sensitiveFiles,
-          proposedChanges: `Modifies sensitive files: ${sensitiveFiles.join(', ')}`,
-          riskLevel: 'high'
+      // STRICT COMPLETION RULES:
+      // 1. A failed repair or unresolved defects must never produce a successful finalized run
+      // 2. A failed validation must not be treated as success
+      if (repairFailed || !finalVerification.clean) {
+        passes[5].status = 'failed';
+        passes[5].durationMs = Date.now() - pass6Start;
+        passes[5].summary = `Finalization rejected: Workspace contains ${finalVerification.diagnostics.length} unresolved defects.`;
+        passes[5].diagnostics = finalVerification.diagnostics;
+
+        runRecord.status = 'failed';
+        runRecord.error = `Generation failed validation: ${finalVerification.diagnostics[0] || 'Critical unresolved defects in workspace'}`;
+        runRecord.completedAt = Date.now();
+        db.saveGenerationRun(runRecord);
+
+        this.emitEvent(buildId, 'codegen_failed', {
+          runId,
+          error: runRecord.error,
+          unresolvedCount: finalVerification.diagnostics.length
         });
+
+        return runRecord;
       }
 
-      // Record pattern in Project Memory for future cross-agent reference
-      ProjectMemoryService.recordDecision(buildId, userId, {
+      // Check if warnings exist
+      const hasWarnings = finalVerification.configErrorsCount > 0;
+
+      // Record architectural decision in Project Memory
+      const adrId = `adr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      const decision: ArchitectureDecision = {
+        id: adrId,
         title: `Phase 9 Code Generation: ${profile.displayName}`,
-        rationale: `Generated ${runRecord.filesCreated.length} files according to ${profile.displayName} profile contracts`,
-        affectedFiles: touchedFiles,
-        status: 'accepted'
-      });
+        status: 'accepted',
+        context: `User requirement: "${userRequest}"`,
+        decision: `Generated ${runRecord.filesCreated.length} files and modified ${runRecord.filesModified.length} files conforming to profile contracts.`,
+        rationale: `Synthesized ${establishedContracts.length} initial contracts and verified against AST diagnostics.`,
+        affectedFiles: [...runRecord.filesCreated, ...runRecord.filesModified],
+        timestamp: Date.now()
+      };
+      ProjectMemoryService.recordDecision(buildId, userId, decision);
 
       passes[5].status = 'passed';
       passes[5].durationMs = Date.now() - pass6Start;
-      passes[5].summary = `Generation finalized. Workspace verified and project memory recorded.`;
+      passes[5].summary = hasWarnings 
+        ? 'Generation completed with non-fatal configuration warnings.' 
+        : 'Generation finalized cleanly. All 6 passes passed and workspace verified.';
 
-      runRecord.status = 'finalized';
+      runRecord.status = hasWarnings ? 'completed_with_warnings' : 'finalized';
       runRecord.completedAt = Date.now();
       db.saveGenerationRun(runRecord);
 
-      this.emitEvent(buildId, 'codegen_finalized', {
+      const finalizedEventType: EventType = hasWarnings ? 'codegen_completed_with_warnings' : 'codegen_finalized';
+      this.emitEvent(buildId, finalizedEventType, {
         runId,
+        status: runRecord.status,
         filesCreatedCount: runRecord.filesCreated.length,
         filesModifiedCount: runRecord.filesModified.length,
         durationMs: Date.now() - startTime
@@ -381,6 +472,14 @@ export class CodeGenerationEngine {
       runRecord.status = 'failed';
       runRecord.error = err.message || 'Generation pipeline failed';
       runRecord.completedAt = Date.now();
+
+      // Mark current pass as failed
+      const activePassIndex = (runRecord.currentPass || 1) - 1;
+      if (passes[activePassIndex]) {
+        passes[activePassIndex].status = 'failed';
+        passes[activePassIndex].summary = `Aborted due to error: ${runRecord.error}`;
+      }
+
       db.saveGenerationRun(runRecord);
 
       this.emitEvent(buildId, 'codegen_failed', {
@@ -437,13 +536,13 @@ export class CodeGenerationEngine {
 
     // Use smart router or highest capability enabled model from registry
     const enabledModels = modelRegistry.getEnabledModels();
-    const advancedModel = enabledModels.find(m => m.capabilityLevel === 'flagship' || m.capabilityLevel === 'advanced');
+    const advancedModel = enabledModels.find(m => m.capabilityLevel === 'flagship' || (m.capabilityLevel as string) === 'advanced');
     if (advancedModel) return advancedModel;
 
     return enabledModels[0] || modelRegistry.getAllModels()[0];
   }
 
-  private static emitEvent(buildId: string, type: string, details: any): void {
+  private static emitEvent(buildId: string, type: EventType, details: any): void {
     db.addEvent({
       id: `evt_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
       buildId,

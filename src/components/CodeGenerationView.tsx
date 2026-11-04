@@ -1,33 +1,37 @@
 import React, { useState, useEffect } from 'react';
 import { useSwarm } from '../context/SwarmContext.js';
 import { 
-  CodeGenerationRun, 
   GenerationProfile, 
   GenerationProfileType, 
-  ProjectContract, 
-  ProjectContext 
+  CodeGenerationRun,
+  ProjectContext,
+  ProjectContract
 } from '../types/index.js';
 import { 
-  Code2, 
   Play, 
   CheckCircle2, 
   AlertCircle, 
   Clock, 
+  Code2, 
   FileCode, 
   Cpu, 
   Layers, 
-  ShieldCheck, 
+  ShieldAlert, 
   Wrench, 
   History, 
   Eye, 
   Sparkles, 
   ExternalLink,
   ChevronRight,
-  Info
+  Info,
+  RefreshCw,
+  XCircle,
+  ShieldCheck,
+  AlertTriangle
 } from 'lucide-react';
 
 export const CodeGenerationView: React.FC = () => {
-  const { activeBuild, models } = useSwarm();
+  const { activeBuild, allModels } = useSwarm();
   const [profiles, setProfiles] = useState<GenerationProfile[]>([]);
   const [selectedProfileId, setSelectedProfileId] = useState<GenerationProfileType>('website_and_web_app');
   const [selectedModelId, setSelectedModelId] = useState<string>('');
@@ -75,6 +79,36 @@ export const CodeGenerationView: React.FC = () => {
     loadHistory();
   }, [activeBuild?.id]);
 
+  // Real-time polling while generation pipeline is in flight
+  useEffect(() => {
+    if (!activeBuild?.id || !activeRun?.id) return;
+
+    const inProgressStatuses = ['planning', 'generating', 'integrating', 'validating', 'repairing', 'finalizing'];
+    const shouldPoll = isGenerating || inProgressStatuses.includes(activeRun.status);
+
+    if (!shouldPoll) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/builds/${activeBuild.id}/codegen/runs/${activeRun.id}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.run) {
+            setActiveRun(data.run);
+            if (['finalized', 'completed_with_warnings', 'failed', 'cancelled', 'pending_approval'].includes(data.run.status)) {
+              setIsGenerating(false);
+              loadHistory();
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Generation live polling error:', err);
+      }
+    }, 1200);
+
+    return () => clearInterval(interval);
+  }, [activeBuild?.id, activeRun?.id, activeRun?.status, isGenerating]);
+
   const handlePreviewContext = async () => {
     if (!activeBuild?.id) return;
     setErrorMessage(null);
@@ -94,7 +128,7 @@ export const CodeGenerationView: React.FC = () => {
         setErrorMessage(data.error || 'Failed to preview context');
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Network error');
+      setErrorMessage(err.message || 'Network error while contacting server');
     }
   };
 
@@ -123,13 +157,33 @@ export const CodeGenerationView: React.FC = () => {
       if (res.ok && data.run) {
         setActiveRun(data.run);
         loadHistory();
+        if (data.run.status === 'failed') {
+          setErrorMessage(data.run.error || 'Generation failed validation checks');
+        }
       } else {
-        setErrorMessage(data.error || 'Generation pipeline failed');
+        setErrorMessage(data.error || 'Generation pipeline failed to start');
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Generation failed');
+      setErrorMessage(err.message || 'Generation failed due to network error');
     } finally {
       setIsGenerating(false);
+    }
+  };
+
+  const handleCancelRun = async () => {
+    if (!activeBuild?.id || !activeRun?.id) return;
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/codegen/runs/${activeRun.id}/cancel`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+      if (data.run) {
+        setActiveRun(data.run);
+        setIsGenerating(false);
+        loadHistory();
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to cancel generation run');
     }
   };
 
@@ -150,14 +204,24 @@ export const CodeGenerationView: React.FC = () => {
             </span>
           </div>
           <p className="text-sm text-neutral-400 mt-1.5">
-            Multi-pass contract-first code generation with AST context discovery and evidence-based automatic repair.
+            Multi-pass contract-first code generation with AST context discovery, strict validation gates, and evidence-based automatic repair.
           </p>
         </div>
 
         {activeBuild && (
-          <div className="text-xs font-mono bg-neutral-900 border border-neutral-800 px-3 py-2 rounded-md flex items-center gap-2 text-neutral-400">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Active Project: <strong className="text-neutral-200">{activeBuild.idea.slice(0, 32)}...</strong></span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={loadHistory}
+              title="Refresh generation history"
+              className="p-2 bg-neutral-900 border border-neutral-800 rounded-md text-neutral-400 hover:text-neutral-200 transition-colors"
+            >
+              <RefreshCw className="w-4 h-4" />
+            </button>
+            <div className="text-xs font-mono bg-neutral-900 border border-neutral-800 px-3 py-2 rounded-md flex items-center gap-2 text-neutral-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Project: <strong className="text-neutral-200">{activeBuild.idea.slice(0, 28)}...</strong></span>
+            </div>
           </div>
         )}
       </div>
@@ -261,7 +325,7 @@ export const CodeGenerationView: React.FC = () => {
                 className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-2.5 text-sm text-neutral-100 focus:outline-none focus:border-amber-400 font-sans"
               >
                 <option value="">Auto-Route via SmartRouter (Recommended)</option>
-                {models.map(m => (
+                {allModels && allModels.map(m => (
                   <option key={m.id} value={m.id}>
                     {m.displayName} ({m.badge})
                   </option>
@@ -296,7 +360,7 @@ export const CodeGenerationView: React.FC = () => {
                 {isGenerating ? (
                   <>
                     <span className="w-3.5 h-3.5 border-2 border-neutral-950 border-t-transparent rounded-full animate-spin" />
-                    Executing 6-Pass Swarm...
+                    Executing 6 Passes...
                   </>
                 ) : (
                   <>
@@ -305,6 +369,18 @@ export const CodeGenerationView: React.FC = () => {
                   </>
                 )}
               </button>
+
+              {isGenerating && (
+                <button
+                  type="button"
+                  onClick={handleCancelRun}
+                  title="Cancel active run"
+                  className="py-2.5 px-3 rounded-lg border border-rose-800/60 bg-rose-950/30 text-rose-300 hover:bg-rose-900/40 text-xs font-semibold flex items-center gap-1 transition-colors"
+                >
+                  <XCircle className="w-4 h-4" />
+                  Cancel
+                </button>
+              )}
             </div>
           </div>
 
@@ -357,7 +433,10 @@ export const CodeGenerationView: React.FC = () => {
                     <h3 className="font-bold text-white text-base">Generation Run #{activeRun.id.slice(-6)}</h3>
                     <span className={`px-2 py-0.5 rounded text-[11px] font-mono font-bold uppercase ${
                       activeRun.status === 'finalized' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' :
+                      activeRun.status === 'completed_with_warnings' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' :
+                      activeRun.status === 'pending_approval' ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 animate-pulse' :
                       activeRun.status === 'failed' ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' :
+                      activeRun.status === 'cancelled' ? 'bg-neutral-800 text-neutral-400 border border-neutral-700' :
                       'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
                     }`}>
                       {activeRun.status}
@@ -375,33 +454,58 @@ export const CodeGenerationView: React.FC = () => {
                 </div>
               </div>
 
+              {/* Status Warning Banner if Failed or Pending Approval */}
+              {activeRun.status === 'failed' && (
+                <div className="p-4 bg-rose-950/40 border border-rose-800/60 rounded-lg space-y-2">
+                  <div className="flex items-center gap-2 text-rose-400 font-bold text-xs uppercase font-mono">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>Generation Run Failed</span>
+                  </div>
+                  <p className="text-xs text-rose-200/90 leading-relaxed">
+                    {activeRun.error || 'The code generation pipeline failed verification. Unresolved compiler or contract defects were detected.'}
+                  </p>
+                </div>
+              )}
+
+              {activeRun.status === 'pending_approval' && (
+                <div className="p-4 bg-purple-950/40 border border-purple-800/60 rounded-lg space-y-2">
+                  <div className="flex items-center gap-2 text-purple-400 font-bold text-xs uppercase font-mono">
+                    <ShieldAlert className="w-4 h-4 shrink-0" />
+                    <span>Human Approval Gate Required</span>
+                  </div>
+                  <p className="text-xs text-purple-200/90 leading-relaxed">
+                    The generated patches modify sensitive security, crypto, auth, or environment files. Patches remain safely pending until reviewed and approved by human operator.
+                  </p>
+                </div>
+              )}
+
               {/* Sub-Tabs */}
-              <div className="flex items-center gap-2 border-b border-neutral-800 pb-2 text-xs font-mono">
+              <div className="flex items-center gap-2 border-b border-neutral-800 pb-2 text-xs font-mono overflow-x-auto">
                 <button
                   type="button"
                   onClick={() => setActiveTab('passes')}
-                  className={`px-3 py-1.5 rounded transition-colors ${activeTab === 'passes' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
+                  className={`px-3 py-1.5 rounded transition-colors shrink-0 ${activeTab === 'passes' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
                 >
                   6-Pass Pipeline ({activeRun.passes.length})
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveTab('files')}
-                  className={`px-3 py-1.5 rounded transition-colors ${activeTab === 'files' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
+                  className={`px-3 py-1.5 rounded transition-colors shrink-0 ${activeTab === 'files' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
                 >
                   Files ({activeRun.filesCreated.length + activeRun.filesModified.length})
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveTab('contracts')}
-                  className={`px-3 py-1.5 rounded transition-colors ${activeTab === 'contracts' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
+                  className={`px-3 py-1.5 rounded transition-colors shrink-0 ${activeTab === 'contracts' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
                 >
                   Contracts ({activeRun.contractsEstablished.length})
                 </button>
                 <button
                   type="button"
                   onClick={() => setActiveTab('repairs')}
-                  className={`px-3 py-1.5 rounded transition-colors ${activeTab === 'repairs' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
+                  className={`px-3 py-1.5 rounded transition-colors shrink-0 ${activeTab === 'repairs' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
                 >
                   Repair Logs ({activeRun.repairLogs.length})
                 </button>
@@ -420,18 +524,26 @@ export const CodeGenerationView: React.FC = () => {
                         'bg-neutral-950/40 border-neutral-800/60 text-neutral-500'
                       }`}
                     >
-                      <div className="flex items-start gap-3">
-                        <div className="mt-0.5">
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
+                        <div className="mt-0.5 shrink-0">
                           {pass.status === 'passed' && <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
                           {pass.status === 'in_progress' && <span className="w-3.5 h-3.5 rounded-full border-2 border-amber-400 border-t-transparent animate-spin inline-block" />}
                           {pass.status === 'failed' && <AlertCircle className="w-4 h-4 text-rose-400" />}
                           {pass.status === 'pending' && <Clock className="w-4 h-4 text-neutral-600" />}
-                          {pass.status === 'skipped' && <span className="text-[10px] font-mono text-neutral-500">SKIP</span>}
+                          {pass.status === 'skipped' && <span className="text-[10px] font-mono text-neutral-500 font-bold">SKIP</span>}
                         </div>
-                        <div>
+                        <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="text-xs font-mono font-bold uppercase tracking-wider text-neutral-300">
                               Pass {pass.passNumber}: {pass.passName}
+                            </span>
+                            <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded uppercase ${
+                              pass.status === 'passed' ? 'text-emerald-400 bg-emerald-950/40' :
+                              pass.status === 'failed' ? 'text-rose-400 bg-rose-950/40' :
+                              pass.status === 'in_progress' ? 'text-amber-400 bg-amber-950/40' :
+                              'text-neutral-500'
+                            }`}>
+                              {pass.status}
                             </span>
                             {pass.durationMs !== undefined && (
                               <span className="text-[10px] font-mono text-neutral-500">({pass.durationMs}ms)</span>
@@ -443,9 +555,12 @@ export const CodeGenerationView: React.FC = () => {
 
                           {pass.diagnostics && pass.diagnostics.length > 0 && (
                             <div className="mt-2 p-2 bg-neutral-950 rounded border border-neutral-800 text-[11px] font-mono text-neutral-400 space-y-1">
-                              {pass.diagnostics.slice(0, 3).map((d, i) => (
+                              {pass.diagnostics.slice(0, 4).map((d, i) => (
                                 <div key={i} className="truncate text-rose-300/90">{d}</div>
                               ))}
+                              {pass.diagnostics.length > 4 && (
+                                <div className="text-[10px] text-neutral-500">+{pass.diagnostics.length - 4} additional diagnostics</div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -466,11 +581,11 @@ export const CodeGenerationView: React.FC = () => {
                       <div className="space-y-1.5">
                         {activeRun.filesCreated.map(f => (
                           <div key={f} className="p-2.5 bg-neutral-950 border border-neutral-800 rounded flex items-center justify-between text-xs font-mono">
-                            <span className="text-emerald-400 flex items-center gap-2">
-                              <FileCode className="w-3.5 h-3.5" />
-                              {f}
+                            <span className="text-emerald-400 flex items-center gap-2 truncate">
+                              <FileCode className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate">{f}</span>
                             </span>
-                            <span className="text-[10px] bg-emerald-500/10 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/20">NEW</span>
+                            <span className="text-[10px] bg-emerald-500/10 text-emerald-300 px-2 py-0.5 rounded border border-emerald-500/20 shrink-0">NEW</span>
                           </div>
                         ))}
                       </div>
@@ -485,11 +600,11 @@ export const CodeGenerationView: React.FC = () => {
                       <div className="space-y-1.5">
                         {activeRun.filesModified.map(f => (
                           <div key={f} className="p-2.5 bg-neutral-950 border border-neutral-800 rounded flex items-center justify-between text-xs font-mono">
-                            <span className="text-amber-400 flex items-center gap-2">
-                              <FileCode className="w-3.5 h-3.5" />
-                              {f}
+                            <span className="text-amber-400 flex items-center gap-2 truncate">
+                              <FileCode className="w-3.5 h-3.5 shrink-0" />
+                              <span className="truncate">{f}</span>
                             </span>
-                            <span className="text-[10px] bg-amber-500/10 text-amber-300 px-2 py-0.5 rounded border border-amber-500/20">PATCHED</span>
+                            <span className="text-[10px] bg-amber-500/10 text-amber-300 px-2 py-0.5 rounded border border-amber-500/20 shrink-0">PATCHED</span>
                           </div>
                         ))}
                       </div>
@@ -571,7 +686,14 @@ export const CodeGenerationView: React.FC = () => {
                         {new Date(run.createdAt).toLocaleTimeString()} · {run.filesCreated.length} files created · {run.repairAttempts} repairs
                       </div>
                     </div>
-                    <span className="text-[10px] font-mono uppercase text-amber-400">{run.status}</span>
+                    <span className={`text-[10px] font-mono uppercase font-bold ${
+                      run.status === 'finalized' ? 'text-emerald-400' :
+                      run.status === 'completed_with_warnings' ? 'text-amber-400' :
+                      run.status === 'failed' ? 'text-rose-400' :
+                      'text-neutral-400'
+                    }`}>
+                      {run.status}
+                    </span>
                   </button>
                 ))}
               </div>

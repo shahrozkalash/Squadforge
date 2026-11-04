@@ -693,8 +693,13 @@ export class ExecutionAdapter {
   /**
    * Performs genuine, project-aware TypeScript compilation and type checking.
    * Reads and respects generated tsconfig.json (compilerOptions, strict mode, JSX, path aliases, module resolution),
-   * provides controlled access to dependencies, and classifies syntax errors, type errors, config errors, and warnings.
+  /**
+   * Validates TypeScript types across project files. Alias for runTypeCheck.
    */
+  static validateTypes(buildIdOrFiles: string | ProjectFile[], filesMaybe?: ProjectFile[]): TypeCheckReport {
+    return this.runTypeCheck(buildIdOrFiles, filesMaybe);
+  }
+
   static runTypeCheck(buildIdOrFiles: string | ProjectFile[], filesMaybe?: ProjectFile[]): TypeCheckReport {
     let buildId: string;
     let files: ProjectFile[];

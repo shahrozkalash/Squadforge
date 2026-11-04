@@ -253,11 +253,13 @@ export interface FileVersion {
 }
 
 export interface ProjectFile {
+  id?: string;
+  buildId?: string;
   path: string;
   content: string;
   version: number;
   ownerModel?: string;
-  history: FileVersion[];
+  history?: FileVersion[];
   leaseOwner?: string | null;
   leaseExpiresAt?: number | null;
   createdAt?: number;
@@ -314,7 +316,15 @@ export type EventType =
   | 'defect_resolved'
   | 'approval_requested'
   | 'approval_responded'
-  | 'knowledge_shared';
+  | 'knowledge_shared'
+  | 'codegen_started'
+  | 'codegen_pass_started'
+  | 'codegen_pass_completed'
+  | 'codegen_approval_required'
+  | 'codegen_completed_with_warnings'
+  | 'codegen_finalized'
+  | 'codegen_failed'
+  | 'codegen_cancelled';
 
 export interface SwarmEvent {
   id: string;
@@ -1813,7 +1823,11 @@ export type CodeGenerationStatus =
   | 'integrating'
   | 'validating'
   | 'repairing'
+  | 'finalizing'
   | 'finalized'
+  | 'completed_with_warnings'
+  | 'pending_approval'
+  | 'cancelled'
   | 'failed';
 
 export interface RepairAttemptLog {

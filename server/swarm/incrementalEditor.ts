@@ -3,6 +3,7 @@ import { ProjectFile, IncrementalFileEdit, FileConflict } from '../types.js';
 import { db, computeContentHash } from '../store.js';
 import { MergeManager } from './mergeManager.js';
 import { PatchValidationPipeline } from './patchValidationPipeline.js';
+import { ApprovalGateService } from './approvalGateService.js';
 
 export interface IncrementalEditResult {
   success: boolean;
@@ -28,6 +29,32 @@ export class IncrementalEditor {
     const existingFile = db.getFile(buildId, edit.filePath);
     const previousVersion = existingFile?.version || 0;
 
+    // 0. Sensitive file gate: detect sensitive changes before applying them
+    if (ApprovalGateService.isSensitiveFilePath(edit.filePath)) {
+      const isApproved = ApprovalGateService.hasApprovedRequestForFiles(buildId, [edit.filePath]);
+      if (!isApproved) {
+        const build = db.getBuild(buildId);
+        if (build?.userId) {
+          ApprovalGateService.requestApproval(buildId, build.userId, {
+            requestingAgent: authorAgent,
+            requestingRole: 'security_specialist',
+            operationType: 'security_sensitive_change',
+            explanation: `Incremental edit requested on sensitive file: ${edit.filePath}`,
+            affectedFiles: [edit.filePath],
+            proposedChanges: edit.explanation || `Edit ${edit.filePath}`,
+            riskLevel: 'high'
+          });
+        }
+        return {
+          success: false,
+          filePath: edit.filePath,
+          previousVersion,
+          changeSummary: 'Pending human approval: Sensitive file change must be approved before application',
+          error: `Human approval required for sensitive file "${edit.filePath}". Request created and pending.`
+        };
+      }
+    }
+
     // 1. Check for stale patch / base version mismatch
     if (existingFile && edit.expectedBaseVersion !== undefined) {
       if (existingFile.version !== edit.expectedBaseVersion) {
@@ -43,7 +70,7 @@ export class IncrementalEditor {
 
     // 2. Check for content hash mismatch
     if (existingFile && edit.expectedContentHash) {
-      const currentHash = computeContentHash(existingFile.content);
+      const currentHash = existingFile.contentHash || computeContentHash(existingFile.content);
       if (currentHash !== edit.expectedContentHash) {
         return {
           success: false,
@@ -56,7 +83,16 @@ export class IncrementalEditor {
     }
 
     // 3. Handle File Creation
-    if (edit.action === 'create' || !existingFile) {
+    if (edit.action === 'create') {
+      if (existingFile) {
+        return {
+          success: false,
+          filePath: edit.filePath,
+          previousVersion,
+          changeSummary: 'File already exists: Cannot execute create action on existing file',
+          error: `File ${edit.filePath} already exists at v${existingFile.version}`
+        };
+      }
       const createRes = await MergeManager.createFile(buildId, authorAgent, {
         action: 'create_file',
         path: edit.filePath,
@@ -85,6 +121,16 @@ export class IncrementalEditor {
     }
 
     // 4. Targeted Patch / Snippet Replacement
+    if (!existingFile) {
+      return {
+        success: false,
+        filePath: edit.filePath,
+        previousVersion: 0,
+        changeSummary: 'Target file does not exist, cannot apply patch',
+        error: `File ${edit.filePath} does not exist in workspace`
+      };
+    }
+
     const currentContent = existingFile.content;
     let newContent: string;
 
@@ -107,9 +153,11 @@ export class IncrementalEditor {
     const patchRes = await MergeManager.applyPatch(buildId, authorAgent, {
       action: 'patch_file',
       path: edit.filePath,
-      edits: edit.findSnippet ? [{ find: edit.findSnippet, replace: edit.replacementContent }] : undefined,
+      edits: edit.findSnippet ? [{ find: edit.findSnippet, replace: edit.replacementContent }] : [{ find: currentContent, replace: newContent }],
       find: edit.findSnippet || currentContent,
       replace: edit.findSnippet ? edit.replacementContent : newContent,
+      expectedVersion: edit.expectedBaseVersion,
+      expectedContentHash: edit.expectedContentHash,
       commitMessage: edit.explanation || `Incremental update to ${edit.filePath}`
     });
 

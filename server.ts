@@ -2270,6 +2270,33 @@ app.get('/api/builds/:id/codegen/runs/:runId', requireAuth, (req, res) => {
   res.json({ run });
 });
 
+// Cancel a generation run
+app.post('/api/builds/:id/codegen/runs/:runId/cancel', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const run = db.getGenerationRun(req.params.runId);
+  if (!run || run.buildId !== build.id) {
+    return res.status(404).json({ error: 'Generation run not found' });
+  }
+
+  if (run.status !== 'finalized' && run.status !== 'failed' && run.status !== 'completed_with_warnings') {
+    run.status = 'cancelled';
+    run.error = 'Run was cancelled by user';
+    run.completedAt = Date.now();
+    db.saveGenerationRun(run);
+    db.addEvent({
+      id: `evt_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      buildId: build.id,
+      timestamp: Date.now(),
+      type: 'codegen_cancelled',
+      details: `Code generation run ${run.id} was cancelled by user`
+    });
+  }
+
+  res.json({ success: true, run });
+});
+
 // Preview discovered project context & established contracts for a requirement
 app.post('/api/builds/:id/codegen/preview-context', requireAuth, (req, res) => {
   const build = verifyBuildOwnership(req, res, req.params.id);

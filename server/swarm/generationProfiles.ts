@@ -59,14 +59,14 @@ export class GenerationProfileRegistry {
       return this.get('data_processing_application');
     }
 
-    // 6. Games & Creative
-    if (text.includes('game') || text.includes('canvas') || text.includes('three.js') || text.includes('webgl') || text.includes('arcade') || text.includes('puzzle') || text.includes('rpg')) {
-      return this.get('game_creative_application');
+    // 6. Multimedia & Audio/Video
+    if (text.includes('audio') || text.includes('synthesizer') || text.includes('waveform') || text.includes('sound') || text.includes('video') || text.includes('media editor') || text.includes('web audio') || text.includes('visualizer')) {
+      return this.get('multimedia_application');
     }
 
-    // 7. Multimedia
-    if (text.includes('video player') || text.includes('audio player') || text.includes('media editor') || text.includes('sound synthesizer') || text.includes('image filter') || text.includes('web audio')) {
-      return this.get('multimedia_application');
+    // 7. Games & Creative
+    if (text.includes('game') || text.includes('arcade') || text.includes('three.js') || text.includes('webgl') || text.includes('puzzle') || text.includes('rpg') || text.includes('canvas')) {
+      return this.get('game_creative_application');
     }
 
     // 8. E-commerce

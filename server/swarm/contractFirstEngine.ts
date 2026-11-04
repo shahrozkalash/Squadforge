@@ -242,7 +242,8 @@ export class ContractFirstEngine {
   }
 
   private static hasExportModifier(node: ts.Node): boolean {
-    if (!node.modifiers) return false;
-    return node.modifiers.some(m => m.kind === ts.SyntaxKind.ExportKeyword);
+    const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : (node as any).modifiers;
+    if (!modifiers) return false;
+    return (modifiers as readonly ts.Modifier[]).some(m => m.kind === ts.SyntaxKind.ExportKeyword);
   }
 }

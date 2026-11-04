@@ -210,7 +210,15 @@ export type EventType =
   | 'github_pushed'
   | 'build_completed'
   | 'build_stopped'
-  | 'build_failed';
+  | 'build_failed'
+  | 'codegen_started'
+  | 'codegen_pass_started'
+  | 'codegen_pass_completed'
+  | 'codegen_approval_required'
+  | 'codegen_completed_with_warnings'
+  | 'codegen_finalized'
+  | 'codegen_failed'
+  | 'codegen_cancelled';
 
 export interface SwarmEvent {
   id: string;
@@ -1581,7 +1589,11 @@ export type CodeGenerationStatus =
   | 'integrating'
   | 'validating'
   | 'repairing'
+  | 'finalizing'
   | 'finalized'
+  | 'completed_with_warnings'
+  | 'pending_approval'
+  | 'cancelled'
   | 'failed';
 
 export interface RepairAttemptLog {
