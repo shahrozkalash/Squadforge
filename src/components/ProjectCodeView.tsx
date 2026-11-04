@@ -630,7 +630,7 @@ export const ProjectCodeView: React.FC = () => {
                   title="SquadForge Application Live Preview"
                   className="w-full h-full border-0 bg-white"
                   style={{ minHeight: '620px' }}
-                  sandbox="allow-scripts allow-forms allow-same-origin allow-modals"
+                  sandbox="allow-scripts allow-forms allow-modals"
                 />
               ) : (
                 <div className="p-12 text-center text-xs font-mono text-neutral-500">

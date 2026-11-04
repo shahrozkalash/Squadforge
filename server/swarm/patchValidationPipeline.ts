@@ -9,6 +9,11 @@ import {
   AgentRole 
 } from '../types.js';
 
+/** MergeManager exempts 'system' from approval checks, so no caller may claim it here. */
+function isReservedActor(actor: unknown): boolean {
+  return typeof actor === 'string' && actor.trim().toLowerCase() === 'system';
+}
+
 export class PatchValidationPipeline {
   /**
    * Proposes a new code modification patch.
@@ -29,6 +34,10 @@ export class PatchValidationPipeline {
       expectedBehavior: string;
     }
   ): { success: boolean; patch?: PatchProposal; conflict?: FileConflict; error?: string } {
+    if (isReservedActor(params.authorAgent)) {
+      return { success: false, error: 'The system actor is reserved and cannot author patches' };
+    }
+
     const build = db.getBuild(buildId);
     if (!build || build.userId !== userId) {
       return { success: false, error: 'Unauthorized or build not found' };
@@ -273,6 +282,10 @@ export class PatchValidationPipeline {
       resolutionExplanation: string;
     }
   ): Promise<{ success: boolean; resolvedVersion?: number; error?: string }> {
+    if (isReservedActor(params.resolvedBy)) {
+      return { success: false, error: 'The system actor is reserved and cannot resolve conflicts' };
+    }
+
     const build = db.getBuild(buildId);
     if (!build || build.userId !== userId) {
       return { success: false, error: 'Unauthorized or build not found' };

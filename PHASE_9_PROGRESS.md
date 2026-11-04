@@ -1,7 +1,7 @@
 # Phase 9 Progress: Advanced Code Generation Engine
 
 **Status:** In progress and unverified. Phase 9 is not accepted.
-**Assessed commit:** `472de53` on `feature/agent-context-and-lockfile`
+**Latest assessment:** see `PHASE_9_ACCEPTANCE_REPORT.md` for results at `b8554f7`, and for the independent review. The tables below were recorded at `472de53`.
 **Date:** 2026-11-04
 
 This file covers the approval authorization and cancellation work. The rest of Phase 9 has not been re-assessed requirement by requirement.
@@ -52,8 +52,8 @@ The approval routes were not tested with real HTTP requests. The tests call the 
 | Propagate into model requests | Verified with stubbed network | The signal reaches OpenRouter `fetch`, Gemini `abortSignal`, and local model `fetch` |
 | No fallback after cancellation | Verified with stubbed network | A cancelled OpenRouter request does not start Gemini |
 | Check before file modification and patch application | Verified | `MergeManager.applyBatchActions` checks the signal after the patch queue wait, immediately before writing |
-| Cancelled runs cannot be finalized | Verified | Checks after each awaited step and before finalization. Storage also refuses to change a cancelled run |
-| Late responses cannot overwrite a cancelled run | Verified | Regression tests for a late model response and a stale writer |
+| Cancelled runs cannot be finalized | Verified in one process | Checks after each awaited step and before finalization |
+| Late responses cannot overwrite a cancelled run | Verified in one process | Regression test for a late model response. The stale writer test only proves the storage rule, which the pipeline does not reach in one process |
 | Keep files completed before cancellation | Verified | Regression test. Applied files stay in place and are listed on the run |
 | Clean up state after every run | Verified | Regression tests for cancelled and failed runs |
 
@@ -64,16 +64,14 @@ Running the new test file against the previous code gave 9 failures and 4 cancel
 ## Known limitations
 
 - Aborting does not guarantee a provider stops work or billing. The Gemini SDK abort is client side only.
-- Cancellation covers `CodeGenerationEngine`. Swarm orchestrator model calls were not changed.
-- The abort controller is in memory. In a multi-process deployment, another process would only see the stored status at its next check.
-- `cancellationReason` and `cancelledAt` are not stored in their own database columns. After a restart, the reason is still available in `error`.
-- Cancelling a run leaves its pending approval requests pending.
+- The abort controller is in memory, and the run cache hides stored cancellation. In a multi-process deployment, another process keeps running and can write files until a save trips the storage guard.
+- `cancellationReason` and `cancelledAt` have no database columns. They can be lost after a restart or a cache eviction, and `GET .../runs` never returns them. The reason is still available in `error`.
+- Cancelling a run leaves its pending approval requests pending, and approving one later still unlocks the file for other runs.
 - No run resumes automatically after an approval is granted.
 
 ## Remaining before acceptance
 
-1. Resolve the `.env.example` test failure. This depends on the open decision about `GEMINI_API_KEY`.
-2. Verify that finalization rejects unresolved validation errors. This was not reviewed in this work.
-3. Test cancellation against a real provider.
-4. Find out what keeps deleting `package-lock.json`, and decide whether the lockfile should support Windows.
-5. Write `PHASE_9_ACCEPTANCE_REPORT.md` once the items above are complete. Acceptance is the owner's decision.
+1. Resolve the open review findings in `PHASE_9_ACCEPTANCE_REPORT.md`, starting with F4.
+2. Test cancellation against a real provider.
+3. Find out what keeps deleting `package-lock.json`, and decide whether the lockfile should support Windows.
+4. Get the owner's acceptance decision.

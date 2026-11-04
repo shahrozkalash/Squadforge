@@ -1,7 +1,7 @@
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { db } from '../server/store.js';
-import { resolveUser } from '../server.js';
+import { app, resolveUser } from '../server.js';
 import { hashPassword, generateSessionToken } from '../server/crypto.js';
 import { User, Build } from '../server/types.js';
 import { GitHubService } from '../server/github.js';
@@ -256,5 +256,44 @@ describe('SquadForge Public Access, Multi-Tenant Session Isolation & Security', 
     });
     assert.equal(own.success, true);
     assert.equal(own.request?.approvedBy, owner.id);
+  });
+
+  test('Generated previews are served with an opaque origin', async () => {
+    const req: any = { cookies: {}, headers: {}, ip: '192.168.3.1' };
+    const res: any = { cookie: (n: string, v: string) => { req.cookies[n] = v; } };
+    const owner = resolveUser(req, res);
+
+    const build = db.saveBuild({
+      id: `bld_preview_origin_${Date.now()}`,
+      userId: owner.id,
+      idea: 'Preview origin check',
+      status: 'running',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      selectedModels: ['gemini'],
+      autoPushGithub: false,
+      totalTokens: 0,
+      totalCost: 0,
+      costLimit: 2.0,
+      maxDurationSeconds: 120,
+      patchesAppliedCount: 0
+    });
+
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise(resolve => server.once('listening', resolve));
+    try {
+      const { port } = server.address() as any;
+      const cookie = Object.entries(req.cookies).map(([k, v]) => `${k}=${v}`).join('; ');
+      const response = await fetch(`http://127.0.0.1:${port}/api/builds/${build.id}/preview`, {
+        headers: { Cookie: cookie }
+      });
+      const policy = response.headers.get('content-security-policy') || '';
+
+      assert.equal(response.status, 200);
+      assert.match(policy, /sandbox allow-scripts/);
+      assert.doesNotMatch(policy, /allow-same-origin/);
+    } finally {
+      await new Promise(resolve => server.close(resolve));
+    }
   });
 });

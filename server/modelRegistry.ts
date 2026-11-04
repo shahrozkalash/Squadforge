@@ -595,7 +595,7 @@ class ModelRegistryManager {
   updateModel(id: string, updates: Partial<ModelConfig>): ModelConfig | null {
     const existing = this.models.get(id);
     if (!existing) return null;
-    const updated = { ...existing, ...updates };
+    const updated = { ...existing, ...updates, id };
     this.models.set(id, updated);
     return updated;
   }
