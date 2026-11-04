@@ -172,8 +172,14 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
     test('1.6 Allows sensitive file modification only after explicit approval matching the build and files', async () => {
       const testBuildId = makeTestBuild('approval_granted_path');
       const sensitivePath = 'server/crypto.ts';
+      const approvedHashes = ApprovalGateService.fingerprintActions([{
+        action: 'create_file',
+        path: sensitivePath,
+        content: 'export const CRYPTO_KEY = "verified";\n'
+      }]);
 
       const approvalRes = ApprovalGateService.requestApproval(testBuildId, userId, {
+        contentHashes: approvedHashes,
         requestingAgent: 'gemini-2.5-pro',
         requestingRole: 'backend_developer',
         operationType: 'security_sensitive_change',
@@ -194,7 +200,7 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
       assert.strictEqual(respondRes.success, true);
       assert.strictEqual(respondRes.request?.status, 'approved');
 
-      const isApproved = ApprovalGateService.hasApprovedRequestForFiles(testBuildId, [sensitivePath]);
+      const isApproved = ApprovalGateService.hasApprovedRequestForFiles(testBuildId, [sensitivePath], approvedHashes);
       assert.strictEqual(isApproved, true);
 
       // Now MergeManager must permit the modification

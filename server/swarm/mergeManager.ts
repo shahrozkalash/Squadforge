@@ -45,11 +45,8 @@ export class MergeManager {
   private static approvalGate(buildId: string, modelId: string, actions: Array<{ [key: string]: any }>) {
     if (modelId === 'system') return { blocked: [] as string[], consume: () => undefined };
 
-    const fingerprints: Record<string, string> = Object.assign(
-      {},
-      ...actions.map(action => ApprovalGateService.fingerprintAction(action))
-    );
-    const sensitive = Object.keys(fingerprints).filter(path => path && ApprovalGateService.isSensitiveFilePath(path));
+    const fingerprints = ApprovalGateService.fingerprintActions(actions);
+    const sensitive = Object.keys(fingerprints).filter(path => ApprovalGateService.isSensitiveFilePath(path));
     const approved = ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitive, fingerprints);
     return {
       blocked: approved ? [] as string[] : sensitive,

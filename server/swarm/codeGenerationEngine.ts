@@ -326,31 +326,16 @@ export class CodeGenerationEngine {
 
       // SENSITIVE FILE DETECTION BEFORE APPLICATION:
       // Inspect target files before writing to disk or database
-      const proposedPaths = fileActions.map((a: any) => a.path);
-      const sensitiveFiles = proposedPaths.filter((p: string) => ApprovalGateService.isSensitiveFilePath(p));
-      const fingerprints: Record<string, string> = Object.assign(
-        {},
-        ...fileActions.map((a: any) => ApprovalGateService.fingerprintAction(a))
-      );
+      const fingerprints = ApprovalGateService.fingerprintActions(fileActions);
+      const sensitiveFiles = Object.keys(fingerprints).filter(p => ApprovalGateService.isSensitiveFilePath(p));
       const hasValidApproval = sensitiveFiles.length > 0 && ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles, fingerprints);
 
       if (sensitiveFiles.length > 0 && !hasValidApproval) {
         // Request human approval and hold patch in pending state
-        ApprovalGateService.requestApproval(buildId, userId, {
-          patchId: runId,
-          requestingAgent: selectedModel.id,
-          requestingRole: 'security_specialist',
-          operationType: 'security_sensitive_change',
-          explanation: `Generated code touches sensitive security/auth/env files: ${sensitiveFiles.join(', ')}`,
-          affectedFiles: sensitiveFiles,
-          // The owner reviews the real change, and only this change is approved
-          proposedChanges: fileActions
-            .filter((a: any) => sensitiveFiles.includes(a.path))
-            .map((a: any) => `--- ${a.path} (${a.action})\n${a.content ?? JSON.stringify(a.edits ?? [a.find, a.replace])}`)
-            .join('\n\n'),
-          contentHashes: Object.fromEntries(sensitiveFiles.map((p: string) => [p, fingerprints[p]])),
-          proposedActions: fileActions,
-          riskLevel: 'high'
+        ApprovalGateService.requestForActions(buildId, userId, {
+          agent: selectedModel.id,
+          actions: fileActions,
+          runId
         });
 
         passes[1].status = 'failed';
@@ -676,20 +661,40 @@ export class CodeGenerationEngine {
    * Asking the model again could produce different code from what was reviewed.
    */
   static async continueApprovedRun(request: HumanApprovalRequest, userId: string): Promise<CodeGenerationRun | null> {
-    const original = request.patchId ? db.getGenerationRun(request.patchId) : undefined;
-    if (!original || original.status !== 'pending_approval' || !request.proposedActions?.length) return null;
+    if (!request.proposedActions?.length) return null;
 
-    const continuation = this.runGenerationPipeline({
-      buildId: request.buildId,
-      userId,
-      userRequest: original.userRequest,
-      profileId: original.generationProfile,
-      modelId: original.modelId,
-      taskId: original.taskId,
-      approvedActions: request.proposedActions
-    });
-    this.cancelRun(original.id, 'Approved, and continued in a new run');
-    return continuation;
+    // Swarm work has no run to continue, so the held changes are applied directly
+    if (!request.patchId) {
+      const applied = await MergeManager.applyBatchActions(request.buildId, request.requestingAgent, request.proposedActions);
+      if (!applied.success) {
+        this.emitEvent(request.buildId, 'codegen_failed', { approvalId: request.id, error: applied.error });
+      }
+      return null;
+    }
+
+    const original = db.getGenerationRun(request.patchId);
+    if (!original || original.buildId !== request.buildId || original.status !== 'pending_approval') return null;
+
+    try {
+      const continuation = await this.runGenerationPipeline({
+        buildId: request.buildId,
+        userId,
+        userRequest: original.userRequest,
+        profileId: original.generationProfile,
+        modelId: original.modelId,
+        taskId: original.taskId,
+        approvedActions: request.proposedActions
+      });
+      this.cancelRun(original.id, `Approved, and continued in run ${continuation.id}`);
+      return continuation;
+    } catch (err: any) {
+      original.status = 'failed';
+      original.error = `The approved changes could not be applied: ${err.message}`;
+      original.completedAt = Date.now();
+      db.saveGenerationRun(original);
+      this.emitEvent(request.buildId, 'codegen_failed', { runId: original.id, error: original.error });
+      return null;
+    }
   }
 
   /**

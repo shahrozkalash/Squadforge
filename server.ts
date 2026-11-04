@@ -2077,7 +2077,9 @@ app.post('/api/builds/:id/collaboration/approvals', requireAuth, (req, res) => {
   const build = verifyBuildOwnership(req, res, req.params.id);
   if (!build) return;
 
-  const result = ApprovalGateService.requestApproval(build.id, req.user!.id, req.body);
+  // A client can ask for review, but cannot supply what approval would apply or authorize
+  const { patchId, proposedActions, contentHashes, ...requestFields } = req.body;
+  const result = ApprovalGateService.requestApproval(build.id, req.user!.id, requestFields);
   if (!result.success) {
     return res.status(400).json({ error: result.error });
   }
@@ -2088,7 +2090,7 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
   const build = verifyBuildOwnership(req, res, req.params.id);
   if (!build) return;
 
-  const { approved, resolutionNotes } = req.body;
+  const { approved, resolutionNotes, notes } = req.body;
   if (typeof approved !== 'boolean') {
     return res.status(400).json({ error: 'approved (boolean) is required' });
   }
@@ -2096,8 +2098,14 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
   const result = ApprovalGateService.respondToApproval(build.id, req.user!.id, {
     requestId: req.params.approvalId,
     approved,
-    resolutionNotes
+    resolutionNotes: resolutionNotes ?? notes
   });
+
+  // A run waiting on a request that can no longer be approved must not wait forever
+  const decided = db.getApprovalRequest(req.params.approvalId);
+  if (decided?.buildId === build.id && decided.patchId && (decided.status === 'expired' || decided.status === 'rejected')) {
+    CodeGenerationEngine.cancelRun(decided.patchId, `Approval ${decided.status}`);
+  }
 
   if (!result.success) {
     return res.status(400).json({ error: result.error });
@@ -2118,6 +2126,12 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/revoke', requireAu
   const result = ApprovalGateService.revokeApproval(build.id, req.user!.id, req.params.approvalId);
   if (!result.success) {
     return res.status(400).json({ error: result.error });
+  }
+  if (result.request?.patchId) {
+    const run = db.getGenerationRun(result.request.patchId);
+    if (run?.buildId === build.id && run.status === 'pending_approval') {
+      CodeGenerationEngine.cancelRun(run.id, 'Approval revoked');
+    }
   }
   res.json(result);
 });

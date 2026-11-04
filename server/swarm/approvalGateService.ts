@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { db } from '../store.js';
+import { ExecutionAdapter } from './executionAdapter.js';
 import { 
   HumanApprovalRequest, 
   ApprovalOperationType, 
@@ -55,6 +56,7 @@ export class ApprovalGateService {
       /(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/,
       /(?:^|\/)\.(?:npmrc|yarnrc|yarnrc\.yml)$/,
       /(?:^|\/)dockerfile(?:\..+)?$/,
+      /(?:^|\/)(?:docker-)?compose[^/]*\.ya?ml$/,
       /(?:^|\/)\.github\/workflows\//,
       /(?:^|\/)server\/(?:crypto|email|db\/database|gateway)\.ts$/,
       /\.(?:pem|key|p12|pfx)$/,
@@ -62,10 +64,14 @@ export class ApprovalGateService {
     ];
     if (sensitivePatterns.some(pattern => pattern.test(normalized))) return true;
 
-    // Split authMiddleware, auth_guard, and tokens.ts into words before matching
+    // Design tokens and docs about auth are not credentials
+    if (/\.(?:css|scss|less|svg|png|jpe?g|gif|md|mdx)$/.test(normalized)) return false;
+
+    // Split authMiddleware, AUTHService, auth_guard, and tokens.ts into words before matching
     const words = filePath
       .replace(/\\/g, '/')
       .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
       .toLowerCase()
       .split(/[^a-z0-9]+/);
     return words.some(word => SENSITIVE_WORDS.has(word));
@@ -82,22 +88,105 @@ export class ApprovalGateService {
     return filePaths.some(p => this.isSensitiveFilePath(p));
   }
 
-  /**
-   * Identifies one proposed change to each file it touches. An approval for one
-   * fingerprint does not cover a different change to the same file.
-   */
-  static fingerprintAction(action: { [key: string]: any }): Record<string, string> {
-    const digest = (value: unknown) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  /** The path a write will really use, so checks cannot be dodged with spaces or slashes. */
+  static normalizePath(rawPath: string): string {
+    const { valid, cleanPath } = ExecutionAdapter.sanitizeFilePath(rawPath);
+    return valid ? cleanPath : rawPath;
+  }
 
-    if (action.action === 'rename_file') {
-      const hash = digest(['rename_file', action.oldPath, action.newPath]);
-      return { [action.oldPath]: hash, [action.newPath]: hash };
+  private static actionPaths(action: { [key: string]: any }): string[] {
+    return [action.path, action.oldPath, action.newPath]
+      .filter((p): p is string => typeof p === 'string' && p.length > 0)
+      .map(p => this.normalizePath(p));
+  }
+
+  /**
+   * Identifies the proposed changes to each file. Every action on a path counts, in order,
+   * so an approval for one change does not cover a different or additional change.
+   */
+  static fingerprintActions(actions: Array<{ [key: string]: any }>): Record<string, string> {
+    const perPath = new Map<string, unknown[]>();
+    for (const action of actions) {
+      const paths = this.actionPaths(action);
+      const change = action.action === 'rename_file'
+        ? ['rename_file', ...paths]
+        : action.action === 'delete_file'
+          ? ['delete_file']
+          : action.action === 'patch_file'
+            ? ['patch_file', action.edits, action.find, action.replace]
+            : ['create_file', action.content];
+      for (const path of paths) perPath.set(path, [...(perPath.get(path) || []), change]);
     }
-    if (action.action === 'delete_file') return { [action.path]: digest(['delete_file']) };
-    if (action.action === 'patch_file') {
-      return { [action.path]: digest(['patch_file', action.edits, action.find, action.replace]) };
-    }
-    return { [action.path]: digest(['create_file', action.content]) };
+
+    return Object.fromEntries(Array.from(perPath, ([path, changes]) => [
+      path,
+      crypto.createHash('sha256').update(JSON.stringify(changes)).digest('hex')
+    ]));
+  }
+
+  /** Text the owner reviews. Everything that an approval would apply is listed. */
+  private static describeActions(actions: Array<{ [key: string]: any }>): string {
+    return actions.map(action => {
+      const body = action.content ?? (action.edits || action.find ? JSON.stringify(action.edits ?? [action.find, action.replace], null, 2) : '');
+      return `--- ${this.actionPaths(action).join(' -> ')} (${action.action})\n${body}`;
+    }).join('\n\n');
+  }
+
+  /**
+   * Creates a request for exactly these changes. Patches record the file version,
+   * so an approved patch cannot land on a file that changed after review.
+   */
+  static requestForActions(
+    buildId: string,
+    userId: string,
+    params: { agent: string; actions: Array<{ [key: string]: any }>; runId?: string }
+  ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
+    const fingerprints = this.fingerprintActions(params.actions);
+    const sensitive = Object.keys(fingerprints).filter(p => this.isSensitiveFilePath(p));
+    const contentHashes = Object.fromEntries(sensitive.map(p => [p, fingerprints[p]]));
+
+    const duplicate = db.getApprovalRequests(buildId, 'pending')
+      .find(r => JSON.stringify(r.contentHashes) === JSON.stringify(contentHashes));
+    if (duplicate) return { success: true, request: duplicate };
+
+    return this.requestApproval(buildId, userId, {
+      patchId: params.runId,
+      requestingAgent: params.agent,
+      requestingRole: 'security_specialist',
+      operationType: 'security_sensitive_change',
+      explanation: `Generated code changes sensitive files: ${sensitive.join(', ')}`,
+      affectedFiles: sensitive,
+      proposedChanges: this.describeActions(params.actions),
+      contentHashes,
+      proposedActions: params.actions.map(action => {
+        if (action.action !== 'patch_file') return action;
+        const file = db.getFile(buildId, this.normalizePath(action.path));
+        return file ? { ...action, expectedVersion: file.version } : action;
+      }),
+      riskLevel: 'high'
+    });
+  }
+
+  /**
+   * Splits a batch so ordinary files can continue while sensitive ones wait for the owner.
+   * Without this a build retries forever on a write nobody has been asked to approve.
+   */
+  static holdSensitiveActions(
+    buildId: string,
+    userId: string,
+    agent: string,
+    actions: Array<{ [key: string]: any }>
+  ): { ready: Array<{ [key: string]: any }>; held: Array<{ [key: string]: any }> } {
+    const fingerprints = this.fingerprintActions(actions);
+    const blocked = Object.keys(fingerprints).filter(p =>
+      this.isSensitiveFilePath(p) && !this.hasApprovedRequestForFiles(buildId, [p], fingerprints)
+    );
+    if (blocked.length === 0) return { ready: actions, held: [] };
+
+    const isHeld = (action: { [key: string]: any }) => this.actionPaths(action).some(p => blocked.includes(p));
+    const held = actions.filter(isHeld);
+    this.requestForActions(buildId, userId, { agent, actions: held });
+    return { ready: actions.filter(action => !isHeld(action)), held };
   }
 
   /** The owner's latest decision on a file is the one that counts. */
@@ -109,12 +198,13 @@ export class ApprovalGateService {
         Array.isArray(a.affectedFiles) &&
         a.affectedFiles.includes(file)
       )
-      .sort((a, b) => (b.resolvedAt || 0) - (a.resolvedAt || 0))[0];
+      // On a tie the rejection wins
+      .sort((a, b) => (b.resolvedAt || 0) - (a.resolvedAt || 0) || (a.status === 'rejected' ? -1 : 1))[0];
   }
 
   /**
    * Checks that every sensitive file has a live, unused approval for this exact change.
-   * Validity runs from creation. An approval tied to content needs a matching fingerprint.
+   * Validity runs from creation. An approval without a fingerprint authorizes nothing.
    */
   static hasApprovedRequestForFiles(buildId: string, files: string[], fingerprints: Record<string, string> = {}): boolean {
     if (!files || files.length === 0) return true;
@@ -129,7 +219,7 @@ export class ApprovalGateService {
       if (decision.consumedFiles?.includes(file)) return false;
 
       const expected = decision.contentHashes?.[file];
-      return expected === undefined || expected === fingerprints[file];
+      return expected !== undefined && expected === fingerprints[file];
     });
   }
 

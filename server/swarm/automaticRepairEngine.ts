@@ -184,19 +184,18 @@ export class AutomaticRepairEngine {
       }
 
       // 2. Select highest priority defect to repair
-      const targetIssue = activeIssues[0];
+      // Sensitive files are skipped, so they do not use up attempts for ordinary defects
+      const isBlocked = (issue: { file: string }) => ApprovalGateService.isSensitiveFilePath(issue.file);
+      for (const issue of activeIssues.filter(isBlocked)) {
+        unresolvedDefects.push(`Cannot automatically repair sensitive file "${issue.file}" without a new human approval: ${issue.message}`);
+      }
+      const targetIssue = activeIssues.find(issue => !isBlocked(issue));
+      if (!targetIssue) break;
       const targetFile = currentFiles.find(f => f.path === targetIssue.file);
 
       if (!targetFile) {
         unresolvedDefects.push(`Target file "${targetIssue.file}" not found in workspace: ${targetIssue.message}`);
         break;
-      }
-
-      // STRICT SENSITIVE FILE PROTECTION: Never auto-repair sensitive files without valid human approval
-      if (ApprovalGateService.isSensitiveFilePath(targetIssue.file) && !ApprovalGateService.hasApprovedRequestForFiles(buildId, [targetIssue.file])) {
-        unresolvedDefects.push(`Cannot automatically repair sensitive file "${targetIssue.file}" without human approval gate.`);
-        activeIssues.shift();
-        continue;
       }
 
       // 3. Formulate targeted repair prompt using PromptCompiler

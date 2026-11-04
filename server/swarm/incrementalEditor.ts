@@ -31,19 +31,23 @@ export class IncrementalEditor {
 
     // 0. Sensitive file gate: detect sensitive changes before applying them
     if (ApprovalGateService.isSensitiveFilePath(edit.filePath)) {
-      const isApproved = ApprovalGateService.hasApprovedRequestForFiles(buildId, [edit.filePath]);
+      // The same action MergeManager will check below
+      const current = existingFile?.content ?? '';
+      const gateAction = edit.action === 'create'
+        ? { action: 'create_file', path: edit.filePath, content: edit.replacementContent }
+        : {
+            action: 'patch_file',
+            path: edit.filePath,
+            edits: [{ find: edit.findSnippet || current, replace: edit.replacementContent }],
+            find: edit.findSnippet || current,
+            replace: edit.replacementContent
+          };
+      const fingerprints = ApprovalGateService.fingerprintActions([gateAction]);
+      const isApproved = ApprovalGateService.hasApprovedRequestForFiles(buildId, Object.keys(fingerprints), fingerprints);
       if (!isApproved) {
         const build = db.getBuild(buildId);
         if (build?.userId) {
-          ApprovalGateService.requestApproval(buildId, build.userId, {
-            requestingAgent: authorAgent,
-            requestingRole: 'security_specialist',
-            operationType: 'security_sensitive_change',
-            explanation: `Incremental edit requested on sensitive file: ${edit.filePath}`,
-            affectedFiles: [edit.filePath],
-            proposedChanges: edit.explanation || `Edit ${edit.filePath}`,
-            riskLevel: 'high'
-          });
+          ApprovalGateService.requestForActions(buildId, build.userId, { agent: authorAgent, actions: [gateAction] });
         }
         return {
           success: false,

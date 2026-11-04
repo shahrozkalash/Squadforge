@@ -108,7 +108,7 @@ describe('Approvals cover the reviewed change', () => {
   const other = { action: 'create_file', path: sensitivePath, content: 'export const swapped = 1;\n' };
 
   function approvedRequest(buildId: string, actions: any[] = [reviewed]) {
-    const hashes = Object.assign({}, ...actions.map(a => ApprovalGateService.fingerprintAction(a)));
+    const hashes = ApprovalGateService.fingerprintActions(actions);
     const { request } = ApprovalGateService.requestApproval(buildId, userId, {
       requestingAgent: 'gemini',
       requestingRole: 'security_specialist',
@@ -245,6 +245,107 @@ describe('Approvals cover the reviewed change', () => {
     for (const path of ['src/components/AuthorCard.tsx', 'src/utils/calc.ts', 'src/tokenizer.ts', 'README.md']) {
       assert.equal(ApprovalGateService.isSensitiveFilePath(path), false, path);
     }
+    assert.equal(ApprovalGateService.isSensitiveFilePath('src/AUTHService.ts'), true);
+    assert.equal(ApprovalGateService.isSensitiveFilePath('docker-compose.yml'), true);
+    assert.equal(ApprovalGateService.isSensitiveFilePath('src/design-tokens.css'), false);
+  });
+
+  for (const path of [' .env', '.env ', 'server//gateway.ts', '.github//workflows/ci.yml', ' package.json']) {
+    test(`a batch cannot hide a sensitive file as ${JSON.stringify(path)}`, async () => {
+      const buildId = makeBuild('spaced');
+
+      const result = await MergeManager.applyBatchActions(buildId, 'gemini', [
+        { action: 'create_file', path, content: 'x' }
+      ]);
+
+      assert.equal(result.success, false);
+      assert.match(result.error || '', /Human approval required/);
+      assert.equal(db.getAllFiles(buildId).length, 0);
+    });
+  }
+
+  test('extra actions on an approved file are refused', async () => {
+    const buildId = makeBuild('duplicate');
+    approvedRequest(buildId);
+
+    const result = await MergeManager.applyBatchActions(buildId, 'gemini', [
+      { action: 'patch_file', path: sensitivePath, find: 'a', replace: 'evil' },
+      reviewed
+    ]);
+
+    assert.equal(result.success, false);
+  });
+
+  test('an approval without a content fingerprint authorizes nothing', async () => {
+    const buildId = makeBuild('unbound');
+    const { request } = ApprovalGateService.requestApproval(buildId, userId, {
+      requestingAgent: 'gemini',
+      requestingRole: 'security_specialist',
+      operationType: 'security_sensitive_change',
+      explanation: 'No content',
+      affectedFiles: [sensitivePath],
+      proposedChanges: 'Unknown'
+    });
+    ApprovalGateService.respondToApproval(buildId, userId, { requestId: request!.id, approved: true });
+
+    assert.equal((await MergeManager.applyBatchActions(buildId, 'gemini', [reviewed])).success, false);
+  });
+
+  test('a request cannot continue another build\'s run', async () => {
+    const victimBuild = makeBuild('victim');
+    const paused = await CodeGenerationEngine.runGenerationPipeline({
+      buildId: victimBuild,
+      userId,
+      userRequest: 'Change server/crypto.ts',
+      mockAiResponse: { thinking: 'Write', actions: [reviewed] } as any
+    });
+    const attackerBuild = makeBuild('attacker');
+    const { request } = ApprovalGateService.requestApproval(attackerBuild, userId, {
+      patchId: paused.id,
+      requestingAgent: 'gemini',
+      requestingRole: 'security_specialist',
+      operationType: 'security_sensitive_change',
+      explanation: 'Foreign run',
+      affectedFiles: [],
+      proposedChanges: 'x',
+      proposedActions: [{ action: 'create_file', path: 'src/a.ts', content: 'x' }]
+    });
+
+    const continued = await CodeGenerationEngine.continueApprovedRun(request!, userId);
+
+    assert.equal(continued, null);
+    assert.equal(db.getGenerationRun(paused.id)?.status, 'pending_approval');
+  });
+
+  test('a stale approved patch does not land on a changed file', async () => {
+    const buildId = makeBuild('stale');
+    await MergeManager.createFile(buildId, 'system', { action: 'create_file', path: sensitivePath, content: 'one two' } as any);
+    const patch = { action: 'patch_file', path: sensitivePath, edits: [{ find: 'one', replace: 'three' }] };
+    const { request } = ApprovalGateService.requestForActions(buildId, userId, { agent: 'gemini', actions: [patch] });
+    const decided = ApprovalGateService.respondToApproval(buildId, userId, { requestId: request!.id, approved: true });
+    await MergeManager.applyPatch(buildId, 'system', { action: 'patch_file', path: sensitivePath, edits: [{ find: 'two', replace: 'four' }] } as any);
+
+    await CodeGenerationEngine.continueApprovedRun(decided.request!, userId);
+
+    assert.equal(db.getFile(buildId, sensitivePath)?.content, 'one four');
+  });
+
+  test('swarm work holds sensitive files for approval and applies the rest', async () => {
+    const buildId = makeBuild('hold');
+    const dockerfile = { action: 'create_file', path: 'Dockerfile', content: 'FROM node:22\n' };
+    const ordinary = { action: 'create_file', path: 'src/app.ts', content: 'export const app = 1;\n' };
+
+    const { ready, held } = ApprovalGateService.holdSensitiveActions(buildId, userId, 'gemini', [dockerfile, ordinary]);
+
+    assert.deepEqual(ready, [ordinary]);
+    assert.deepEqual(held, [dockerfile]);
+    const [request] = db.getApprovalRequests(buildId, 'pending');
+    assert.match(request.proposedChanges, /FROM node:22/);
+
+    const decided = ApprovalGateService.respondToApproval(buildId, userId, { requestId: request.id, approved: true });
+    await CodeGenerationEngine.continueApprovedRun(decided.request!, userId);
+
+    assert.equal(db.getFile(buildId, 'Dockerfile')?.content, dockerfile.content);
   });
 });
 
