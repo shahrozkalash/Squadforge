@@ -61,6 +61,7 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
         testBuildId,
         'gemini-2.5-pro',
         {
+          action: 'create_file',
           path: 'server/crypto.ts',
           content: '// rogue override',
           commitMessage: 'attempt unauthorized override'
@@ -77,6 +78,7 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
         testBuildId,
         'system',
         {
+          action: 'create_file',
           path: '.env.local',
           content: 'SECRET=old\n',
           commitMessage: 'seed file'
@@ -150,8 +152,6 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
         buildId: testBuildId,
         path: 'server/crypto.ts',
         content: 'export const broken = {; // invalid syntax in crypto\n',
-        language: 'typescript',
-        lastModifiedBy: 'system',
         version: 1,
         contentHash: 'hash-broken-crypto',
         updatedAt: Date.now()
@@ -202,6 +202,7 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
         testBuildId,
         'gemini-2.5-pro',
         {
+          action: 'create_file',
           path: sensitivePath,
           content: 'export const CRYPTO_KEY = "verified";\n',
           commitMessage: 'authorized update'
@@ -264,7 +265,7 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
         id: `run_cguard_${Date.now()}`,
         buildId: testBuildId,
         userRequest: 'Cancelled run guard',
-        generationProfile: 'standard_crud_app',
+        generationProfile: 'website_and_web_app',
         modelId: 'gemini-2.5-pro',
         status: 'cancelled',
         currentPass: 3,
@@ -296,8 +297,6 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
           buildId: 'test_dim',
           path: 'src/index.ts',
           content: 'export const message = "hello world";\n',
-          language: 'typescript',
-          lastModifiedBy: 'system',
           version: 1,
           contentHash: 'hash-clean',
           updatedAt: Date.now()
@@ -318,8 +317,6 @@ describe('Phase 9 Final Hardening Regression Tests', () => {
           buildId: 'test_dim',
           path: 'src/broken.ts',
           content: 'export const x = {; // syntax error\n',
-          language: 'typescript',
-          lastModifiedBy: 'system',
           version: 1,
           contentHash: 'hash-broken',
           updatedAt: Date.now()
