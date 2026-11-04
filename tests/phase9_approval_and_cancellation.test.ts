@@ -432,8 +432,7 @@ describe('Phase 9 finalization', () => {
       if (calls === 1) return evaluate(files, contracts);
       return evaluate([...files, {
         path: 'src/late.ts',
-        content: 'export const late = {;
-',
+        content: 'export const late = {;\n',
         version: 1
       }], contracts);
     });
@@ -443,8 +442,7 @@ describe('Phase 9 finalization', () => {
       userRequest: 'Create src/clean.ts',
       mockAiResponse: {
         thinking: 'Create a valid file',
-        actions: [{ action: 'create_file', path: 'src/clean.ts', content: 'export const clean = 1;
-' }]
+        actions: [{ action: 'create_file', path: 'src/clean.ts', content: 'export const clean = 1;\n' }]
       } as any
     });
 
