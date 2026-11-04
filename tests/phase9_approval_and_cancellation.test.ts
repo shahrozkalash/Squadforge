@@ -6,6 +6,7 @@ import { localLLMService } from '../server/localLLM.js';
 import { quotaManager } from '../server/quotaManager.js';
 import { smartRouter } from '../server/smartRouter.js';
 import { ApprovalGateService } from '../server/swarm/approvalGateService.js';
+import { AutomaticRepairEngine } from '../server/swarm/automaticRepairEngine.js';
 import { CodeGenerationEngine } from '../server/swarm/codeGenerationEngine.js';
 import { MergeManager } from '../server/swarm/mergeManager.js';
 import { CodeGenerationRun, GatewayResult, ModelConfig } from '../server/types.js';
@@ -418,6 +419,40 @@ describe('Phase 9 cancellation', () => {
 
     assert.equal(run.status, 'failed');
     assert.equal(isRegistered(run.id), false);
+  });
+});
+
+describe('Phase 9 finalization', () => {
+  test('finalization rejects a defect that appears after validation passed', async (t) => {
+    const buildId = makeBuild('late_defect');
+    const evaluate = AutomaticRepairEngine.evaluateValidationDimensions.bind(AutomaticRepairEngine);
+    let calls = 0;
+    t.mock.method(AutomaticRepairEngine, 'evaluateValidationDimensions', (files: any[], contracts: any[]) => {
+      calls += 1;
+      if (calls === 1) return evaluate(files, contracts);
+      return evaluate([...files, {
+        path: 'src/late.ts',
+        content: 'export const late = {;
+',
+        version: 1
+      }], contracts);
+    });
+
+    const run = await CodeGenerationEngine.runGenerationPipeline({
+      buildId,
+      userRequest: 'Create src/clean.ts',
+      mockAiResponse: {
+        thinking: 'Create a valid file',
+        actions: [{ action: 'create_file', path: 'src/clean.ts', content: 'export const clean = 1;
+' }]
+      } as any
+    });
+
+    assert.equal(run.passes[3].status, 'passed', 'validation must pass before the defect appears');
+    assert.equal(run.status, 'failed');
+    assert.equal(run.passes[5].status, 'failed');
+    assert.equal(run.validationResults?.clean, false);
+    assert.equal(db.getGenerationRun(run.id)?.status, 'failed');
   });
 });
 
