@@ -41,5 +41,5 @@ server.on('connect', (req, client, head) => {
   client.on('error', () => upstream.destroy());
 });
 
-server.listen(listenPort, '0.0.0.0');
+server.listen(listenPort, '0.0.0.0', () => console.log('egress-proxy-ready'));
 process.on('SIGTERM', () => process.exit(0));

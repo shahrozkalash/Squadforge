@@ -1,5 +1,5 @@
 // Forwards TCP from a published port to one fixed sandbox address.
-// This is the only path into a sandbox, because the sandbox network has no route out.
+// The published port has no authentication of its own, so it must stay on a private address.
 import net from 'node:net';
 
 const targetHost = process.env.RELAY_TARGET_HOST;

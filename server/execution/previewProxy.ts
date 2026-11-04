@@ -4,7 +4,8 @@ import { Duplex } from 'node:stream';
 import { PreviewSession } from '../types.js';
 import { PreviewSessionService } from './previewSessionService.js';
 
-const COOKIE_NAME = 'sf_preview';
+// The __Host- prefix makes browsers refuse any version of this cookie set with a Domain
+const COOKIE_NAME = '__Host-sf_preview';
 const AUTH_PATH = '/__squadforge/auth';
 
 function escapeForRegExp(value: string): string {
@@ -38,6 +39,17 @@ function forwardedHeaders(req: http.IncomingMessage, preview: PreviewSession): h
   return headers;
 }
 
+/** The cookie is SameSite=None, so another site must not open a socket with it. */
+function sameOriginUpgrade(req: http.IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === req.headers.host;
+  } catch {
+    return false;
+  }
+}
+
 export function createPreviewServer(service: PreviewSessionService): http.Server {
   const { config } = service;
   const hostPattern = new RegExp(`^(pv[0-9a-f]{24})\\.${escapeForRegExp(config.baseDomain || '')}(?::\\d+)?$`, 'i');
@@ -53,7 +65,14 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
       return;
     }
 
-    const url = new URL(req.url || '/', 'http://preview');
+    let url: URL;
+    try {
+      url = new URL(req.url || '/', 'http://preview');
+    } catch {
+      res.writeHead(400).end('Bad request');
+      return;
+    }
+
     if (url.pathname === AUTH_PATH) {
       const cookie = service.redeem(previewId, url.searchParams.get('token') || '');
       if (!cookie) {
@@ -90,8 +109,19 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
         ...(Array.isArray(policy) ? policy : policy ? [policy] : []),
         frameAncestors
       ];
-      res.writeHead(upstreamRes.statusCode || 502, headers);
+      // A project must not set cookies on the app's domain
+      headers['set-cookie'] = (headers['set-cookie'] || []).filter(cookie => !/;\s*domain\s*=/i.test(cookie));
+
+      // Project responses are untrusted, and an invalid one must not throw here
+      try {
+        res.writeHead(upstreamRes.statusCode || 502, headers);
+      } catch {
+        upstreamRes.destroy();
+        res.writeHead(502).end('The project sent an invalid response.');
+        return;
+      }
       upstreamRes.pipe(res);
+      upstreamRes.on('error', () => res.destroy());
     });
 
     upstream.on('error', () => {
@@ -105,7 +135,7 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
   server.on('upgrade', (req, socket: Duplex, head) => {
     const previewId = previewIdFor(req);
     const preview = previewId ? service.authorize(previewId, readCookie(req.headers.cookie)) : null;
-    if (!preview) {
+    if (!preview || !sameOriginUpgrade(req)) {
       socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }

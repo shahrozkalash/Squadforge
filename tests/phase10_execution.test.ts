@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import express from 'express';
 import { db } from '../server/store.js';
 import { Build, ExecutionSession, ProjectFile, User } from '../server/types.js';
@@ -96,6 +97,7 @@ class FakeBackend implements ExecutionBackend {
 const config: ExecutionConfig = {
   limits: { memoryMb: 256, cpus: 1, pids: 64, maxRuntimeSeconds: 60, tmpfsMb: 32, workspaceMb: 1 },
   maxConcurrent: 100,
+  maxPerUser: 100,
   allowGuests: true,
   registryUrl: 'https://registry.npmjs.org/',
   idleTimeoutMs: 1000,
@@ -257,6 +259,11 @@ describe('Phase 10 execution', () => {
 
       assert.equal(one, hashWorkspace([file('b', '2'), file('a', '1')]));
       assert.notEqual(one, hashWorkspace([file('a', '1'), file('b', '3')]));
+      assert.notEqual(
+        hashWorkspace([file('a', 'x\0b\0y')]),
+        hashWorkspace([file('a', 'x'), file('b', 'y')]),
+        'file boundaries must be unambiguous'
+      );
     });
   });
 
@@ -484,6 +491,111 @@ describe('Phase 10 execution', () => {
       assert.ok(added <= 3, `expected the cap to hold, got ${added} entries`);
     });
 
+    test('a refusal at the user limit leaves the current session running', async () => {
+      await approvedSession(manager, makeBuild(owner), owner);
+      const build = makeBuild(owner);
+      const session = await approvedSession(manager, build, owner);
+      db.setFile(build.id, { path: 'new.txt', content: 'x', version: 1, ownerModel: 'system', history: [], createdAt: Date.now(), updatedAt: Date.now() });
+
+      const limited = new ExecutionSessionManager(backend, { ...config, maxPerUser: 1 });
+      const pending = await limited.createSession(build, owner);
+      assert.ok('approvalRequired' in pending);
+      approve(build, owner, pending.approvalRequired);
+
+      await assert.rejects(limited.createSession(build, owner), (err: ExecutionError) => err.status === 429);
+      assert.equal(db.getExecutionSession(session.id)?.status, 'ready');
+    });
+
+    test('parallel requests cannot create duplicate sessions', async () => {
+      const build = makeBuild(owner);
+      const first = await manager.createSession(build, owner);
+      assert.ok('approvalRequired' in first);
+      approve(build, owner, first.approvalRequired);
+
+      const results = await Promise.allSettled([
+        manager.createSession(build, owner),
+        manager.createSession(build, owner),
+        manager.createSession(build, owner)
+      ]);
+
+      assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+      assert.equal(db.getExecutionSessions(build.id).length, 1);
+    });
+
+    test('per-user limits are enforced', async () => {
+      const limited = new ExecutionSessionManager(backend, { ...config, maxPerUser: 1 });
+      await approvedSession(limited, makeBuild(owner), owner);
+      const second = makeBuild(owner);
+      const pending = await limited.createSession(second, owner);
+      assert.ok('approvalRequired' in pending);
+      approve(second, owner, pending.approvalRequired);
+
+      await assert.rejects(limited.createSession(second, owner), (err: ExecutionError) => err.status === 429);
+    });
+
+    test('an expired session cannot start code, and cleanup removes it', async (t) => {
+      const build = makeBuild(owner);
+      const session = await installed(manager, backend, build, owner);
+      const later = Date.now() + 25 * 60 * 60 * 1000;
+      t.mock.method(Date, 'now', () => later);
+
+      await assert.rejects(manager.startScript(build, session.id, 'dev'), /expired/);
+      await manager.reap();
+
+      assert.equal(db.getExecutionSession(session.id)?.status, 'destroyed');
+    });
+
+    test('tests get their own session, so results cannot be tampered with or replaced', async () => {
+      const build = makeBuild(owner);
+      const first = await installed(manager, backend, build, owner);
+      await manager.startScript(build, first.id, 'dev');
+      backend.last().end();
+      await manager.waitForProcess(first.id);
+      await assert.rejects(manager.startScript(build, first.id, 'test'), /own session/);
+
+      const again = makeBuild(owner);
+      const second = await installed(manager, backend, again, owner);
+      await manager.startScript(again, second.id, 'test');
+      backend.last().end({ exitCode: 1 });
+      await manager.waitForProcess(second.id);
+      await assert.rejects(manager.startScript(again, second.id, 'dev'), /own session/);
+      assert.equal(db.getExecutionSession(second.id)?.script, 'test');
+    });
+
+    test('installs refuse a volume that project code has touched', async () => {
+      const build = makeBuild(owner);
+      const session = await installed(manager, backend, build, owner);
+      await manager.startScript(build, session.id, 'dev');
+      backend.last().end();
+      await manager.waitForProcess(session.id);
+
+      await assert.rejects(manager.installDependencies(build, session.id, { allowScripts: true }), /Create a new session/);
+    });
+
+    test('a stop that arrives while a process starts still stops it', async () => {
+      const build = makeBuild(owner);
+      const session = await installed(manager, backend, build, owner);
+      const start = backend.startProcess.bind(backend);
+      backend.startProcess = async (...args) => {
+        await manager.stop(build, session.id);
+        return start(...args);
+      };
+
+      await manager.startScript(build, session.id, 'dev');
+      await manager.waitForProcess(session.id);
+
+      assert.equal(backend.last().stopped, true);
+      assert.equal(db.getExecutionSession(session.id)?.endReason, 'stopped');
+    });
+
+    test('guests are recognized by id after a restart loses the flag', async () => {
+      const guest = makeUser(`guest_restored_${++counter}`);
+      assert.ok(!guest.isAnonymous);
+      const strict = new ExecutionSessionManager(backend, { ...config, allowGuests: false });
+
+      await assert.rejects(strict.createSession(makeBuild(guest), guest), (err: ExecutionError) => err.status === 403);
+    });
+
     test('concurrent projects get separate sessions, and capacity is enforced', async () => {
       const limited = new ExecutionSessionManager(backend, { ...config, maxConcurrent: db.getLiveExecutionSessions().length + 2 });
       const [one, two] = await Promise.all([
@@ -548,6 +660,39 @@ describe('Phase 10 execution', () => {
       assert.equal(db.getFile(build.id, 'package-lock.json')?.content, backend.lockfile);
       assert.equal(db.getDependencyInstalls(session.id)[0].lockfileGenerated, true);
       assert.equal(db.getExecutionSession(session.id)?.workspaceHash, hashWorkspace(db.getAllFiles(build.id)));
+    });
+
+    test('a lockfile written with install scripts allowed is not trusted', async () => {
+      const build = makeBuild(owner, { 'package.json': packageJson });
+      const session = await approvedSession(manager, build, owner);
+      for (const allowScripts of [false, true]) {
+        const pending = await manager.installDependencies(build, session.id, { allowScripts });
+        if ('approvalRequired' in pending) approve(build, owner, pending.approvalRequired);
+      }
+      await manager.installDependencies(build, session.id, { allowScripts: true });
+      backend.lockfile = '{"tampered":true}';
+      backend.last().end();
+      await manager.waitForProcess(session.id);
+
+      assert.equal(db.getFile(build.id, 'package-lock.json'), undefined);
+      assert.equal(db.getDependencyInstalls(session.id)[0].lockfileGenerated, false);
+    });
+
+    test('the session hash describes what was uploaded, not later project changes', async () => {
+      const build = makeBuild(owner, { 'package.json': packageJson });
+      const session = await approvedSession(manager, build, owner);
+      const pending = await manager.installDependencies(build, session.id);
+      assert.ok('approvalRequired' in pending);
+      approve(build, owner, pending.approvalRequired);
+      await manager.installDependencies(build, session.id);
+
+      // An agent changes the project during the install
+      db.setFile(build.id, { path: 'late.txt', content: 'x', version: 1, ownerModel: 'system', history: [], createdAt: Date.now(), updatedAt: Date.now() });
+      backend.lockfile = '{"lockfileVersion":3}';
+      backend.last().end();
+      await manager.waitForProcess(session.id);
+
+      await assert.rejects(manager.startScript(build, session.id, 'dev'), /project has changed/);
     });
 
     test('install scripts need their own approval', async () => {
@@ -689,6 +834,16 @@ describe('Phase 10 execution', () => {
       method,
       headers: { 'x-test-user': user.id, 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined
+    });
+
+    test('cross-origin changes are refused, and same-origin ones are not', async () => {
+      const build = makeBuild(owner);
+      const path = `${base}/api/builds/${build.id}/execution/sessions`;
+      const send = (origin: string) => fetch(path, { method: 'POST', headers: { 'x-test-user': owner.id, Origin: origin } });
+
+      assert.equal((await send('https://evil.example')).status, 403);
+      assert.equal((await send('not a url')).status, 403);
+      assert.notEqual((await send(base)).status, 403);
     });
 
     test('every endpoint refuses a user who does not own the build', async () => {
@@ -842,6 +997,7 @@ describe('Phase 10 execution', () => {
       assert.equal(first.status, 302);
       assert.match(first.headers['set-cookie']![0], /HttpOnly/);
       assert.match(first.headers['set-cookie']![0], /Secure; SameSite=None/, 'the preview loads in a cross-site iframe');
+      assert.match(first.headers['set-cookie']![0], /^__Host-/);
       assert.doesNotMatch(first.headers['set-cookie']![0], /Domain=/);
 
       const page = await request(host, '/', cookieFrom(first));
@@ -893,6 +1049,74 @@ describe('Phase 10 execution', () => {
       assert.equal((await request('localhost', '/')).status, 404);
       assert.equal((await request('pvzz.preview.localhost', '/')).status, 404);
       assert.equal((await request('pv000000000000000000000000.evil.example', '/')).status, 404);
+    });
+
+    test('a malformed request URL gets an error instead of crashing the server', async () => {
+      const { host } = await openPreview();
+
+      const response = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(proxyPort, '127.0.0.1', () => {
+          socket.write(`GET // HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`);
+        });
+        let data = '';
+        socket.on('data', chunk => { data += chunk; });
+        socket.on('end', () => resolve(data));
+        socket.on('error', reject);
+      });
+
+      assert.match(response, /^HTTP\/1\.1 400/);
+    });
+
+    test('an invalid project response cannot crash the server', async () => {
+      const hostile = net.createServer(socket => {
+        socket.once('data', () => socket.end('HTTP/1.1 099 X\r\nContent-Length: 0\r\n\r\n'));
+      });
+      hostile.listen(0, '127.0.0.1');
+      await new Promise(resolve => hostile.once('listening', resolve));
+      backend.relayPort = (hostile.address() as any).port;
+
+      try {
+        const { host, path } = await openPreview();
+        const cookie = cookieFrom(await request(host, path));
+
+        assert.equal((await request(host, '/', cookie)).status, 502);
+      } finally {
+        await new Promise(resolve => hostile.close(resolve));
+      }
+    });
+
+    test('a project cannot set cookies on another domain', async () => {
+      upstream.removeAllListeners('request');
+      upstream.on('request', (_req, res) => {
+        res.setHeader('Set-Cookie', ['squadforge_session=x; Domain=example.com; Path=/api', 'own=1; Path=/']);
+        res.end('ok');
+      });
+      const { host, path } = await openPreview();
+      const cookie = cookieFrom(await request(host, path));
+
+      const page = await request(host, '/', cookie);
+
+      assert.deepEqual(page.headers['set-cookie'], ['own=1; Path=/']);
+    });
+
+    test('websocket upgrades from another site are refused', async () => {
+      const { host, path } = await openPreview();
+      const cookie = cookieFrom(await request(host, path));
+
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = http.request({
+          host: '127.0.0.1',
+          port: proxyPort,
+          path: '/',
+          headers: { Host: host, Cookie: cookie, Origin: 'https://evil.example', Connection: 'Upgrade', Upgrade: 'websocket' }
+        });
+        req.on('response', res => resolve(res.statusCode || 0));
+        req.on('upgrade', () => reject(new Error('The upgrade must be refused')));
+        req.on('error', reject);
+        req.end();
+      });
+
+      assert.equal(status, 403);
     });
 
     test('websocket upgrades are refused without a valid cookie', async () => {

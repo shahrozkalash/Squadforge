@@ -3,6 +3,7 @@ import { db } from '../store.js';
 import {
   Build,
   DependencyInstallRecord,
+  ProjectFile,
   ExecutionEndReason,
   ExecutionSession,
   HumanApprovalRequest,
@@ -29,6 +30,7 @@ export class ExecutionError extends Error {
 export interface ExecutionConfig {
   limits: SandboxLimits;
   maxConcurrent: number;
+  maxPerUser: number;
   allowGuests: boolean;
   registryUrl: string;
   idleTimeoutMs: number;
@@ -50,6 +52,7 @@ export function executionConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Ex
       workspaceMb: number(env.EXECUTION_WORKSPACE_MB, 1024)
     },
     maxConcurrent: number(env.EXECUTION_MAX_CONCURRENT, 4),
+    maxPerUser: number(env.EXECUTION_MAX_PER_USER, 2),
     allowGuests: env.EXECUTION_ALLOW_GUESTS
       ? env.EXECUTION_ALLOW_GUESTS === 'true'
       : env.NODE_ENV !== 'production',
@@ -68,7 +71,9 @@ interface ActiveProcess {
   finished: Promise<void>;
 }
 
-const LIVE_PROCESS_STATES = new Set(['installing', 'starting', 'running', 'stopping']);
+const LIVE_PROCESS_STATES = new Set(['creating', 'installing', 'starting', 'running', 'stopping']);
+/** Execution approvals last 24 hours, so a session cannot outlive that window by much. */
+const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000;
 // eslint-disable-next-line no-control-regex
 const TERMINAL_CONTROL_SEQUENCES = /\x1b\[[0-9;?]*[ -/]*[@-~]|[\x00-\x08\x0b-\x1f\x7f]/g;
 
@@ -76,6 +81,8 @@ export class ExecutionSessionManager {
   private readonly processes = new Map<string, ActiveProcess>();
   private readonly logBytes = new Map<string, number>();
   private readonly recentOutput = new Map<string, string>();
+  private readonly creating = new Set<string>();
+  private readonly pendingStops = new Set<string>();
 
   constructor(readonly backend: ExecutionBackend, readonly config: ExecutionConfig) {}
 
@@ -152,10 +159,27 @@ export class ExecutionSessionManager {
     if (!capabilities.available) {
       throw new ExecutionError(capabilities.reason || 'Project execution is unavailable', 503);
     }
-    if (user.isAnonymous && !this.config.allowGuests) {
+    // isAnonymous is not stored, so restored guests are recognized by their id
+    if ((user.isAnonymous || user.id.startsWith('guest_')) && !this.config.allowGuests) {
       throw new ExecutionError('Guest sessions cannot run projects on this server.', 403);
     }
 
+    if (this.creating.has(build.id)) {
+      throw new ExecutionError('An environment is already being created for this project.', 409);
+    }
+    this.creating.add(build.id);
+    try {
+      return await this.createSessionExclusive(build, user, capabilities.backend);
+    } finally {
+      this.creating.delete(build.id);
+    }
+  }
+
+  private async createSessionExclusive(
+    build: Build,
+    user: User,
+    backendName: string
+  ): Promise<ExecutionSession | ApprovalOutcome> {
     const live = db.getLiveExecutionSessions();
     const existing = live.find(session => session.buildId === build.id);
     const files = db.getAllFiles(build.id);
@@ -167,11 +191,16 @@ export class ExecutionSessionManager {
     const approval = this.approvalFor(build, 'code_execution', hash, 'Run this project in an isolated sandbox.');
     if (approval) return approval;
 
-    if (existing) await this.destroySession(build.id, existing.id);
-
-    if (live.filter(session => session.id !== existing?.id).length >= this.config.maxConcurrent) {
+    // Checked before removing anything, so a refusal leaves the current session running
+    const others = live.filter(session => session.id !== existing?.id);
+    if (others.length >= this.config.maxConcurrent) {
       throw new ExecutionError('The execution environment is at capacity. Try again later.', 429);
     }
+    if (others.filter(session => session.userId === user.id).length >= this.config.maxPerUser) {
+      throw new ExecutionError('You have reached your limit of running projects.', 429);
+    }
+
+    if (existing) await this.destroySession(build.id, existing.id);
 
     const now = Date.now();
     const session: ExecutionSession = {
@@ -179,7 +208,7 @@ export class ExecutionSessionManager {
       buildId: build.id,
       userId: user.id,
       status: 'creating',
-      backend: capabilities.backend,
+      backend: backendName,
       workspaceHash: hash,
       dependencyStatus: 'not_started',
       missingDependencies: [],
@@ -213,8 +242,14 @@ export class ExecutionSessionManager {
   ): Promise<ExecutionSession | ApprovalOutcome> {
     const session = this.requireSession(build.id, sessionId);
     this.requireIdleEnvironment(session);
+    if (session.script) {
+      throw new ExecutionError('Project code has run here, so its files may have changed. Create a new session to install.', 409);
+    }
 
     const files = db.getAllFiles(build.id);
+    if (hashWorkspace(files) !== session.workspaceHash) {
+      throw new ExecutionError('The project has changed. Create a new session to install.', 409);
+    }
     const plan = planDependencies(files);
 
     if (!plan.supported) {
@@ -281,7 +316,11 @@ export class ExecutionSessionManager {
           ? record.error
           : `${record.error}. Packages that need install scripts require approval.`;
       } else if (!plan.hasLockfile) {
-        record.lockfileGenerated = await this.proposeLockfile(latest, build);
+        if (options.allowScripts) {
+          this.log(latest, 'system', 'The lockfile was not saved, because install scripts could have changed it.\n');
+        } else {
+          record.lockfileGenerated = await this.proposeLockfile(latest, build, files);
+        }
       }
       db.saveDependencyInstall(record);
     });
@@ -289,27 +328,38 @@ export class ExecutionSessionManager {
   }
 
   /** Versions chosen by an install reach the project only as a recorded file change. */
-  private async proposeLockfile(session: ExecutionSession, build: Build): Promise<boolean> {
+  private async proposeLockfile(session: ExecutionSession, build: Build, uploaded: ProjectFile[]): Promise<boolean> {
     const content = await this.backend.readWorkspaceFile(session.id, 'package-lock.json');
     if (!content) return false;
+    const lockfile = content.toString('utf-8');
 
     const result = await MergeManager.applyBatchActions(build.id, 'execution_environment', [{
       action: 'create_file',
       path: 'package-lock.json',
-      content: content.toString('utf-8'),
+      content: lockfile,
       commitMessage: 'Add lockfile generated by the approved sandbox install'
     }]);
     if (!result.success) {
       this.log(session, 'system', `The generated lockfile was not saved: ${result.error}\n`);
       return false;
     }
-    session.workspaceHash = hashWorkspace(db.getAllFiles(build.id));
+    // Hash what is in the volume. If the project changed meanwhile, startScript will refuse it.
+    session.workspaceHash = hashWorkspace([...uploaded, { path: 'package-lock.json', content: lockfile, version: 1 }]);
     return true;
   }
 
   async startScript(build: Build, sessionId: string, script: string): Promise<ExecutionSession> {
     const session = this.requireSession(build.id, sessionId);
     this.requireIdleEnvironment(session);
+
+    if (Date.now() - session.createdAt > MAX_SESSION_AGE_MS) {
+      throw new ExecutionError('This session has expired. Create a new one.', 409);
+    }
+
+    // Earlier code could change the test files, and a later run would replace the result
+    if (session.script && (script === 'test' || session.script === 'test')) {
+      throw new ExecutionError('Tests run in their own session, so their results can be trusted. Create a new session.', 409);
+    }
 
     const files = db.getAllFiles(build.id);
     if (hashWorkspace(files) !== session.workspaceHash) {
@@ -431,6 +481,8 @@ export class ExecutionSessionManager {
       latest.processId = handle.id;
       db.saveExecutionSession(latest);
     }
+
+    if (this.pendingStops.delete(session.id)) await this.stopProcess(session.id, 'stopped');
   }
 
   /** Set by the preview service, so a preview never outlives its process. */
@@ -438,7 +490,11 @@ export class ExecutionSessionManager {
 
   private async stopProcess(sessionId: string, reason: ExecutionEndReason): Promise<void> {
     const active = this.processes.get(sessionId);
-    if (!active) return;
+    if (!active) {
+      // A stop can arrive while the process is still being created
+      if (db.getExecutionSession(sessionId)?.status === 'starting') this.pendingStops.add(sessionId);
+      return;
+    }
 
     active.stopReason = active.stopReason || reason;
     clearTimeout(active.timer);
@@ -491,15 +547,18 @@ export class ExecutionSessionManager {
     const live = db.getLiveExecutionSessions();
 
     for (const session of live) {
-      if (session.status === 'running' && session.processId) {
-        const usage = await this.backend.usage(session.processId);
+      const processId = this.processes.get(session.id)?.handle.id;
+      if (processId) {
+        const usage = await this.backend.usage(processId);
         if (usage && usage.workspaceBytes > this.config.limits.workspaceMb * 1024 * 1024) {
           this.log(session, 'system', 'Workspace disk limit exceeded.\n');
           await this.stopProcess(session.id, 'disk_limit');
         }
       }
-      if (session.status === 'ready' && now - session.lastActivityAt > this.config.idleTimeoutMs) {
+      const idle = session.status === 'ready' && now - session.lastActivityAt > this.config.idleTimeoutMs;
+      if (idle || now - session.createdAt > MAX_SESSION_AGE_MS) {
         await this.destroySession(session.buildId, session.id);
+        await this.backend.removeDependencyCache(session.buildId);
       }
     }
 

@@ -214,7 +214,14 @@ describe('Phase 10 end to end', { skip: enabled ? false : 'Set SANDBOX_INTEGRATI
   test('sandbox test results feed verification', { timeout: 60000 }, async () => {
     const root = `/api/builds/${buildId}/execution`;
 
-    // The saved lockfile changed the workspace, and the session tracks that
+    // Tests get a fresh session, because the dev run could have changed the volume
+    await call(`${root}/sessions/${sessionId}`, ownerCookie, 'DELETE');
+    const fresh: any = await approveAndRetry(`${root}/sessions`);
+    assert.equal(fresh.status, 'ready', JSON.stringify(fresh));
+    sessionId = fresh.id;
+    await approveAndRetry(`${root}/sessions/${sessionId}/dependencies`);
+    await executionManager.waitForProcess(sessionId);
+
     const started = await call(`${root}/sessions/${sessionId}/start`, ownerCookie, 'POST', { script: 'test' });
     assert.equal(started.status, 200, await started.clone().text());
     await executionManager.waitForProcess(sessionId);

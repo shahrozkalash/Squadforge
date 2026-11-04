@@ -25,11 +25,12 @@ function cleanFiles(files: ProjectFile[]): Array<{ path: string; content: string
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
-/** Identifies exactly what will run. Approvals are tied to this value. */
+/** Identifies the project files uploaded to a session. Approvals are tied to this value. */
 export function hashWorkspace(files: ProjectFile[]): string {
   const hash = crypto.createHash('sha256');
   for (const file of cleanFiles(files)) {
-    hash.update(file.path).update('\0').update(file.content).update('\0');
+    hash.update(`${Buffer.byteLength(file.path)}:${Buffer.byteLength(file.content)}:`);
+    hash.update(file.path).update(file.content);
   }
   return hash.digest('hex');
 }

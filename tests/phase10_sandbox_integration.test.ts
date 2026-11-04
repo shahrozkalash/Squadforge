@@ -119,6 +119,39 @@ describe('Phase 10 sandbox integration', { skip: enabled ? false : 'Set SANDBOX_
     assert.equal(result.stdout.match(/BLOCKED/g)?.length, 3);
   });
 
+  test('the host is not reachable from the session network', async () => {
+    const listener = await docker.createContainer({
+      Image: dockerConfigFromEnv().image,
+      Cmd: ['node', '-e', `require('http').createServer((q, s) => s.end('HOST')).listen(39123, '0.0.0.0')`],
+      Labels: { 'squadforge.managed': 'true', 'squadforge.role': 'test-listener' },
+      HostConfig: { NetworkMode: 'host', AutoRemove: true }
+    });
+    await listener.start();
+
+    try {
+      const sessionId = await environment();
+      const result = await run(sessionId, nodeScript(`
+        const net = require('net');
+        const os = require('os');
+        const own = Object.values(os.networkInterfaces()).flat().find(i => i.family === 'IPv4' && !i.internal).address;
+        const prefix = own.split('.').slice(0, 3).join('.');
+        const targets = [1, 2, 3, 254].map(n => prefix + '.' + n).filter(ip => ip !== own);
+        const probe = host => new Promise(done => {
+          const socket = net.connect({ host, port: 39123, timeout: 2000 }, () => { socket.destroy(); done('REACHED ' + host); });
+          socket.on('error', () => done('BLOCKED ' + host));
+          socket.on('timeout', () => { socket.destroy(); done('BLOCKED ' + host); });
+        });
+        Promise.all(targets.map(probe)).then(lines => console.log(lines.join('\\n')));
+      `));
+
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.match(result.stdout, /BLOCKED/);
+      assert.doesNotMatch(result.stdout, /REACHED/);
+    } finally {
+      await listener.remove({ force: true }).catch(() => undefined);
+    }
+  });
+
   test('the egress proxy is gone once an install finishes', async () => {
     const sessionId = await environment();
     const probe = await run(sessionId, ['true'], { network: 'registry' });
@@ -209,7 +242,7 @@ describe('Phase 10 sandbox integration', { skip: enabled ? false : 'Set SANDBOX_
     assert.equal(await backend.readWorkspaceFile(sessionId, 'link.txt'), null);
   });
 
-  test('preview relay reaches the project, and is the only way in', async () => {
+  test('the preview relay reaches the project', async () => {
     const sessionId = await environment({
       'server.js': `require('http').createServer((q, s) => s.end('preview-ok')).listen(4173, '0.0.0.0');`
     });
@@ -255,7 +288,7 @@ describe('Phase 10 sandbox integration', { skip: enabled ? false : 'Set SANDBOX_
     await assert.rejects(docker.getNetwork(`sf-net-${sessionId}`).inspect());
   });
 
-  test('a hostile archive entry stays out of the upload path', async () => {
+  test('a traversal path is rejected before an archive is built', async () => {
     await assert.rejects(materializeWorkspace([{ path: '../../etc/evil', content: 'x', version: 1 }]));
   });
 });

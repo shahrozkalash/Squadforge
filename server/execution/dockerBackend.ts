@@ -28,6 +28,7 @@ const EDGE_NETWORK = 'squadforge-edge';
 const RELAY_PORT = 8080;
 const EGRESS_PORT = 3128;
 const STOP_GRACE_SECONDS = 5;
+const MAX_READ_BACK_BYTES = 20 * 1024 * 1024;
 
 export interface DockerBackendConfig {
   image: string;
@@ -80,6 +81,7 @@ export function hardenedHostConfig(
     NanoCpus: Math.round(limits.cpus * 1e9),
     PidsLimit: limits.pids,
     Tmpfs: { '/tmp': `rw,noexec,nosuid,size=${limits.tmpfsMb}m` },
+    LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '1' } },
     ...(config.runtime ? { Runtime: config.runtime } : {})
   };
 }
@@ -123,6 +125,8 @@ export class DockerBackend implements ExecutionBackend {
     await this.docker.createNetwork({
       Name: this.networkName(spec.sessionId),
       Internal: true,
+      // Internal alone leaves the host reachable on the bridge gateway address
+      Options: { 'com.docker.network.bridge.inhibit_ipv4': 'true' },
       Labels: labels
     });
     await this.docker.createVolume({ Name: this.volumeName(spec.sessionId), Labels: labels });
@@ -197,20 +201,20 @@ export class DockerBackend implements ExecutionBackend {
 
   async startProcess(sessionId: string, spec: ProcessSpec, onOutput: OutputListener): Promise<ProcessHandle> {
     const buildId = await this.buildIdForSession(sessionId);
-    const egress = spec.network === 'registry' ? await this.startEgressProxy(sessionId, buildId) : null;
 
     const binds = [`${this.volumeName(sessionId)}:${WORKSPACE}`];
     if (spec.mountDependencyCache) binds.push(`${this.cacheName(buildId)}:/cache`);
 
-    const env = Object.entries({
-      HOME: '/tmp',
-      NODE_ENV: 'development',
-      ...spec.env,
-      ...(egress ? { HTTPS_PROXY: egress, https_proxy: egress } : {})
-    }).map(([key, value]) => `${key}=${value}`);
-
     let container: Docker.Container;
     try {
+      const egress = spec.network === 'registry' ? await this.startEgressProxy(sessionId, buildId) : null;
+      const env = Object.entries({
+        HOME: '/tmp',
+        NODE_ENV: 'development',
+        ...spec.env,
+        ...(egress ? { HTTPS_PROXY: egress, https_proxy: egress } : {})
+      }).map(([key, value]) => `${key}=${value}`);
+
       container = await this.docker.createContainer({
         Image: this.config.image,
         Cmd: spec.argv,
@@ -289,7 +293,18 @@ export class DockerBackend implements ExecutionBackend {
     });
     await this.docker.getNetwork(this.networkName(sessionId)).connect({ Container: container.id });
     await container.start();
+    await this.waitForOutput(container, 'egress-proxy-ready');
     return `http://${name}:${EGRESS_PORT}`;
+  }
+
+  private async waitForOutput(container: Docker.Container, marker: string): Promise<void> {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      const logs = await container.logs({ stdout: true, stderr: false });
+      if (logs.toString('utf-8').includes(marker)) return;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('The dependency proxy did not start.');
   }
 
   private async stopEgressProxy(sessionId: string): Promise<void> {
@@ -425,6 +440,10 @@ function readSingleRegularFile(archive: NodeJS.ReadableStream): Promise<Buffer |
     const extract = tar.extract();
     let result: Buffer | null = null;
     extract.on('entry', (header, stream, next) => {
+      if ((header.size || 0) > MAX_READ_BACK_BYTES) {
+        extract.destroy(new Error('The file is too large to read back from the sandbox.'));
+        return;
+      }
       const chunks: Buffer[] = [];
       stream.on('data', chunk => {
         if (header.type === 'file') chunks.push(chunk as Buffer);

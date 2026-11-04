@@ -104,6 +104,11 @@ export class PreviewSessionService {
     const endpoint = await this.manager.backend.openPreview(session.id, session.processId, port);
     await this.waitForRelay(endpoint.host, endpoint.port);
 
+    if (db.getExecutionSession(session.id)?.status !== 'running') {
+      await this.manager.backend.closePreview(session.id).catch(() => undefined);
+      throw new ExecutionError('The project stopped while the preview was opening.', 409);
+    }
+
     const token = crypto.randomBytes(32).toString('hex');
     const now = Date.now();
     const preview = db.savePreviewSession({

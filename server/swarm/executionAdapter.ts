@@ -601,7 +601,7 @@ export class ExecutionAdapter {
         name: 'npm test in sandbox',
         passed,
         status: passed ? 'passed' : 'failed',
-        message: `Sandbox run ended with ${run.endReason} (exit code ${run.exitCode})`
+        message: `The project's test script ended with ${run.endReason} (exit code ${run.exitCode}). This proves the script's exit code, not how many tests ran.`
       }]
     };
   }

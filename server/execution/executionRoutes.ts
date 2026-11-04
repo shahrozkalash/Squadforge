@@ -38,6 +38,20 @@ export function createExecutionRouter(deps: RouteDependencies): express.Router {
     return session;
   };
 
+  // The session cookie is SameSite=None in production, so check where changes come from
+  router.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (req.method === 'GET' || !origin) return next();
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(origin).host === req.headers.host;
+    } catch {
+      sameOrigin = false;
+    }
+    if (!sameOrigin) return res.status(403).json({ error: 'Cross-origin request refused' });
+    next();
+  });
+
   router.use(requireAuth);
 
   router.get('/capabilities', owned(async build => ({
