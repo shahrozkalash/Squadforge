@@ -252,11 +252,15 @@ export class DockerBackend implements ExecutionBackend {
   private async watchExit(container: Docker.Container, stream: NodeJS.ReadableStream): Promise<ProcessExit> {
     // The container can be force-removed at any moment, so this must always resolve
     const FORCE_REMOVED_EXIT = 137;
-    const status = await container.wait().catch(() => ({ StatusCode: FORCE_REMOVED_EXIT }));
-    await new Promise<void>(resolve => {
+    // Listen first: the output can end before wait() returns
+    const outputEnded = new Promise<void>(resolve => {
       stream.once('end', resolve);
-      setTimeout(resolve, 1000).unref?.();
+      stream.once('close', resolve);
     });
+    const status = await container.wait().catch(() => ({ StatusCode: FORCE_REMOVED_EXIT }));
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([outputEnded, new Promise(resolve => { timer = setTimeout(resolve, 1000); })]);
+    clearTimeout(timer);
     const details = await container.inspect().catch(() => null);
     await container.remove({ force: true }).catch(() => undefined);
     return { exitCode: status.StatusCode, oomKilled: Boolean(details?.State?.OOMKilled) };

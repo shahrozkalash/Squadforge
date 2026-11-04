@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import http from 'node:http';
 import { db } from '../store.js';
 import { Build, ExecutionSession, PreviewSession } from '../types.js';
 import { ExecutionError, ExecutionSessionManager } from './executionSessionManager.js';
@@ -63,6 +64,23 @@ export class PreviewSessionService {
     return null;
   }
 
+  /** The relay takes a moment to start, and a preview opened before then shows an error. */
+  private async waitForRelay(host: string, port: number): Promise<void> {
+    const deadline = Date.now() + this.config.portWaitMs;
+    while (Date.now() < deadline) {
+      const reachable = await new Promise<boolean>(resolve => {
+        const req = http.get({ host, port, path: '/', timeout: 2000 }, res => {
+          res.resume();
+          resolve(true);
+        });
+        req.on('timeout', () => req.destroy());
+        req.on('error', () => resolve(false));
+      });
+      if (reachable) return;
+      await new Promise(resolve => setTimeout(resolve, this.config.portPollMs));
+    }
+  }
+
   /** Opens a preview and returns a one-time URL for the build owner. */
   async open(build: Build, sessionId: string): Promise<{ preview: PreviewSession; url: string }> {
     if (!this.config.baseDomain) {
@@ -84,6 +102,7 @@ export class PreviewSessionService {
 
     await this.closeForSession(session);
     const endpoint = await this.manager.backend.openPreview(session.id, session.processId, port);
+    await this.waitForRelay(endpoint.host, endpoint.port);
 
     const token = crypto.randomBytes(32).toString('hex');
     const now = Date.now();

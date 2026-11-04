@@ -817,6 +817,7 @@ describe('Phase 10 execution', () => {
       const session = await installed(manager, backend, build, user);
       await manager.startScript(build, session.id, 'dev');
       const { preview, url } = await service.open(build, session.id);
+      received.length = 0; // Ignore the readiness probe, which carries no credentials
       const parsed = new URL(url);
       return { build, session, preview, host: `${preview.id}.preview.localhost`, path: parsed.pathname + parsed.search };
     }
@@ -840,6 +841,7 @@ describe('Phase 10 execution', () => {
       const first = await request(host, path);
       assert.equal(first.status, 302);
       assert.match(first.headers['set-cookie']![0], /HttpOnly/);
+      assert.match(first.headers['set-cookie']![0], /Secure; SameSite=None/, 'the preview loads in a cross-site iframe');
       assert.doesNotMatch(first.headers['set-cookie']![0], /Domain=/);
 
       const page = await request(host, '/', cookieFrom(first));

@@ -76,6 +76,7 @@ export const ExecutionView: React.FC = () => {
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const lastLogId = useRef(0);
+  const retryAfterApproval = useRef<(() => void) | null>(null);
   const logEnd = useRef<HTMLDivElement | null>(null);
 
   const root = activeBuild ? `/api/builds/${activeBuild.id}/execution` : null;
@@ -117,9 +118,11 @@ export const ExecutionView: React.FC = () => {
       setSession(details.session);
       setInstalls(details.installs);
       setUsage(current);
-      if (added.length > 0) {
-        lastLogId.current = added[added.length - 1].id;
-        setLogs(existing => [...existing, ...added]);
+      // Polls can overlap, so only entries past the newest one are added
+      const fresh = added.filter(entry => entry.id > lastLogId.current);
+      if (fresh.length > 0) {
+        lastLogId.current = fresh[fresh.length - 1].id;
+        setLogs(existing => [...existing, ...fresh]);
       }
       if (details.session.status !== 'running') {
         setPreviewUrl(null);
@@ -149,17 +152,24 @@ export const ExecutionView: React.FC = () => {
     }
   };
 
-  const applyResult = (result: any) => {
-    if (result.approvalRequired) setApproval(result.approvalRequired);
-    else if (result.id) setSession(result);
+  const applyResult = (result: any, retry?: () => void) => {
+    if (result.approvalRequired) {
+      retryAfterApproval.current = retry || null;
+      setApproval(result.approvalRequired);
+    } else if (result.id) {
+      setSession(result);
+    }
   };
 
   const createSession = () => run('create', async () => {
-    applyResult(await request(`${root}/sessions`, 'POST'));
+    applyResult(await request(`${root}/sessions`, 'POST'), createSession);
   });
 
   const install = (allowScripts = false) => run('install', async () => {
-    applyResult(await request(`${root}/sessions/${sessionId}/dependencies`, 'POST', { allowScripts }));
+    applyResult(
+      await request(`${root}/sessions/${sessionId}/dependencies`, 'POST', { allowScripts }),
+      () => install(allowScripts)
+    );
   });
 
   const startScript = (script: string) => run(`start:${script}`, async () => {
@@ -207,6 +217,9 @@ export const ExecutionView: React.FC = () => {
       { approved }
     );
     setApproval(null);
+    const retry = retryAfterApproval.current;
+    retryAfterApproval.current = null;
+    if (approved && retry) setTimeout(retry, 0);
   });
 
   if (!activeBuild) {

@@ -42,7 +42,6 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
   const { config } = service;
   const hostPattern = new RegExp(`^(pv[0-9a-f]{24})\\.${escapeForRegExp(config.baseDomain || '')}(?::\\d+)?$`, 'i');
   const frameAncestors = `frame-ancestors ${new URL(config.appOrigin).origin}`;
-  const secure = config.scheme === 'https';
 
   const previewIdFor = (req: http.IncomingMessage) =>
     hostPattern.exec(req.headers.host || '')?.[1]?.toLowerCase() ?? null;
@@ -61,9 +60,10 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
         res.writeHead(403).end('This preview link is invalid or has expired.');
         return;
       }
-      const attributes = secure ? 'Secure; SameSite=None' : 'SameSite=Lax';
+      // The preview loads in a cross-site iframe, so the browser needs SameSite=None.
+      // Browsers accept Secure on *.localhost, and the cookie stays limited to this host.
       res.writeHead(302, {
-        'Set-Cookie': `${COOKIE_NAME}=${cookie}; HttpOnly; Path=/; ${attributes}`,
+        'Set-Cookie': `${COOKIE_NAME}=${cookie}; HttpOnly; Path=/; Secure; SameSite=None`,
         Location: '/'
       });
       res.end();
