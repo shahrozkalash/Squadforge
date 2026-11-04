@@ -1,6 +1,6 @@
 # SquadForge Agent Guide
 
-Last inspected commit: `b8554f7` on `feature/agent-context-and-lockfile`, based on `main` at `8cdd207` (2026-11-04). Update this with every handoff.
+Last inspected commit: `bb0d750` on `feature/phase-10-execution`, based on `main` at `8cdd207` (2026-11-04). Update this with every handoff.
 
 This guide comes from the project owner's reconstructed handoff and from repository inspection. The original AI Studio prompt and chats are unavailable. Treat the handoff as stated intent, and check its claims against the code. When historical evidence is missing, document the uncertainty instead of inventing a decision.
 
@@ -31,6 +31,10 @@ npm run build   # vite build
 npm run dev     # tsx server.ts
 ```
 
+Real sandbox tests need Docker: `docker build -t squadforge-sandbox:1 sandbox`, then `SANDBOX_INTEGRATION=1 npx tsx --test tests/phase10_sandbox_integration.test.ts tests/phase10_end_to_end.test.ts`.
+
+Project code must only run through an `ExecutionBackend` with real isolation. Never add a backend that runs it as a plain host process.
+
 ## Engineering invariants
 
 These are proposed by the handoff and still need confirming against the code.
@@ -53,7 +57,8 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 7 | Universal Software Architecture Engine. `tests/phase7_project_export_verification.test.ts` suggests phase numbering may be inconsistent. |
 | Phase 8 | Historically reported as accepted. Not independently re-verified. |
 | Phase 9 | Advanced Code Generation Engine. Not accepted, and acceptance is not recommended yet. See `PHASE_9_ACCEPTANCE_REPORT.md`. |
-| Phase 10 | In progress on `feature/phase-10-execution`, at the user's request and with Phase 9 blockers reported. |
+| Phase 10 | Implemented on `feature/phase-10-execution`, at the user's request. Not accepted, and not recommended for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
+| Phase 11 | Do not start until the owner asks. |
 
 Later roadmap:
 

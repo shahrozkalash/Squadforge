@@ -109,6 +109,7 @@ SquadForge implements multi-layer defense-in-depth isolation for generated code 
 
 ### 1. Preview Sandbox Boundaries
 - **Iframe Isolation**: Generated previews execute inside an iframe configured with strict sandbox tokens: `sandbox="allow-scripts allow-forms allow-same-origin allow-modals"`.
+These boundaries apply to the browser-only preview. Previews of running projects use the execution environment described later, which relies on a separate origin instead.
 - **Parent Hierarchy Shield**: The sandbox injects a non-configurable barrier script at the earliest point in the document head:
   - `window.parent`, `window.top`, and `window.opener` are redefined to prevent traversing or executing functions against the host application DOM.
   - `document.cookie` access is neutralized within the preview runtime to prevent reading parent application session tokens or authentication state.
@@ -130,9 +131,61 @@ SquadForge implements multi-layer defense-in-depth isolation for generated code 
 
 ### 3. Project Memory & Multi-Tenant Authorization
 - **Strict Ownership Checks**: All project memory queries (`getRequirements`, `getMemory`, `getDefects`, `getDecisions`, `getFacts`, `getRevisions`) mandate non-empty `userId` and verify that the target build belongs to that user.
-- **Guest Session Isolation**: Unauthenticated public users receive cryptographically isolated guest sessions (`gst_*`) with scoped storage and bounded quotas, preventing cross-tenant leakage.
+- **Guest Session Isolation**: Unauthenticated public users receive separate guest sessions (`guest_*`) with their own storage. Project execution is off for guests in production unless `EXECUTION_ALLOW_GUESTS=true`.
 
 ### 4. Remaining Limitations & Production Guidelines
 - **Browser Fetch Requests**: The CSP permits outbound HTTPS requests from preview applications (e.g. public third-party REST APIs). For air-gapped environments, restrict `connect-src` strictly to `'none'` or trusted hostnames.
-- **Multi-Process Execution**: Generated applications execute client-side inside the browser sandbox; full-stack backend components generated for downloaded ZIP packages require local container execution (`docker run` or `npm run dev` in an isolated virtual machine).
+- **Execution**: The browser-only preview described above runs in the browser. Running a full project uses the separate Docker execution environment below, and is off by default.
 
+## Project Execution Environment
+
+Execution is off unless `EXECUTION_BACKEND=docker` is set. There is no fallback that runs project code on the SquadForge server. See `PHASE_10_ACCEPTANCE_REPORT.md` for what has been verified.
+
+### Isolation limits
+
+Containers share the worker's kernel, so they are not strong isolation on their own. For untrusted users:
+
+- Use a dedicated worker, never the machine holding SquadForge's database or secrets.
+- Set `SANDBOX_RUNTIME=runsc` (gVisor), or use a disposable VM. gVisor support has not been tested yet.
+- Treat Docker API access as root access to the worker. Require TLS client certificates.
+- Keep `SANDBOX_PREVIEW_BIND_IP` on a private, firewalled address, because relay ports have no authentication.
+
+### Setup
+
+1. On the worker, build the image: `docker build -t squadforge-sandbox:1 sandbox`
+2. Enable the Docker API over TLS on the worker.
+3. Set the variables below on the SquadForge server.
+4. Point a wildcard DNS record and TLS certificate for `*.PREVIEW_BASE_DOMAIN` at `PREVIEW_PORT`.
+5. Run the isolation tests against the worker: `SANDBOX_INTEGRATION=1 npx tsx --test tests/phase10_sandbox_integration.test.ts tests/phase10_end_to_end.test.ts`
+
+### Variables
+
+| Variable | Default | Purpose |
+| :--- | :--- | :--- |
+| `EXECUTION_BACKEND` | `disabled` | Set to `docker` to enable execution |
+| `DOCKER_HOST`, `DOCKER_TLS_CA`, `DOCKER_TLS_CERT`, `DOCKER_TLS_KEY` | Local daemon | Worker address and paths to TLS files |
+| `SANDBOX_IMAGE` | `squadforge-sandbox:1` | Image used for all containers |
+| `SANDBOX_RUNTIME` | `runc` | Container runtime, such as `runsc` |
+| `SANDBOX_PREVIEW_BIND_IP` | `127.0.0.1` | Worker address for relay ports |
+| `SANDBOX_PREVIEW_HOST` | Bind IP | Address SquadForge uses to reach relay ports |
+| `PREVIEW_BASE_DOMAIN` | `preview.localhost` outside production | Preview domain. Previews are off in production without it |
+| `PREVIEW_PORT` | `3001` | Preview listener port |
+| `PREVIEW_IDLE_MINUTES` | `15` | Idle preview timeout |
+| `EXECUTION_ALLOW_GUESTS` | Off in production | Lets guest sessions run projects |
+| `EXECUTION_MAX_CONCURRENT` | `4` | Total live sessions |
+| `EXECUTION_MAX_PER_USER` | `2` | Live sessions per user |
+| `EXECUTION_MEMORY_MB` | `1024` | Memory limit |
+| `EXECUTION_CPUS` | `1` | CPU limit |
+| `EXECUTION_PIDS` | `256` | Process limit |
+| `EXECUTION_MAX_RUNTIME_SECONDS` | `1800` | Time limit per process |
+| `EXECUTION_WORKSPACE_MB` | `1024` | Polled disk limit. Not a hard quota |
+| `EXECUTION_IDLE_MINUTES` | `30` | Idle session timeout |
+| `NPM_REGISTRY_URL` | `https://registry.npmjs.org/` | The only host installs can reach |
+
+### Preview domain
+
+Use a dedicated host under a domain that does not serve anything sensitive. A subdomain of the app's site works best, because browsers that block third-party cookies may otherwise refuse the preview cookie. Project `Set-Cookie` headers with a `Domain` attribute are removed, and the preview cookie is limited to its own host.
+
+### Supported runtimes
+
+Node with npm, on the Node 22 sandbox image. yarn, pnpm, and pip projects are detected and reported as unsupported.

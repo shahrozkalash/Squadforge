@@ -11,7 +11,8 @@ A user describes an idea, and SquadForge's swarm orchestrator plans it, splits i
 - **GitHub integration** — secure OAuth connect (CSRF/state protection, single-use states persisted in SQLite) and auto-push of finished projects
 - **Authentication & multi-tenancy** — bcrypt password hashing, session management, rate-limited logins, and per-user project isolation
 - **OTP password reset** — 6-digit email codes (Resend or SMTP) with expiry, attempt limits, and session revocation on reset
-- **Isolated execution & verification** — sandbox runner and honest verification service that checks syntax, security issues, and real evidence before calling a build "done"
+- **Verification** — honest verification service that checks syntax, security issues, and real evidence before calling a build "done"
+- **Project execution (optional)** — run generated Node projects in Docker sandboxes, with dependency installs and a live preview. Off by default; see `DEPLOYMENT.md`
 - **SQLite persistence** — WAL mode with versioned migrations; no external database to run
 
 ## Tech Stack
