@@ -1,6 +1,6 @@
 # SquadForge Agent Guide
 
-Last inspected commit: `8cdd207a0b74a75c239ee0ac2796a11e589729e1` (2026-11-04). Update this with every handoff.
+Last inspected commit: `472de53b41dcafb5e4140ae37b6fc1a873a7eaf0` on `feature/agent-context-and-lockfile`, based on `main` at `8cdd207` (2026-11-04). Update this with every handoff.
 
 This guide comes from the project owner's reconstructed handoff and from repository inspection. The original AI Studio prompt and chats are unavailable. Treat the handoff as stated intent, and check its claims against the code. When historical evidence is missing, document the uncertainty instead of inventing a decision.
 
@@ -52,7 +52,7 @@ These are proposed by the handoff and still need confirming against the code.
 | Phases 1-6 | Original specs unavailable. Reconstruct them from commits, tests, and code, and separate original requirements from inferred behavior. |
 | Phase 7 | Universal Software Architecture Engine. `tests/phase7_project_export_verification.test.ts` suggests phase numbering may be inconsistent. |
 | Phase 8 | Historically reported as accepted. Not independently re-verified. |
-| Phase 9 | Advanced Code Generation Engine. In progress and unverified. Do not treat as accepted. |
+| Phase 9 | Advanced Code Generation Engine. In progress and unverified. Do not treat as accepted. See `PHASE_9_PROGRESS.md`. |
 | Phase 10 | Do not start until Phase 9 is finished and accepted. |
 
 Later roadmap:
@@ -69,23 +69,33 @@ Do not present GitHub integration or deployment as complete until they are imple
 
 ## Known CI and dependency problem
 
-- `package-lock.json` was deleted in `ef3a927` and is absent at the inspected commit.
+- `package-lock.json` was deleted from `main` in `ef3a927`. It is restored on `feature/agent-context-and-lockfile` from `6184ab1`, and `package.json` is unchanged since then.
 - CI on `main` has failed since that deletion. In the run for `8cdd207`, `Set up Node.js` failed, so install, TypeScript, and test steps were skipped. The `vite: not found` build error follows from the skipped install.
 - The last passing run in the recent CI history is `6184ab1`, which had the lockfile. It predates the Phase 9 code generation commit.
 - The lockfile has been added and deleted repeatedly since at least 2026-10-30. The reason is unknown, and no owner decision to remove it is recorded. Find out what is deleting it, or a restored file may disappear again.
+- The restored lockfile has no Windows Rolldown binding, so `npm run build` and `tests/public_access.test.ts` fail on Windows. Linux is unaffected.
+- `tests/ci_workflow_integrity.test.ts` still fails because `.env.example` omits `GEMINI_API_KEY`. This depends on the open provider question below.
 
 ## Phase 9 acceptance work
 
 Complete these before accepting Phase 9 or starting Phase 10:
 
+Done on `feature/agent-context-and-lockfile`, not yet merged:
+
+- Approval authorization fixed, including removal of the `human_reviewer` exception.
+- Active generation and model requests are now cancelled through an `AbortSignal`.
+- The lockfile is restored on the branch. Why it keeps being deleted is still unexplained.
+- `PHASE_9_PROGRESS.md` added, with actual results and limitations.
+
+Still to do:
+
 1. Inspect the latest `main` commit.
-2. Recheck Phase 9 approval authorization, including the `human_reviewer` exception.
-3. Implement actual cancellation of active generation and model requests where supported. The last inspection found an in-memory flag checked between passes.
-4. Verify finalization rejects unresolved validation errors.
-5. Restore or explain the missing package lockfile.
-6. Add `PHASE_9_PROGRESS.md` and `PHASE_9_ACCEPTANCE_REPORT.md`.
-7. Run the full test, lint, TypeScript, and production build checks.
-8. Record actual results and remaining limitations.
+2. Verify finalization rejects unresolved validation errors.
+3. Resolve the `.env.example` test failure.
+4. Test cancellation against a real provider.
+5. Add `PHASE_9_ACCEPTANCE_REPORT.md`.
+6. Run the full test, lint, TypeScript, and production build checks.
+7. Record actual results and remaining limitations.
 
 ## Fragile areas
 
