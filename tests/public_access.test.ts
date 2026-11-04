@@ -5,6 +5,7 @@ import { resolveUser } from '../server.js';
 import { hashPassword, generateSessionToken } from '../server/crypto.js';
 import { User, Build } from '../server/types.js';
 import { GitHubService } from '../server/github.js';
+import { ApprovalGateService } from '../server/swarm/approvalGateService.js';
 
 describe('SquadForge Public Access, Multi-Tenant Session Isolation & Security', () => {
   beforeEach(() => {
@@ -203,5 +204,57 @@ describe('SquadForge Public Access, Multi-Tenant Session Isolation & Security', 
         delete process.env.APP_URL;
       }
     }
+  });
+
+  test('A guest cannot approve another guest\'s approval request, and can approve their own', () => {
+    const visit = (ip: string) => {
+      const req: any = { cookies: {}, headers: {}, ip };
+      const res: any = { cookie: (n: string, v: string) => { req.cookies[n] = v; } };
+      return resolveUser(req, res);
+    };
+    const owner = visit('192.168.2.1');
+    const otherGuest = visit('192.168.2.2');
+
+    const build = db.saveBuild({
+      id: `bld_guest_approval_${Date.now()}`,
+      userId: owner.id,
+      idea: 'Guest approval isolation',
+      status: 'running',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      selectedModels: ['gemini'],
+      autoPushGithub: false,
+      totalTokens: 0,
+      totalCost: 0,
+      costLimit: 2.0,
+      maxDurationSeconds: 120,
+      patchesAppliedCount: 0
+    });
+    assert.ok(build);
+
+    const created = ApprovalGateService.requestApproval(build.id, owner.id, {
+      requestingAgent: 'gemini-2.5-pro',
+      requestingRole: 'security_specialist',
+      operationType: 'security_sensitive_change',
+      explanation: 'Guest isolation check',
+      affectedFiles: ['.env'],
+      proposedChanges: 'Change .env'
+    });
+    assert.ok(created.request);
+
+    const attack = ApprovalGateService.respondToApproval(build.id, otherGuest.id, {
+      requestId: created.request.id,
+      approved: true,
+      approvedBy: owner.id
+    });
+    assert.equal(attack.success, false);
+    assert.equal(db.getApprovalRequest(created.request.id)?.status, 'pending');
+
+    const own = ApprovalGateService.respondToApproval(build.id, owner.id, {
+      requestId: created.request.id,
+      approved: true
+    });
+    assert.equal(own.success, true);
+    assert.equal(own.request?.approvedBy, owner.id);
   });
 });

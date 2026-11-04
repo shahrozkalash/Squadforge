@@ -7,6 +7,16 @@ import {
   AgentRole 
 } from '../types.js';
 
+const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000; // 24-hour validity limit
+
+const KNOWN_AGENT_ROLES = [
+  'project_manager', 'software_architect', 'frontend_developer', 'backend_developer',
+  'database_specialist', 'database_engineer', 'integration_specialist', 'integration_engineer',
+  'qa_testing_specialist', 'qa_engineer', 'debugging_specialist', 'security_specialist',
+  'devops_release_specialist', 'fullstack_developer', 'ui_ux_designer', 'performance_engineer',
+  'documentation_engineer'
+];
+
 export class ApprovalGateService {
   /**
    * Determines if a given operation requires human approval gate
@@ -65,7 +75,6 @@ export class ApprovalGateService {
 
     const approvals = db.getApprovalRequests(buildId);
     const now = Date.now();
-    const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000; // 24-hour validity limit
 
     // Every sensitive file must have a valid approval belonging to this exact build
     return sensitiveFiles.every(file => {
@@ -151,11 +160,10 @@ export class ApprovalGateService {
 
   /**
    * Responds to an approval request (User human gate response).
-   * Strict security check: Agents CANNOT approve their own restricted operations.
-   */
-  /**
-   * Responds to an approval request (User human gate response).
-   * Strict security check: Agents CANNOT approve their own restricted operations.
+   *
+   * userId must be the authenticated session user, and only the build owner may decide.
+   * The recorded approver is always that user. approvedBy is a caller claim that can only
+   * block a decision (for example, an agent acting as approver). It never grants access.
    */
   static respondToApproval(
     buildId: string,
@@ -163,7 +171,7 @@ export class ApprovalGateService {
     params: {
       requestId: string;
       approved: boolean;
-      approvedBy: string;
+      approvedBy?: string;
       resolutionNotes?: string;
     }
   ): { success: boolean; request?: HumanApprovalRequest; error?: string };
@@ -181,28 +189,27 @@ export class ApprovalGateService {
     arg4?: string,
     arg5?: string
   ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
-    let effectiveUserId: string;
+    let effectiveUserId: string | undefined;
     let requestId: string;
     let approved: boolean;
-    let approvedBy: string;
+    let claimedActor: string | undefined;
     let resolutionNotes: string | undefined;
 
     if (typeof arg3 === 'object' && arg3 !== null && 'requestId' in arg3) {
       effectiveUserId = arg2;
       requestId = arg3.requestId;
       approved = Boolean(arg3.approved);
-      approvedBy = arg3.approvedBy;
+      claimedActor = arg3.approvedBy;
       resolutionNotes = arg3.resolutionNotes;
     } else {
       requestId = arg2;
       approved = typeof arg3 === 'boolean' ? arg3 : (arg3 === 'approved');
-      effectiveUserId = arg4 || 'user';
-      approvedBy = effectiveUserId;
+      effectiveUserId = arg4;
       resolutionNotes = arg5;
     }
 
     const build = db.getBuild(buildId);
-    if (!build || (build.userId && effectiveUserId && build.userId !== effectiveUserId && effectiveUserId !== 'human_reviewer')) {
+    if (!effectiveUserId || !build || !build.userId || build.userId !== effectiveUserId) {
       return { success: false, error: 'Unauthorized or build not found' };
     }
 
@@ -221,31 +228,24 @@ export class ApprovalGateService {
     }
 
     // STRICT ANTI-BYPASS: Agents cannot approve restricted operations; must be authenticated human user
-    const KNOWN_AGENT_ROLES = [
-      'project_manager', 'software_architect', 'frontend_developer', 'backend_developer',
-      'database_specialist', 'database_engineer', 'integration_specialist', 'integration_engineer',
-      'qa_testing_specialist', 'qa_engineer', 'debugging_specialist', 'security_specialist',
-      'devops_release_specialist', 'fullstack_developer', 'ui_ux_designer', 'performance_engineer',
-      'documentation_engineer'
-    ];
-
-    const approver = approvedBy?.toLowerCase() || '';
-    if (
-      !approvedBy ||
-      approver.startsWith('agent_') ||
-      KNOWN_AGENT_ROLES.includes(approver) ||
-      approvedBy === request.requestingAgent ||
-      approvedBy === request.requestingRole
-    ) {
+    if ([effectiveUserId, claimedActor].some(actor => actor && this.isAgentActor(actor, request))) {
       return {
         success: false,
         error: 'Forbidden: Agents cannot approve their own restricted operations. Human approval is strictly required.'
       };
     }
 
+    // An unanswered request cannot be decided after its validity window closes
+    if (Date.now() > request.createdAt + APPROVAL_TTL_MS) {
+      request.status = 'expired';
+      request.resolvedAt = Date.now();
+      db.saveApprovalRequest(request);
+      return { success: false, error: `Approval request ${requestId} has expired and cannot be decided.` };
+    }
+
     const newStatus: ApprovalStatus = approved ? 'approved' : 'rejected';
     request.status = newStatus;
-    request.approvedBy = approvedBy;
+    request.approvedBy = effectiveUserId;
     request.resolutionNotes = resolutionNotes;
     request.resolvedAt = Date.now();
 
@@ -256,7 +256,7 @@ export class ApprovalGateService {
       buildId, 
       request.requestingRole, 
       approved ? 'working' : 'idle', 
-      `Approval request ${newStatus} by ${approvedBy}`,
+      `Approval request ${newStatus} by ${effectiveUserId}`,
       request.taskId
     );
 
@@ -267,9 +267,17 @@ export class ApprovalGateService {
       timestamp: Date.now(),
       type: 'approval_responded',
       taskId: request.taskId,
-      details: `Approval request for [${request.operationType}] ${newStatus.toUpperCase()} by ${approvedBy}`
+      details: `Approval request for [${request.operationType}] ${newStatus.toUpperCase()} by ${effectiveUserId}`
     });
 
     return { success: true, request };
+  }
+
+  private static isAgentActor(actor: string, request: HumanApprovalRequest): boolean {
+    const normalized = actor.toLowerCase();
+    return normalized.startsWith('agent_') ||
+      KNOWN_AGENT_ROLES.includes(normalized) ||
+      actor === request.requestingAgent ||
+      actor === request.requestingRole;
   }
 }

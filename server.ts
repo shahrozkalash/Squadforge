@@ -2080,7 +2080,6 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
   const result = ApprovalGateService.respondToApproval(build.id, req.user!.id, {
     requestId: req.params.approvalId,
     approved,
-    approvedBy: req.user!.name || req.user!.email || 'human_reviewer',
     resolutionNotes
   });
 
