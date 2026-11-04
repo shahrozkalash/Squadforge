@@ -1448,4 +1448,195 @@ export interface CollaborationOverview {
   knowledgeItemsCount: number;
 }
 
+// ==========================================
+// PHASE 9: INTELLIGENT CODE GENERATION ENGINE
+// ==========================================
+
+export type GenerationProfileType =
+  | 'website_and_web_app'
+  | 'saas_platform'
+  | 'ecommerce_app'
+  | 'rest_api_backend'
+  | 'desktop_application'
+  | 'android_mobile_application'
+  | 'cli_tool_developer_utility'
+  | 'automation_software'
+  | 'data_processing_application'
+  | 'game_creative_application'
+  | 'multimedia_application';
+
+export interface GenerationProfilePlatformConstraints {
+  supported: boolean;
+  supportedRuntimes: string[];
+  limitationNotice?: string;
+  recommendedPackaging?: string;
+}
+
+export interface GenerationProfile {
+  id: GenerationProfileType;
+  displayName: string;
+  category: string;
+  description: string;
+  architectureOverview: string;
+  defaultFileOrganization: string[];
+  typicalDependencies: string[];
+  requiredContracts: string[];
+  codingConventions: string[];
+  validationRules: string[];
+  platformConstraints: GenerationProfilePlatformConstraints;
+}
+
+export type ProjectContractType = 
+  | 'typescript_interface'
+  | 'api_schema'
+  | 'database_model'
+  | 'component_props'
+  | 'service_interface'
+  | 'module_dependency'
+  | 'shared_constant';
+
+export interface ContractField {
+  name: string;
+  type: string;
+  required: boolean;
+  description?: string;
+}
+
+export interface ProjectContract {
+  id: string;
+  type: ProjectContractType;
+  name: string;
+  filePath: string;
+  signature: string;
+  description: string;
+  fieldsOrParams?: ContractField[];
+  returnOrResponseType?: string;
+  relatedContracts?: string[];
+}
+
+export interface DiscoveredFileContext {
+  path: string;
+  reason: string;
+  priority: number;
+  contentSnippet?: string;
+  byteLength: number;
+  lastModified?: number;
+}
+
+export interface DiscoveredComponent {
+  name: string;
+  path: string;
+  propsContract?: string;
+  isExported: boolean;
+  importedBy?: string[];
+}
+
+export interface DiscoveredApiEndpoint {
+  method: string;
+  path: string;
+  requestType?: string;
+  responseType?: string;
+  handlerFunction?: string;
+}
+
+export interface DiscoveredDatabaseModel {
+  name: string;
+  fields: string[];
+  relations?: string[];
+}
+
+export interface ProjectContext {
+  relevantFiles: DiscoveredFileContext[];
+  establishedContracts: ProjectContract[];
+  detectedComponents: DiscoveredComponent[];
+  apiEndpoints: DiscoveredApiEndpoint[];
+  databaseModels: DiscoveredDatabaseModel[];
+  codingConventions: string[];
+  dependencies: Record<string, string>;
+  tokenUsageEstimate: number;
+}
+
+export type GenerationPassName = 
+  | 'planning'
+  | 'generation'
+  | 'integration'
+  | 'validation'
+  | 'repair'
+  | 'finalization';
+
+export type GenerationPassStatus = 'pending' | 'in_progress' | 'passed' | 'failed' | 'skipped';
+
+export interface GenerationPass {
+  passNumber: number;
+  passName: GenerationPassName;
+  status: GenerationPassStatus;
+  summary: string;
+  diagnostics?: string[];
+  durationMs?: number;
+}
+
+export type CodeGenerationStatus = 
+  | 'planning'
+  | 'generating'
+  | 'integrating'
+  | 'validating'
+  | 'repairing'
+  | 'finalized'
+  | 'failed';
+
+export interface RepairAttemptLog {
+  attempt: number;
+  file: string;
+  defect: string;
+  action: string;
+  outcome: 'resolved' | 'unresolved';
+  timestamp: number;
+}
+
+export interface CodeGenerationRun {
+  id: string;
+  buildId: string;
+  taskId?: string;
+  userRequest: string;
+  generationProfile: GenerationProfileType;
+  modelId: string;
+  status: CodeGenerationStatus;
+  currentPass: number;
+  totalPasses: number;
+  passes: GenerationPass[];
+  filesCreated: string[];
+  filesModified: string[];
+  patchIds: string[];
+  contractsEstablished: ProjectContract[];
+  validationResults?: any;
+  repairAttempts: number;
+  repairLogs: RepairAttemptLog[];
+  tokenUsage: number;
+  cost: number;
+  error?: string;
+  createdAt: number;
+  completedAt?: number;
+}
+
+export interface IncrementalFileEdit {
+  filePath: string;
+  action: 'create' | 'patch' | 'delete' | 'rename';
+  targetSymbol?: string;
+  findSnippet?: string;
+  replacementContent: string;
+  expectedBaseVersion: number;
+  expectedContentHash: string;
+  explanation: string;
+}
+
+export interface AutomaticRepairResult {
+  success: boolean;
+  resolvedDefects: string[];
+  unresolvedDefects: string[];
+  repairAttemptsCount: number;
+  modifiedFiles: string[];
+  validationEvidence: any;
+}
+
+
 

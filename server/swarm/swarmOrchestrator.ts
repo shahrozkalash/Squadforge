@@ -27,6 +27,9 @@ import { AIChallengeEngine } from './aiChallengeEngine.js';
 import { CollaborativeDebuggingEngine } from './collaborativeDebuggingEngine.js';
 import { ApprovalGateService } from './approvalGateService.js';
 import { SharedWorkspaceService } from './sharedWorkspaceService.js';
+import { CodeGenerationEngine } from './codeGenerationEngine.js';
+import { ProjectContextEngine } from './projectContextEngine.js';
+import { ContractFirstEngine } from './contractFirstEngine.js';
 import { 
   Build, 
   ModelConfig, 

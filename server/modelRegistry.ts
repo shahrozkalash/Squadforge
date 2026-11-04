@@ -516,6 +516,10 @@ class ModelRegistryManager {
     return Array.from(this.models.values());
   }
 
+  getAllModels(): ModelConfig[] {
+    return this.getAll();
+  }
+
   getById(id: string): ModelConfig | undefined {
     return this.models.get(id);
   }
@@ -530,6 +534,10 @@ class ModelRegistryManager {
 
   getEnabled(): ModelConfig[] {
     return this.getAll().filter(m => m.enabled);
+  }
+
+  getEnabledModels(): ModelConfig[] {
+    return this.getEnabled();
   }
 
   getByCapabilityLevel(level: string): ModelConfig[] {

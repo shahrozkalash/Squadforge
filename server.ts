@@ -40,6 +40,10 @@ import { AIChallengeEngine } from './server/swarm/aiChallengeEngine.js';
 import { CollaborativeDebuggingEngine } from './server/swarm/collaborativeDebuggingEngine.js';
 import { ApprovalGateService } from './server/swarm/approvalGateService.js';
 import { SharedWorkspaceService } from './server/swarm/sharedWorkspaceService.js';
+import { CodeGenerationEngine } from './server/swarm/codeGenerationEngine.js';
+import { GenerationProfileRegistry } from './server/swarm/generationProfiles.js';
+import { ProjectContextEngine } from './server/swarm/projectContextEngine.js';
+import { ContractFirstEngine } from './server/swarm/contractFirstEngine.js';
 
 dotenv.config();
 
@@ -2206,6 +2210,92 @@ app.post('/api/builds/:id/collaboration/tasks/:taskId/escalate', requireAuth, (r
     return res.status(400).json({ error: result.error });
   }
   res.json(result);
+});
+
+// ==========================================
+// PHASE 9: INTELLIGENT CODE GENERATION ENDPOINTS
+// ==========================================
+
+// Get all specialized generation profiles and platform constraints
+app.get('/api/codegen/profiles', (_req, res) => {
+  const profiles = GenerationProfileRegistry.getAll();
+  res.json({ profiles });
+});
+
+// Run the 6-Pass Intelligent Code Generation Pipeline
+app.post('/api/builds/:id/codegen/run', requireAuth, async (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { userRequest, profileId, modelId, taskId, maxRepairAttempts } = req.body;
+  if (!userRequest || typeof userRequest !== 'string' || !userRequest.trim()) {
+    return res.status(400).json({ error: 'userRequest must be a non-empty string' });
+  }
+
+  try {
+    const runRecord = await CodeGenerationEngine.runGenerationPipeline({
+      buildId: build.id,
+      userId: req.user!.id,
+      userRequest: userRequest.trim(),
+      profileId,
+      modelId,
+      taskId,
+      maxRepairAttempts: typeof maxRepairAttempts === 'number' ? maxRepairAttempts : 3
+    });
+
+    res.json({ success: true, run: runRecord });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Generation pipeline failed' });
+  }
+});
+
+// Get generation runs history for a build
+app.get('/api/builds/:id/codegen/runs', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const runs = db.getGenerationRunsByBuild(build.id);
+  res.json({ runs });
+});
+
+// Get a single generation run detail
+app.get('/api/builds/:id/codegen/runs/:runId', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const run = db.getGenerationRun(req.params.runId);
+  if (!run || run.buildId !== build.id) {
+    return res.status(404).json({ error: 'Generation run not found' });
+  }
+  res.json({ run });
+});
+
+// Preview discovered project context & established contracts for a requirement
+app.post('/api/builds/:id/codegen/preview-context', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { userRequest, targetFiles } = req.body;
+  const files = db.getAllFiles(build.id);
+  const context = ProjectContextEngine.buildProjectContext(
+    userRequest || build.idea,
+    files,
+    Array.isArray(targetFiles) ? targetFiles : [],
+    3500
+  );
+
+  const profile = GenerationProfileRegistry.matchProfileForRequest(userRequest || build.idea, build.projectType);
+  const synthesizedContracts = ContractFirstEngine.synthesizeInitialContracts(
+    userRequest || build.idea,
+    profile.id,
+    Array.isArray(targetFiles) ? targetFiles : []
+  );
+
+  res.json({
+    profile,
+    context,
+    synthesizedContracts
+  });
 });
 
 // Mount Vite in dev mode or serve static bundle in production

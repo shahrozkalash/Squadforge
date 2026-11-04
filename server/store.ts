@@ -32,7 +32,8 @@ import {
   AIChallengeArgument,
   CollaborativeDefect,
   HumanApprovalRequest,
-  SharedKnowledgeItem
+  SharedKnowledgeItem,
+  CodeGenerationRun
 } from './types.js';
 import { ProjectMemory } from './swarm/projectMemory.js';
 import { 
@@ -95,6 +96,7 @@ export class PersistentDatabase {
   public checkpoints: Map<string, Checkpoint[]> = new Map();
   public usageLogs: UsageLogEntry[] = [];
   public projectMemories: Map<string, ProjectMemory> = new Map();
+  public generationRuns: Map<string, CodeGenerationRun> = new Map();
 
   // In-memory rate limiter: identifier -> { attempts: number, lockUntil: number }
   private rateLimits: Map<string, { attempts: number; lockUntil: number }> = new Map();
@@ -4501,6 +4503,130 @@ export class PersistentDatabase {
       updatedAt: this.getTime()
     };
     return this.saveKnowledgeItem(merged);
+  }
+
+  // --- 10. Phase 9 Code Generation Runs ---
+
+  public saveGenerationRun(run: CodeGenerationRun): CodeGenerationRun {
+    this.generationRuns.set(run.id, run);
+
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO code_generation_runs (
+          id, build_id, task_id, user_request, generation_profile,
+          model_id, status, current_pass, total_passes, passes,
+          files_created, files_modified, patch_ids, contracts_established,
+          validation_results, repair_attempts, repair_logs, token_usage,
+          cost, error, created_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        run.id,
+        run.buildId,
+        run.taskId || null,
+        run.userRequest,
+        run.generationProfile,
+        run.modelId,
+        run.status,
+        run.currentPass,
+        run.totalPasses,
+        JSON.stringify(run.passes || []),
+        JSON.stringify(run.filesCreated || []),
+        JSON.stringify(run.filesModified || []),
+        JSON.stringify(run.patchIds || []),
+        JSON.stringify(run.contractsEstablished || []),
+        run.validationResults ? JSON.stringify(run.validationResults) : null,
+        run.repairAttempts || 0,
+        JSON.stringify(run.repairLogs || []),
+        run.tokenUsage || 0,
+        run.cost || 0.0,
+        run.error || null,
+        run.createdAt,
+        run.completedAt || null
+      );
+
+      this.broadcast(run.buildId, 'code_generation_run_updated', run);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveGenerationRun', err);
+    }
+    return run;
+  }
+
+  public getGenerationRun(id: string): CodeGenerationRun | undefined {
+    const cached = this.generationRuns.get(id);
+    if (cached) return cached;
+
+    try {
+      const r = this.dbManager.db.prepare('SELECT * FROM code_generation_runs WHERE id = ?').get(id) as any;
+      if (!r) return undefined;
+
+      const run: CodeGenerationRun = {
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id || undefined,
+        userRequest: r.user_request,
+        generationProfile: r.generation_profile,
+        modelId: r.model_id,
+        status: r.status,
+        currentPass: r.current_pass,
+        totalPasses: r.total_passes,
+        passes: safeJsonParse<any[]>(r.passes, []),
+        filesCreated: safeJsonParse<string[]>(r.files_created, []),
+        filesModified: safeJsonParse<string[]>(r.files_modified, []),
+        patchIds: safeJsonParse<string[]>(r.patch_ids, []),
+        contractsEstablished: safeJsonParse<any[]>(r.contracts_established, []),
+        validationResults: r.validation_results ? safeJsonParse<any>(r.validation_results, undefined) : undefined,
+        repairAttempts: r.repair_attempts,
+        repairLogs: safeJsonParse<any[]>(r.repair_logs, []),
+        tokenUsage: r.token_usage,
+        cost: r.cost,
+        error: r.error || undefined,
+        createdAt: r.created_at,
+        completedAt: r.completed_at || undefined
+      };
+      this.generationRuns.set(run.id, run);
+      return run;
+    } catch {
+      return undefined;
+    }
+  }
+
+  public getGenerationRuns(buildId: string): CodeGenerationRun[] {
+    try {
+      const rows = this.dbManager.db.prepare(
+        'SELECT * FROM code_generation_runs WHERE build_id = ? ORDER BY created_at DESC'
+      ).all(buildId) as any[];
+
+      return rows.map(r => ({
+        id: r.id,
+        buildId: r.build_id,
+        taskId: r.task_id || undefined,
+        userRequest: r.user_request,
+        generationProfile: r.generation_profile,
+        modelId: r.model_id,
+        status: r.status,
+        currentPass: r.current_pass,
+        totalPasses: r.total_passes,
+        passes: safeJsonParse<any[]>(r.passes, []),
+        filesCreated: safeJsonParse<string[]>(r.files_created, []),
+        filesModified: safeJsonParse<string[]>(r.files_modified, []),
+        patchIds: safeJsonParse<string[]>(r.patch_ids, []),
+        contractsEstablished: safeJsonParse<any[]>(r.contracts_established, []),
+        validationResults: r.validation_results ? safeJsonParse<any>(r.validation_results, undefined) : undefined,
+        repairAttempts: r.repair_attempts,
+        repairLogs: safeJsonParse<any[]>(r.repair_logs, []),
+        tokenUsage: r.token_usage,
+        cost: r.cost,
+        error: r.error || undefined,
+        createdAt: r.created_at,
+        completedAt: r.completed_at || undefined
+      }));
+    } catch {
+      return Array.from(this.generationRuns.values()).filter(r => r.buildId === buildId);
+    }
+  }
+
+  public getGenerationRunsByBuild(buildId: string): CodeGenerationRun[] {
+    return this.getGenerationRuns(buildId);
   }
 }
 

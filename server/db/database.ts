@@ -794,6 +794,41 @@ export class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_shared_knowledge_status ON shared_knowledge_items(status);
           `);
         }
+      },
+      {
+        id: 9,
+        name: '009_code_generation_engine',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            -- Code Generation Runs Table
+            CREATE TABLE IF NOT EXISTS code_generation_runs (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              task_id TEXT,
+              user_request TEXT NOT NULL,
+              generation_profile TEXT NOT NULL,
+              model_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              current_pass INTEGER NOT NULL DEFAULT 1,
+              total_passes INTEGER NOT NULL DEFAULT 6,
+              passes TEXT NOT NULL DEFAULT '[]',
+              files_created TEXT NOT NULL DEFAULT '[]',
+              files_modified TEXT NOT NULL DEFAULT '[]',
+              patch_ids TEXT NOT NULL DEFAULT '[]',
+              contracts_established TEXT NOT NULL DEFAULT '[]',
+              validation_results TEXT,
+              repair_attempts INTEGER NOT NULL DEFAULT 0,
+              repair_logs TEXT NOT NULL DEFAULT '[]',
+              token_usage INTEGER NOT NULL DEFAULT 0,
+              cost REAL NOT NULL DEFAULT 0.0,
+              error TEXT,
+              created_at INTEGER NOT NULL,
+              completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_gen_build ON code_generation_runs(build_id);
+            CREATE INDEX IF NOT EXISTS idx_code_gen_status ON code_generation_runs(status);
+          `);
+        }
       }
     ];
 

@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext.js';
 import { useSwarm } from '../context/SwarmContext.js';
 import { Github, Play, Square, Activity, GitBranch, LogOut } from 'lucide-react';
 
-export type NavTab = 'dashboard' | 'live' | 'collaboration' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
+export type NavTab = 'dashboard' | 'live' | 'codegen' | 'collaboration' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
 
 interface NavbarProps {
   currentTab: NavTab;
@@ -60,6 +60,14 @@ export const Navbar: React.FC<NavbarProps> = ({
           {isRunning && (
             <span className="inline-block ml-1.5 w-1.5 h-1.5 rounded-full bg-emerald-400" />
           )}
+        </button>
+        <button
+          onClick={() => onSelectTab('codegen')}
+          className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${
+            currentTab === 'codegen' ? 'text-amber-400 border-b border-amber-400 pb-0.5' : ''
+          }`}
+        >
+          Code Gen
         </button>
         <button
           onClick={() => onSelectTab('collaboration')}
