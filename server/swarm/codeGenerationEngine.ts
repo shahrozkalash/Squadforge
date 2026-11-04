@@ -30,17 +30,79 @@ import { ProjectMemoryService } from './projectMemory.js';
 
 export interface CodeGenerationOptions {
   buildId: string;
-  userId: string;
+  userId?: string;
   userRequest: string;
   profileId?: GenerationProfileType;
   modelId?: string;
   taskId?: string;
   maxRepairAttempts?: number;
   mockActionResponse?: ModelActionResponse;
+  mockAiResponse?: ModelActionResponse;
   approvalGranted?: boolean;
 }
 
 export class CodeGenerationEngine {
+  private static activeRuns: Map<string, {
+    buildId: string;
+    isCancelled: boolean;
+    cancellationReason?: string;
+    cancelledAt?: number;
+  }> = new Map();
+
+  /**
+   * Immediately cancels an active or queued generation run in-memory and in the database.
+   * Stops further model requests and patch applications.
+   */
+  static cancelRun(runId: string, reason: string = 'Run was cancelled by user'): boolean {
+    const active = this.activeRuns.get(runId);
+    if (active) {
+      active.isCancelled = true;
+      active.cancellationReason = reason;
+      active.cancelledAt = Date.now();
+    }
+
+    const run = db.getGenerationRun(runId);
+    if (run && run.status !== 'finalized' && run.status !== 'failed' && run.status !== 'completed_with_warnings') {
+      run.status = 'cancelled';
+      run.error = reason;
+      (run as any).cancellationReason = reason;
+      (run as any).cancelledAt = Date.now();
+      run.completedAt = Date.now();
+      db.saveGenerationRun(run);
+      return true;
+    }
+    return active?.isCancelled ?? false;
+  }
+
+  /**
+   * Checks if a run has been marked cancelled either in memory or storage.
+   */
+  static isRunCancelled(runId: string): boolean {
+    const active = this.activeRuns.get(runId);
+    if (active?.isCancelled) return true;
+    const run = db.getGenerationRun(runId);
+    return run?.status === 'cancelled';
+  }
+
+  /**
+   * Returns active, non-finalized generation runs for a build.
+   */
+  static getActiveRunsForBuild(buildId: string): Array<{ id: string; isCancelled: boolean }> {
+    const list: Array<{ id: string; isCancelled: boolean }> = [];
+    for (const [id, state] of this.activeRuns.entries()) {
+      if (state.buildId === buildId) {
+        list.push({ id, isCancelled: state.isCancelled });
+      }
+    }
+    const storedRuns = db.getGenerationRuns(buildId);
+    for (const r of storedRuns) {
+      if (!list.some(l => l.id === r.id) && r.status !== 'finalized' && r.status !== 'failed' && r.status !== 'cancelled') {
+        list.push({ id: r.id, isCancelled: false });
+      }
+    }
+    return list;
+  }
+
   /**
    * Executes the 6-Pass Intelligent Code Generation Pipeline:
    * Pass 1: Planning
@@ -51,12 +113,19 @@ export class CodeGenerationEngine {
    * Pass 6: Finalization
    */
   static async runGenerationPipeline(options: CodeGenerationOptions): Promise<CodeGenerationRun> {
-    const { buildId, userId, userRequest, taskId, maxRepairAttempts = 3, approvalGranted = false } = options;
-
-    const build = db.getBuild(buildId);
+    const build = db.getBuild(options.buildId);
     if (!build) {
-      throw new Error(`Build ${buildId} not found`);
+      throw new Error(`Build ${options.buildId} not found`);
     }
+
+    const { 
+      buildId, 
+      userId = build.userId || 'system', 
+      userRequest, 
+      taskId, 
+      maxRepairAttempts = 3, 
+      approvalGranted = false 
+    } = options;
 
     // 1. Select Generation Profile
     const profile = options.profileId 
@@ -68,6 +137,9 @@ export class CodeGenerationEngine {
 
     const runId = `codegen_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const startTime = Date.now();
+
+    // Register active run
+    this.activeRuns.set(runId, { buildId, isCancelled: false });
 
     const passes: GenerationPass[] = [
       { passNumber: 1, passName: 'planning', status: 'pending', summary: 'Identify affected files, dependencies & establish contracts' },
@@ -100,6 +172,37 @@ export class CodeGenerationEngine {
       createdAt: startTime
     };
 
+    // Helper to evaluate and apply cancellation
+    const checkCancelled = (currentPassIndex?: number): boolean => {
+      const active = this.activeRuns.get(runId);
+      const dbRun = db.getGenerationRun(runId);
+      if (active?.isCancelled || dbRun?.status === 'cancelled') {
+        const reason = active?.cancellationReason || dbRun?.error || 'Run was cancelled by user';
+        const timestamp = active?.cancelledAt || dbRun?.completedAt || Date.now();
+        runRecord.status = 'cancelled';
+        runRecord.error = reason;
+        (runRecord as any).cancellationReason = reason;
+        (runRecord as any).cancelledAt = timestamp;
+        runRecord.completedAt = timestamp;
+
+        if (currentPassIndex !== undefined && passes[currentPassIndex]) {
+          passes[currentPassIndex].status = 'failed';
+          passes[currentPassIndex].summary = `Cancelled: ${reason}`;
+        }
+
+        db.saveGenerationRun(runRecord);
+        this.emitEvent(buildId, 'codegen_cancelled', {
+          runId,
+          reason,
+          timestamp,
+          filesCreated: runRecord.filesCreated,
+          filesModified: runRecord.filesModified
+        });
+        return true;
+      }
+      return false;
+    };
+
     // Save initial state
     db.saveGenerationRun(runRecord);
 
@@ -111,6 +214,8 @@ export class CodeGenerationEngine {
     });
 
     try {
+      if (checkCancelled(0)) return runRecord;
+
       // ==========================================
       // PASS 1: PLANNING & CONTRACT ESTABLISHMENT
       // ==========================================
@@ -119,9 +224,10 @@ export class CodeGenerationEngine {
       const pass1Start = Date.now();
 
       const existingFiles = db.getAllFiles(buildId);
+      const mockPaths = (options.mockActionResponse?.actions || options.mockAiResponse?.actions || []).map((a: any) => a.path).filter(Boolean);
       
       // Determine target file paths from profile or requirement hints
-      const targetFiles = this.planTargetFiles(userRequest, profile, existingFiles);
+      const targetFiles = this.planTargetFiles(userRequest, profile, existingFiles, mockPaths);
 
       // Establish contracts first
       const establishedContracts = ContractFirstEngine.synthesizeInitialContracts(
@@ -156,6 +262,7 @@ export class CodeGenerationEngine {
       // ==========================================
       // PASS 2: CODE GENERATION
       // ==========================================
+      if (checkCancelled(1)) return runRecord;
       passes[1].status = 'in_progress';
       this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'generation', passNumber: 2 });
       const pass2Start = Date.now();
@@ -172,11 +279,13 @@ export class CodeGenerationEngine {
 
       let actions: any[];
 
-      if (options.mockActionResponse && Array.isArray(options.mockActionResponse.actions)) {
-        actions = options.mockActionResponse.actions;
+      const mockResponse = options.mockActionResponse || options.mockAiResponse;
+      if (mockResponse && Array.isArray(mockResponse.actions)) {
+        actions = mockResponse.actions;
         runRecord.tokenUsage += 350;
         runRecord.cost += 0.001;
       } else {
+        if (checkCancelled(1)) return runRecord;
         const genRes = await callUnifiedGateway({
           modelId: selectedModel.id,
           taskComplexity: 'flagship',
@@ -200,15 +309,16 @@ export class CodeGenerationEngine {
       const fileActions = actions.filter((a: any) => a.action === 'create_file' || a.action === 'patch_file');
 
       if (fileActions.length === 0) {
-        throw new Error('Model produced no file creation or patch actions');
+        throw new Error('No actionable files: Model produced no file creation or patch actions');
       }
 
       // SENSITIVE FILE DETECTION BEFORE APPLICATION:
       // Inspect target files before writing to disk or database
       const proposedPaths = fileActions.map((a: any) => a.path);
       const sensitiveFiles = proposedPaths.filter((p: string) => ApprovalGateService.isSensitiveFilePath(p));
+      const hasValidApproval = sensitiveFiles.length > 0 && ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles);
 
-      if (sensitiveFiles.length > 0 && !approvalGranted && !ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles)) {
+      if (sensitiveFiles.length > 0 && !hasValidApproval) {
         // Request human approval and hold patch in pending state
         ApprovalGateService.requestApproval(buildId, userId, {
           requestingAgent: selectedModel.id,
@@ -226,6 +336,7 @@ export class CodeGenerationEngine {
         passes[1].diagnostics = sensitiveFiles.map(f => `Pending approval gate: ${f}`);
 
         runRecord.status = 'pending_approval';
+        runRecord.requiresApproval = true;
         runRecord.currentPass = 2;
         runRecord.error = `Human approval required for sensitive files: ${sensitiveFiles.join(', ')}`;
         runRecord.completedAt = Date.now();
@@ -239,6 +350,8 @@ export class CodeGenerationEngine {
 
         return runRecord;
       }
+
+      if (checkCancelled(1)) return runRecord;
 
       // Apply batch actions atomically
       const batchRes = await MergeManager.applyBatchActions(buildId, selectedModel.id, fileActions);
@@ -271,6 +384,7 @@ export class CodeGenerationEngine {
       // ==========================================
       // PASS 3: INTEGRATION
       // ==========================================
+      if (checkCancelled(2)) return runRecord;
       passes[2].status = 'in_progress';
       this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'integration', passNumber: 3 });
       const pass3Start = Date.now();
@@ -302,6 +416,7 @@ export class CodeGenerationEngine {
       // ==========================================
       // PASS 4: VALIDATION
       // ==========================================
+      if (checkCancelled(3)) return runRecord;
       passes[3].status = 'in_progress';
       this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'validation', passNumber: 4 });
       const pass4Start = Date.now();
@@ -316,6 +431,11 @@ export class CodeGenerationEngine {
         integrationErrors: validationSnapshot.integrationErrorsCount,
         contractErrors: validationSnapshot.contractErrorsCount,
         configErrors: validationSnapshot.configErrorsCount,
+        syntaxPassed: validationSnapshot.syntaxPassed,
+        typeCheckPassed: validationSnapshot.typeCheckPassed,
+        integrationPassed: validationSnapshot.integrationPassed,
+        contractPassed: validationSnapshot.contractPassed,
+        configPassed: validationSnapshot.configPassed,
         clean: validationSnapshot.clean
       };
 
@@ -343,6 +463,7 @@ export class CodeGenerationEngine {
       // ==========================================
       // PASS 5: AUTOMATIC REPAIR
       // ==========================================
+      if (checkCancelled(4)) return runRecord;
       passes[4].status = 'in_progress';
       this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'repair', passNumber: 5 });
       const pass5Start = Date.now();
@@ -400,18 +521,41 @@ export class CodeGenerationEngine {
       // ==========================================
       // PASS 6: FINALIZATION & STRICT COMPLETION VERIFICATION
       // ==========================================
+      if (checkCancelled(5)) return runRecord;
       passes[5].status = 'in_progress';
       this.emitEvent(buildId, 'codegen_pass_started', { runId, pass: 'finalization', passNumber: 6 });
       const pass6Start = Date.now();
 
-      // Finalization must strictly verify the latest workspace state directly from storage
+      // Finalization must strictly revalidate the latest workspace state directly from storage
       const finalWorkspaceFiles = db.getAllFiles(buildId);
       const finalVerification = AutomaticRepairEngine.evaluateValidationDimensions(finalWorkspaceFiles, establishedContracts);
 
+      runRecord.validationResults = {
+        syntaxErrors: finalVerification.syntaxErrorsCount,
+        typeErrors: finalVerification.typeErrorsCount,
+        integrationErrors: finalVerification.integrationErrorsCount,
+        contractErrors: finalVerification.contractErrorsCount,
+        configErrors: finalVerification.configErrorsCount,
+        syntaxPassed: finalVerification.syntaxPassed,
+        typeCheckPassed: finalVerification.typeCheckPassed,
+        integrationPassed: finalVerification.integrationPassed,
+        contractPassed: finalVerification.contractPassed,
+        configPassed: finalVerification.configPassed,
+        clean: finalVerification.clean
+      };
+
       // STRICT COMPLETION RULES:
-      // 1. A failed repair or unresolved defects must never produce a successful finalized run
-      // 2. A failed validation must not be treated as success
-      if (repairFailed || !finalVerification.clean) {
+      // 1. All five validation dimensions must be satisfied: Syntax, TypeScript, Integration, Contracts, Config
+      // 2. A failed repair or unresolved defects must never produce a successful finalized run
+      // 3. A failed validation must not be treated as success
+      const allFivePassed = 
+        finalVerification.syntaxPassed &&
+        finalVerification.typeCheckPassed &&
+        finalVerification.integrationPassed &&
+        finalVerification.contractPassed &&
+        finalVerification.configPassed;
+
+      if (repairFailed || !finalVerification.clean || !allFivePassed) {
         passes[5].status = 'failed';
         passes[5].durationMs = Date.now() - pass6Start;
         passes[5].summary = `Finalization rejected: Workspace contains ${finalVerification.diagnostics.length} unresolved defects.`;
@@ -488,6 +632,8 @@ export class CodeGenerationEngine {
       });
 
       return runRecord;
+    } finally {
+      this.activeRuns.delete(runId);
     }
   }
 
@@ -497,16 +643,21 @@ export class CodeGenerationEngine {
   private static planTargetFiles(
     userRequirement: string,
     profile: GenerationProfile,
-    existingFiles: ProjectFile[]
+    existingFiles: ProjectFile[],
+    mockPaths?: string[]
   ): string[] {
+    if (mockPaths && mockPaths.length > 0) {
+      return [...mockPaths];
+    }
     const planned = new Set<string>();
     const reqLower = userRequirement.toLowerCase();
 
     // 1. If explicit paths are mentioned in the requirement (e.g., "in src/components/Hero.tsx")
     const pathRegex = /(?:src|server|tests)\/[a-zA-Z0-9_\-\.\/]+/g;
     const matchedPaths = userRequirement.match(pathRegex);
-    if (matchedPaths) {
+    if (matchedPaths && matchedPaths.length > 0) {
       matchedPaths.forEach(p => planned.add(p));
+      return Array.from(planned);
     }
 
     // 2. Add profile default file organization if workspace is empty

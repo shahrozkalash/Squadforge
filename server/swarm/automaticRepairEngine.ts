@@ -15,6 +15,7 @@ import { callUnifiedGateway } from '../gateway.js';
 import { PromptCompiler } from './promptCompiler.js';
 import { GenerationProfileRegistry } from './generationProfiles.js';
 import { ProjectContextEngine } from './projectContextEngine.js';
+import { ApprovalGateService } from './approvalGateService.js';
 
 export interface RepairValidationSnapshot {
   syntaxPassed: boolean;
@@ -186,6 +187,13 @@ export class AutomaticRepairEngine {
       if (!targetFile) {
         unresolvedDefects.push(`Target file "${targetIssue.file}" not found in workspace: ${targetIssue.message}`);
         break;
+      }
+
+      // STRICT SENSITIVE FILE PROTECTION: Never auto-repair sensitive files without valid human approval
+      if (ApprovalGateService.isSensitiveFilePath(targetIssue.file) && !ApprovalGateService.hasApprovedRequestForFiles(buildId, [targetIssue.file])) {
+        unresolvedDefects.push(`Cannot automatically repair sensitive file "${targetIssue.file}" without human approval gate.`);
+        activeIssues.shift();
+        continue;
       }
 
       // 3. Formulate targeted repair prompt using PromptCompiler

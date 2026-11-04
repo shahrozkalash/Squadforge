@@ -9,6 +9,7 @@ import {
   Checkpoint 
 } from '../types.js';
 import { ExecutionAdapter } from './executionAdapter.js';
+import { ApprovalGateService } from './approvalGateService.js';
 
 export interface PatchResult {
   success: boolean;
@@ -266,6 +267,16 @@ export class MergeManager {
       };
     }
 
+    if (modelId !== 'system' && ApprovalGateService.isSensitiveFilePath(cleanPath)) {
+      if (!ApprovalGateService.hasApprovedRequestForFiles(buildId, [cleanPath])) {
+        return {
+          success: false,
+          filePath: cleanPath,
+          error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive modification rejected.`
+        };
+      }
+    }
+
     return db.createFileAtomic(
       buildId,
       modelId,
@@ -292,6 +303,16 @@ export class MergeManager {
         filePath: action.path,
         error: `Invalid file path: ${pathError}`
       };
+    }
+
+    if (modelId !== 'system' && ApprovalGateService.isSensitiveFilePath(cleanPath)) {
+      if (!ApprovalGateService.hasApprovedRequestForFiles(buildId, [cleanPath])) {
+        return {
+          success: false,
+          filePath: cleanPath,
+          error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive modification rejected.`
+        };
+      }
     }
 
     const now = Date.now();
@@ -338,6 +359,16 @@ export class MergeManager {
       return { success: false, filePath: action.path, error: `Invalid file path: ${pathError}` };
     }
 
+    if (modelId !== 'system' && ApprovalGateService.isSensitiveFilePath(cleanPath)) {
+      if (!ApprovalGateService.hasApprovedRequestForFiles(buildId, [cleanPath])) {
+        return {
+          success: false,
+          filePath: cleanPath,
+          error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive deletion rejected.`
+        };
+      }
+    }
+
     return db.deleteFileAtomic(buildId, modelId, cleanPath);
   }
 
@@ -359,6 +390,18 @@ export class MergeManager {
     }
     if (!sanitizeNew.valid) {
       return { success: false, oldPath: action.oldPath, newPath: action.newPath, error: `Invalid destination path: ${sanitizeNew.error}` };
+    }
+
+    if (modelId !== 'system') {
+      const sensitivePaths = [sanitizeOld.cleanPath, sanitizeNew.cleanPath].filter(p => ApprovalGateService.isSensitiveFilePath(p));
+      if (sensitivePaths.length > 0 && !ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitivePaths)) {
+        return {
+          success: false,
+          oldPath: action.oldPath,
+          newPath: action.newPath,
+          error: `Human approval required for sensitive file rename (${sensitivePaths.join(', ')}). Action rejected.`
+        };
+      }
     }
 
     return db.renameFileAtomic(
@@ -445,6 +488,26 @@ export class MergeManager {
   }> {
     return this.enqueuePatch(buildId, async () => {
       this.cleanExpiredLeases(buildId);
+
+      if (modelId !== 'system') {
+        const sensitiveFiles: string[] = [];
+        for (const a of actions) {
+          const p = a.path || a.oldPath || a.newPath;
+          if (p && ApprovalGateService.isSensitiveFilePath(p)) {
+            sensitiveFiles.push(p);
+          }
+        }
+        if (sensitiveFiles.length > 0 && !ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles)) {
+          return {
+            success: false,
+            appliedCount: 0,
+            totalCount: actions.length,
+            error: `Human approval required for sensitive files: ${sensitiveFiles.join(', ')}. Action rejected without valid approval.`,
+            results: []
+          };
+        }
+      }
+
       return db.applyBatchActionsAtomic(
         buildId,
         modelId,

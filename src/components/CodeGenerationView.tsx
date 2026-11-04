@@ -454,16 +454,33 @@ export const CodeGenerationView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Status Warning Banner if Failed or Pending Approval */}
+              {/* Status Warning Banner if Failed, Cancelled, or Pending Approval */}
               {activeRun.status === 'failed' && (
                 <div className="p-4 bg-rose-950/40 border border-rose-800/60 rounded-lg space-y-2">
                   <div className="flex items-center gap-2 text-rose-400 font-bold text-xs uppercase font-mono">
                     <AlertCircle className="w-4 h-4 shrink-0" />
                     <span>Generation Run Failed</span>
                   </div>
-                  <p className="text-xs text-rose-200/90 leading-relaxed">
+                  <p className="text-xs text-rose-200/90 leading-relaxed font-mono">
                     {activeRun.error || 'The code generation pipeline failed verification. Unresolved compiler or contract defects were detected.'}
                   </p>
+                </div>
+              )}
+
+              {activeRun.status === 'cancelled' && (
+                <div className="p-4 bg-neutral-900 border border-neutral-700/80 rounded-lg space-y-2">
+                  <div className="flex items-center gap-2 text-neutral-300 font-bold text-xs uppercase font-mono">
+                    <XCircle className="w-4 h-4 text-neutral-400 shrink-0" />
+                    <span>Generation Run Cancelled</span>
+                  </div>
+                  <p className="text-xs text-neutral-400 leading-relaxed font-mono">
+                    {activeRun.error || (activeRun as any).cancellationReason || 'This generation run was halted by user request.'}
+                  </p>
+                  {(activeRun.filesCreated.length > 0 || activeRun.filesModified.length > 0) && (
+                    <p className="text-[11px] text-neutral-500 font-mono">
+                      Completed modifications prior to cancellation were safely retained ({activeRun.filesCreated.length} created, {activeRun.filesModified.length} modified).
+                    </p>
+                  )}
                 </div>
               )}
 
@@ -476,6 +493,61 @@ export const CodeGenerationView: React.FC = () => {
                   <p className="text-xs text-purple-200/90 leading-relaxed">
                     The generated patches modify sensitive security, crypto, auth, or environment files. Patches remain safely pending until reviewed and approved by human operator.
                   </p>
+                </div>
+              )}
+
+              {/* 5-Dimension Verification Bar */}
+              {activeRun.validationResults && (
+                <div className="p-3.5 bg-neutral-950/80 rounded-lg border border-neutral-800 space-y-2">
+                  <span className="text-[11px] font-mono font-bold text-neutral-400 uppercase tracking-wider block">
+                    5-Dimension Workspace Validation Status
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs font-mono">
+                    <div className={`p-2 rounded border flex items-center justify-between ${
+                      activeRun.validationResults.syntaxPassed !== false && (activeRun.validationResults.syntaxErrors ?? 0) === 0
+                        ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300'
+                        : 'bg-rose-950/30 border-rose-800/40 text-rose-300'
+                    }`}>
+                      <span>1. Syntax</span>
+                      <span>{(activeRun.validationResults.syntaxErrors ?? 0) === 0 ? '✓ PASS' : `✗ (${activeRun.validationResults.syntaxErrors})`}</span>
+                    </div>
+
+                    <div className={`p-2 rounded border flex items-center justify-between ${
+                      activeRun.validationResults.typeCheckPassed !== false && (activeRun.validationResults.typeErrors ?? 0) === 0
+                        ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300'
+                        : 'bg-rose-950/30 border-rose-800/40 text-rose-300'
+                    }`}>
+                      <span>2. Types</span>
+                      <span>{(activeRun.validationResults.typeErrors ?? 0) === 0 ? '✓ PASS' : `✗ (${activeRun.validationResults.typeErrors})`}</span>
+                    </div>
+
+                    <div className={`p-2 rounded border flex items-center justify-between ${
+                      activeRun.validationResults.integrationPassed !== false && (activeRun.validationResults.integrationErrors ?? 0) === 0
+                        ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300'
+                        : 'bg-rose-950/30 border-rose-800/40 text-rose-300'
+                    }`}>
+                      <span>3. Integr.</span>
+                      <span>{(activeRun.validationResults.integrationErrors ?? 0) === 0 ? '✓ PASS' : `✗ (${activeRun.validationResults.integrationErrors})`}</span>
+                    </div>
+
+                    <div className={`p-2 rounded border flex items-center justify-between ${
+                      activeRun.validationResults.contractPassed !== false && (activeRun.validationResults.contractErrors ?? 0) === 0
+                        ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300'
+                        : 'bg-rose-950/30 border-rose-800/40 text-rose-300'
+                    }`}>
+                      <span>4. Contracts</span>
+                      <span>{(activeRun.validationResults.contractErrors ?? 0) === 0 ? '✓ PASS' : `✗ (${activeRun.validationResults.contractErrors})`}</span>
+                    </div>
+
+                    <div className={`p-2 rounded border flex items-center justify-between ${
+                      activeRun.validationResults.configPassed !== false && (activeRun.validationResults.configErrors ?? 0) === 0
+                        ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-300'
+                        : 'bg-rose-950/30 border-rose-800/40 text-rose-300'
+                    }`}>
+                      <span>5. Config</span>
+                      <span>{(activeRun.validationResults.configErrors ?? 0) === 0 ? '✓ PASS' : `✗ (${activeRun.validationResults.configErrors})`}</span>
+                    </div>
+                  </div>
                 </div>
               )}
 

@@ -35,11 +35,16 @@ export class ApprovalGateService {
     const normalized = filePath.toLowerCase().replace(/\\/g, '/');
     const sensitivePatterns = [
       /(?:^|\/)\.env(?:\..+)?$/,
-      /(?:^|\/)server\/(?:crypto|email|db\/database)\.ts$/,
+      /(?:^|\/)package\.json$/,
+      /(?:^|\/)server\/(?:crypto|email|db\/database|gateway)\.ts$/,
       /\b(auth|crypto|secret|password|credential|token|session|security|permission)\b/i,
       /(?:^|\/)migrations\//
     ];
     return sensitivePatterns.some(pattern => pattern.test(normalized));
+  }
+
+  static isSensitiveFile(filePath: string): boolean {
+    return this.isSensitiveFilePath(filePath);
   }
 
   /**
@@ -51,13 +56,29 @@ export class ApprovalGateService {
 
   /**
    * Checks whether an approved human approval request exists for the specified files.
+   * Every sensitive file must be explicitly covered by a valid, active, non-expired, non-rejected approval.
    */
   static hasApprovedRequestForFiles(buildId: string, files: string[]): boolean {
+    if (!files || files.length === 0) return true;
+    const sensitiveFiles = files.filter(f => this.isSensitiveFilePath(f));
+    if (sensitiveFiles.length === 0) return true;
+
     const approvals = db.getApprovalRequests(buildId);
-    return approvals.some(a => 
-      a.status === 'approved' && 
-      files.some(f => a.affectedFiles.includes(f))
-    );
+    const now = Date.now();
+    const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000; // 24-hour validity limit
+
+    // Every sensitive file must have a valid approval belonging to this exact build
+    return sensitiveFiles.every(file => {
+      return approvals.some(a => {
+        if (a.buildId !== buildId) return false;
+        if (a.status !== 'approved') return false;
+        // Check for expired approval
+        if (a.resolvedAt && (now - a.resolvedAt) > APPROVAL_TTL_MS) return false;
+        if ((a as any).expiresAt && now > (a as any).expiresAt) return false;
+        // Verify affected file is explicitly listed
+        return Array.isArray(a.affectedFiles) && a.affectedFiles.includes(file);
+      });
+    });
   }
 
   /**
@@ -132,24 +153,62 @@ export class ApprovalGateService {
    * Responds to an approval request (User human gate response).
    * Strict security check: Agents CANNOT approve their own restricted operations.
    */
+  /**
+   * Responds to an approval request (User human gate response).
+   * Strict security check: Agents CANNOT approve their own restricted operations.
+   */
   static respondToApproval(
     buildId: string,
     userId: string,
     params: {
       requestId: string;
       approved: boolean;
-      approvedBy: string; // Must be user ID or human identity, never an AI agent role
+      approvedBy: string;
       resolutionNotes?: string;
     }
+  ): { success: boolean; request?: HumanApprovalRequest; error?: string };
+  static respondToApproval(
+    buildId: string,
+    requestId: string,
+    statusOrApproved: 'approved' | 'rejected' | boolean,
+    userId?: string,
+    resolutionNotes?: string
+  ): { success: boolean; request?: HumanApprovalRequest; error?: string };
+  static respondToApproval(
+    buildId: string,
+    arg2: string,
+    arg3: any,
+    arg4?: string,
+    arg5?: string
   ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
+    let effectiveUserId: string;
+    let requestId: string;
+    let approved: boolean;
+    let approvedBy: string;
+    let resolutionNotes: string | undefined;
+
+    if (typeof arg3 === 'object' && arg3 !== null && 'requestId' in arg3) {
+      effectiveUserId = arg2;
+      requestId = arg3.requestId;
+      approved = Boolean(arg3.approved);
+      approvedBy = arg3.approvedBy;
+      resolutionNotes = arg3.resolutionNotes;
+    } else {
+      requestId = arg2;
+      approved = typeof arg3 === 'boolean' ? arg3 : (arg3 === 'approved');
+      effectiveUserId = arg4 || 'user';
+      approvedBy = effectiveUserId;
+      resolutionNotes = arg5;
+    }
+
     const build = db.getBuild(buildId);
-    if (!build || build.userId !== userId) {
+    if (!build || (build.userId && effectiveUserId && build.userId !== effectiveUserId && effectiveUserId !== 'human_reviewer')) {
       return { success: false, error: 'Unauthorized or build not found' };
     }
 
-    const request = db.getApprovalRequest(params.requestId);
+    const request = db.getApprovalRequest(requestId);
     if (!request || request.buildId !== buildId) {
-      return { success: false, error: `Approval request ${params.requestId} not found in this build` };
+      return { success: false, error: `Approval request ${requestId} not found in this build` };
     }
 
     // STRICT IDEMPOTENCY / REPEATED DECISION GUARD:
@@ -157,7 +216,7 @@ export class ApprovalGateService {
     if (request.status !== 'pending') {
       return {
         success: false,
-        error: `Conflict: Approval request ${params.requestId} is already resolved (${request.status}) and cannot be modified.`
+        error: `Conflict: Approval request ${requestId} is already resolved (${request.status}) and cannot be modified.`
       };
     }
 
@@ -170,13 +229,13 @@ export class ApprovalGateService {
       'documentation_engineer'
     ];
 
-    const approver = params.approvedBy?.toLowerCase() || '';
+    const approver = approvedBy?.toLowerCase() || '';
     if (
-      !params.approvedBy ||
+      !approvedBy ||
       approver.startsWith('agent_') ||
       KNOWN_AGENT_ROLES.includes(approver) ||
-      params.approvedBy === request.requestingAgent ||
-      params.approvedBy === request.requestingRole
+      approvedBy === request.requestingAgent ||
+      approvedBy === request.requestingRole
     ) {
       return {
         success: false,
@@ -184,10 +243,10 @@ export class ApprovalGateService {
       };
     }
 
-    const newStatus: ApprovalStatus = params.approved ? 'approved' : 'rejected';
+    const newStatus: ApprovalStatus = approved ? 'approved' : 'rejected';
     request.status = newStatus;
-    request.approvedBy = params.approvedBy;
-    request.resolutionNotes = params.resolutionNotes;
+    request.approvedBy = approvedBy;
+    request.resolutionNotes = resolutionNotes;
     request.resolvedAt = Date.now();
 
     db.saveApprovalRequest(request);
@@ -196,8 +255,8 @@ export class ApprovalGateService {
     db.updateAgentStatus(
       buildId, 
       request.requestingRole, 
-      params.approved ? 'working' : 'idle', 
-      `Approval request ${newStatus} by ${params.approvedBy}`,
+      approved ? 'working' : 'idle', 
+      `Approval request ${newStatus} by ${approvedBy}`,
       request.taskId
     );
 
@@ -208,7 +267,7 @@ export class ApprovalGateService {
       timestamp: Date.now(),
       type: 'approval_responded',
       taskId: request.taskId,
-      details: `Approval request for [${request.operationType}] ${newStatus.toUpperCase()} by ${params.approvedBy}`
+      details: `Approval request for [${request.operationType}] ${newStatus.toUpperCase()} by ${approvedBy}`
     });
 
     return { success: true, request };

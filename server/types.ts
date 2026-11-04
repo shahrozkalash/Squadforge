@@ -713,6 +713,7 @@ export interface PatchAction {
   replace?: string;
   taskId?: string;
   commitMessage?: string;
+  explanation?: string;
   expectedVersion?: number;
   expectedContentHash?: string;
 }
@@ -723,6 +724,7 @@ export interface CreateFileAction {
   content: string;
   taskId?: string;
   commitMessage?: string;
+  explanation?: string;
 }
 
 export interface DeleteFileAction {
@@ -730,6 +732,7 @@ export interface DeleteFileAction {
   path: string;
   taskId?: string;
   commitMessage?: string;
+  explanation?: string;
 }
 
 export interface RenameFileAction {
@@ -738,6 +741,7 @@ export interface RenameFileAction {
   newPath: string;
   taskId?: string;
   commitMessage?: string;
+  explanation?: string;
 }
 
 export interface CreateTaskAction {
@@ -749,10 +753,12 @@ export interface CreateTaskAction {
   dependencies?: string[];
   assignedRole?: AgentRole;
   milestone?: string;
+  explanation?: string;
 }
 
 export interface ModelActionResponse {
   actions: Array<PatchAction | CreateFileAction | DeleteFileAction | RenameFileAction | CreateTaskAction>;
+  thinking?: string;
   error?: string;
 }
 
@@ -1847,6 +1853,7 @@ export interface CodeGenerationRun {
   generationProfile: GenerationProfileType;
   modelId: string;
   status: CodeGenerationStatus;
+  requiresApproval?: boolean;
   currentPass: number;
   totalPasses: number;
   passes: GenerationPass[];

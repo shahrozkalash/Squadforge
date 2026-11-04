@@ -123,28 +123,29 @@ export class ContractFirstEngine {
     const contracts: ProjectContract[] = [];
     const normalizedReq = featureRequirements.toLowerCase();
 
-    // 1. Data model / entity contracts
-    const primaryTypeFile = targetFilePaths.find(p => p.includes('types')) || 'src/types/index.ts';
-
     // Extract potential domain names from prompt
     const domainKeywords = ['user', 'product', 'item', 'order', 'task', 'workflow', 'metric', 'event', 'record'];
     const matchedDomains = domainKeywords.filter(k => normalizedReq.includes(k));
     const domainName = matchedDomains[0] ? matchedDomains[0].charAt(0).toUpperCase() + matchedDomains[0].slice(1) : 'Entity';
 
-    contracts.push({
-      id: `synth_model_${domainName}`,
-      type: 'typescript_interface',
-      name: `${domainName}Item`,
-      filePath: primaryTypeFile,
-      signature: `export interface ${domainName}Item {\n  id: string;\n  name: string;\n  createdAt: number;\n  status?: string;\n}`,
-      description: `Core domain model contract for ${domainName}`,
-      fieldsOrParams: [
-        { name: 'id', type: 'string', required: true },
-        { name: 'name', type: 'string', required: true },
-        { name: 'createdAt', type: 'number', required: true },
-        { name: 'status', type: 'string', required: false }
-      ]
-    });
+    // 1. Data model / entity contracts (only if types file is targeted or requested)
+    const primaryTypeFile = targetFilePaths.find(p => p.includes('types')) || (targetFilePaths.length === 0 ? 'src/types/index.ts' : undefined);
+    if (primaryTypeFile) {
+      contracts.push({
+        id: `synth_model_${domainName}`,
+        type: 'typescript_interface',
+        name: `${domainName}Item`,
+        filePath: primaryTypeFile,
+        signature: `export interface ${domainName}Item {\n  id: string;\n  name: string;\n  createdAt: number;\n  status?: string;\n}`,
+        description: `Core domain model contract for ${domainName}`,
+        fieldsOrParams: [
+          { name: 'id', type: 'string', required: true },
+          { name: 'name', type: 'string', required: true },
+          { name: 'createdAt', type: 'number', required: true },
+          { name: 'status', type: 'string', required: false }
+        ]
+      });
+    }
 
     // 2. Component props contract if target file is a component
     const componentFile = targetFilePaths.find(p => p.endsWith('.tsx') || p.endsWith('.jsx'));
@@ -166,7 +167,8 @@ export class ContractFirstEngine {
     }
 
     // 3. API Contract if backend/API or profile is rest_api_backend
-    if (profileId === 'rest_api_backend' || targetFilePaths.some(p => p.startsWith('server/'))) {
+    const hasServerTarget = targetFilePaths.some(p => p.startsWith('server/'));
+    if (profileId === 'rest_api_backend' || hasServerTarget) {
       contracts.push({
         id: `synth_api_${domainName}`,
         type: 'api_schema',

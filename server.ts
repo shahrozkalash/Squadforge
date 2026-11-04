@@ -2280,21 +2280,12 @@ app.post('/api/builds/:id/codegen/runs/:runId/cancel', requireAuth, (req, res) =
     return res.status(404).json({ error: 'Generation run not found' });
   }
 
-  if (run.status !== 'finalized' && run.status !== 'failed' && run.status !== 'completed_with_warnings') {
-    run.status = 'cancelled';
-    run.error = 'Run was cancelled by user';
-    run.completedAt = Date.now();
-    db.saveGenerationRun(run);
-    db.addEvent({
-      id: `evt_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-      buildId: build.id,
-      timestamp: Date.now(),
-      type: 'codegen_cancelled',
-      details: `Code generation run ${run.id} was cancelled by user`
-    });
-  }
+  const { reason } = req.body;
+  const cancellationReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'Run was cancelled by user';
+  CodeGenerationEngine.cancelRun(run.id, cancellationReason);
 
-  res.json({ success: true, run });
+  const updatedRun = db.getGenerationRun(run.id) || run;
+  res.json({ success: true, run: updatedRun });
 });
 
 // Preview discovered project context & established contracts for a requirement
