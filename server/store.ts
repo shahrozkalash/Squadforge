@@ -4508,9 +4508,16 @@ export class PersistentDatabase {
   // --- 10. Phase 9 Code Generation Runs ---
 
   public saveGenerationRun(run: CodeGenerationRun): CodeGenerationRun {
-    this.generationRuns.set(run.id, run);
-
     try {
+      // Cancelled is terminal: a late writer cannot move a run back to another status
+      const stored = this.dbManager.db.prepare('SELECT status FROM code_generation_runs WHERE id = ?').get(run.id) as any;
+      if (stored?.status === 'cancelled' && run.status !== 'cancelled') {
+        this.generationRuns.delete(run.id);
+        return this.getGenerationRun(run.id) ?? run;
+      }
+
+      this.generationRuns.set(run.id, run);
+
       this.dbManager.db.prepare(`
         INSERT OR REPLACE INTO code_generation_runs (
           id, build_id, task_id, user_request, generation_profile,

@@ -45,13 +45,14 @@ export class CodeGenerationEngine {
   private static activeRuns: Map<string, {
     buildId: string;
     isCancelled: boolean;
+    abortController: AbortController;
     cancellationReason?: string;
     cancelledAt?: number;
   }> = new Map();
 
   /**
    * Immediately cancels an active or queued generation run in-memory and in the database.
-   * Stops further model requests and patch applications.
+   * Aborts any model request in flight and stops further patch applications.
    */
   static cancelRun(runId: string, reason: string = 'Run was cancelled by user'): boolean {
     const active = this.activeRuns.get(runId);
@@ -59,14 +60,15 @@ export class CodeGenerationEngine {
       active.isCancelled = true;
       active.cancellationReason = reason;
       active.cancelledAt = Date.now();
+      active.abortController.abort(new Error(reason));
     }
 
     const run = db.getGenerationRun(runId);
     if (run && run.status !== 'finalized' && run.status !== 'failed' && run.status !== 'completed_with_warnings') {
       run.status = 'cancelled';
       run.error = reason;
-      (run as any).cancellationReason = reason;
-      (run as any).cancelledAt = Date.now();
+      run.cancellationReason = reason;
+      run.cancelledAt = Date.now();
       run.completedAt = Date.now();
       db.saveGenerationRun(run);
       return true;
@@ -139,7 +141,9 @@ export class CodeGenerationEngine {
     const startTime = Date.now();
 
     // Register active run
-    this.activeRuns.set(runId, { buildId, isCancelled: false });
+    const abortController = new AbortController();
+    const signal = abortController.signal;
+    this.activeRuns.set(runId, { buildId, isCancelled: false, abortController });
 
     const passes: GenerationPass[] = [
       { passNumber: 1, passName: 'planning', status: 'pending', summary: 'Identify affected files, dependencies & establish contracts' },
@@ -181,8 +185,8 @@ export class CodeGenerationEngine {
         const timestamp = active?.cancelledAt || dbRun?.completedAt || Date.now();
         runRecord.status = 'cancelled';
         runRecord.error = reason;
-        (runRecord as any).cancellationReason = reason;
-        (runRecord as any).cancelledAt = timestamp;
+        runRecord.cancellationReason = reason;
+        runRecord.cancelledAt = timestamp;
         runRecord.completedAt = timestamp;
 
         if (currentPassIndex !== undefined && passes[currentPassIndex]) {
@@ -203,17 +207,17 @@ export class CodeGenerationEngine {
       return false;
     };
 
-    // Save initial state
-    db.saveGenerationRun(runRecord);
-
-    this.emitEvent(buildId, 'codegen_started', {
-      runId,
-      userRequest,
-      profile: profile.displayName,
-      modelId: selectedModel.id
-    });
-
     try {
+      // Save initial state
+      db.saveGenerationRun(runRecord);
+
+      this.emitEvent(buildId, 'codegen_started', {
+        runId,
+        userRequest,
+        profile: profile.displayName,
+        modelId: selectedModel.id
+      });
+
       if (checkCancelled(0)) return runRecord;
 
       // ==========================================
@@ -293,11 +297,15 @@ export class CodeGenerationEngine {
           systemInstruction: compiledGenerationPrompt.systemPrompt,
           allowFallback: true,
           buildId,
-          userId
+          userId,
+          signal
         });
 
         runRecord.tokenUsage += genRes.tokensUsed || 0;
         runRecord.cost += genRes.estimatedCost || (genRes.tokensUsed * 0.000003);
+
+        // A response that arrives after cancellation must not change the run
+        if (checkCancelled(1)) return runRecord;
 
         if (!genRes.success || !genRes.parsedResponse || !Array.isArray(genRes.parsedResponse.actions)) {
           throw new Error(genRes.error || 'Model failed to produce valid code generation actions');
@@ -354,8 +362,9 @@ export class CodeGenerationEngine {
       if (checkCancelled(1)) return runRecord;
 
       // Apply batch actions atomically
-      const batchRes = await MergeManager.applyBatchActions(buildId, selectedModel.id, fileActions);
+      const batchRes = await MergeManager.applyBatchActions(buildId, selectedModel.id, fileActions, { signal });
       if (!batchRes.success) {
+        if (checkCancelled(1)) return runRecord;
         throw new Error(`Failed to apply generated files: ${batchRes.error}`);
       }
 
@@ -366,6 +375,9 @@ export class CodeGenerationEngine {
           runRecord.filesModified.push(a.path);
         }
       });
+
+      // Files already applied are kept and reported on the cancelled run
+      if (checkCancelled(1)) return runRecord;
 
       passes[1].status = 'passed';
       passes[1].durationMs = Date.now() - pass2Start;
@@ -477,8 +489,11 @@ export class CodeGenerationEngine {
           model: selectedModel,
           files: currentFiles,
           contracts: establishedContracts,
-          maxAttempts: maxRepairAttempts
+          maxAttempts: maxRepairAttempts,
+          signal
         });
+
+        if (checkCancelled(4)) return runRecord;
 
         runRecord.repairAttempts = repairResult.repairAttemptsCount;
         repairResult.resolvedDefects.forEach(d => {
@@ -590,6 +605,8 @@ export class CodeGenerationEngine {
         affectedFiles: [...runRecord.filesCreated, ...runRecord.filesModified],
         timestamp: Date.now()
       };
+      if (checkCancelled(5)) return runRecord;
+
       ProjectMemoryService.recordDecision(buildId, userId, decision);
 
       passes[5].status = 'passed';
@@ -613,6 +630,8 @@ export class CodeGenerationEngine {
 
       return runRecord;
     } catch (err: any) {
+      if (checkCancelled((runRecord.currentPass || 1) - 1)) return runRecord;
+
       runRecord.status = 'failed';
       runRecord.error = err.message || 'Generation pipeline failed';
       runRecord.completedAt = Date.now();

@@ -36,6 +36,7 @@ export interface SmartExecutionParams {
   allowFallback?: boolean;
   bypassCache?: boolean;
   routingPreference?: 'cost' | 'latency' | 'quality';
+  signal?: AbortSignal;
 }
 
 export class SmartModelRouter {
@@ -231,6 +232,10 @@ export class SmartModelRouter {
   async executeSmartRequest(params: SmartExecutionParams): Promise<GatewayResult> {
     const startTime = Date.now();
     const requestedModelId = params.requestedModelId;
+    if (params.signal?.aborted) {
+      return this.cancelledResult(requestedModelId, 'none', startTime);
+    }
+
     const requestedModel = modelRegistry.getById(requestedModelId);
 
     if (!requestedModel) {
@@ -343,7 +348,8 @@ export class SmartModelRouter {
         prompt: cleanPrompt,
         systemInstruction: cleanSys,
         temperature: params.temperature,
-        maxTokens: maxOutputTokens
+        maxTokens: maxOutputTokens,
+        signal: params.signal
       });
       result.modelId = requestedModelId;
       result.isFallback = isFallback;
@@ -356,7 +362,8 @@ export class SmartModelRouter {
         systemInstruction: cleanSys,
         temperature: params.temperature,
         maxTokens: maxOutputTokens,
-        allowFallback: params.allowFallback ?? true
+        allowFallback: params.allowFallback ?? true,
+        signal: params.signal
       });
       result.modelId = requestedModelId;
       if (isFallback) {
@@ -366,8 +373,9 @@ export class SmartModelRouter {
     }
 
     // 7. Record Quota & Health Metrics
+    // A user cancellation says nothing about provider health
     const provider = result.providerUsed;
-    if (provider !== 'none') {
+    if (provider !== 'none' && result.errorCode !== 'CANCELLED') {
       quotaManager.recordOutcome({
         provider,
         modelId: activeModel.id,
@@ -420,6 +428,7 @@ export class SmartModelRouter {
     temperature?: number;
     maxTokens?: number;
     allowFallback: boolean;
+    signal?: AbortSignal;
   }): Promise<GatewayResult> {
     const startTime = Date.now();
     const model = params.model;
@@ -439,6 +448,7 @@ export class SmartModelRouter {
           systemInstruction: params.systemInstruction,
           temperature: params.temperature,
           isFallbackRun: true,
+          signal: params.signal,
           fallbackReason: `OpenRouter in cooldown (${check.reason}); auto-routed to Gemini`
         });
       }
@@ -446,7 +456,9 @@ export class SmartModelRouter {
       try {
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
-          signal: AbortSignal.timeout(8000),
+          signal: params.signal
+            ? AbortSignal.any([params.signal, AbortSignal.timeout(8000)])
+            : AbortSignal.timeout(8000),
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${openRouterKey}`,
@@ -470,6 +482,10 @@ export class SmartModelRouter {
         response.headers.forEach((v, k) => { headers[k] = v; });
 
         if (!response.ok) {
+          if (params.signal?.aborted) {
+            return this.cancelledResult(model.id, 'openrouter', startTime);
+          }
+
           let errCode: GatewayErrorCode = 'PROVIDER_ERROR';
           let errMsg = `OpenRouter HTTP ${response.status}`;
 
@@ -509,6 +525,7 @@ export class SmartModelRouter {
               systemInstruction: params.systemInstruction,
               temperature: params.temperature,
               isFallbackRun: true,
+              signal: params.signal,
               fallbackReason: `Primary provider OpenRouter failed (${errMsg}); executed via configured Gemini fallback`
             });
           }
@@ -561,6 +578,10 @@ export class SmartModelRouter {
           errorCode: parsed === null ? 'MALFORMED_OUTPUT' : undefined
         };
       } catch (netErr: any) {
+        if (params.signal?.aborted) {
+          return this.cancelledResult(model.id, 'openrouter', startTime);
+        }
+
         quotaManager.recordOutcome({
           provider: 'openrouter',
           modelId: model.id,
@@ -576,6 +597,7 @@ export class SmartModelRouter {
             systemInstruction: params.systemInstruction,
             temperature: params.temperature,
             isFallbackRun: true,
+            signal: params.signal,
             fallbackReason: `Network error connecting to OpenRouter; executed via Gemini fallback`
           });
         }
@@ -604,6 +626,7 @@ export class SmartModelRouter {
         systemInstruction: params.systemInstruction,
         temperature: params.temperature,
         isFallbackRun: !isDirectGemini,
+        signal: params.signal,
         fallbackReason: !isDirectGemini 
           ? `Primary provider for ${model.displayName} requires OPENROUTER_API_KEY; executed via configured Gemini fallback` 
           : undefined
@@ -637,6 +660,7 @@ export class SmartModelRouter {
     temperature?: number;
     isFallbackRun: boolean;
     fallbackReason?: string;
+    signal?: AbortSignal;
   }): Promise<GatewayResult> {
     const startTime = Date.now();
     const genAI = getGoogleGenAI();
@@ -674,6 +698,7 @@ export class SmartModelRouter {
           systemInstruction: specializedSys,
           temperature: params.temperature ?? 0.2,
           responseMimeType: 'application/json',
+          abortSignal: params.signal,
         }
       });
 
@@ -683,11 +708,20 @@ export class SmartModelRouter {
         timer?.unref?.();
       });
 
+      // abortSignal stops the SDK client side, and this race returns control immediately
+      let onAbort: (() => void) | undefined;
+      const abortPromise = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new Error('Model request cancelled'));
+        if (params.signal?.aborted) onAbort();
+        else params.signal?.addEventListener('abort', onAbort, { once: true });
+      });
+
       let response: any;
       try {
-        response = await Promise.race([genAiCall, timeoutPromise]);
+        response = await Promise.race([genAiCall, timeoutPromise, abortPromise]);
       } finally {
         if (timer) clearTimeout(timer);
+        if (onAbort) params.signal?.removeEventListener('abort', onAbort);
       }
       const text = response?.text || '';
       const parsed = extractAndParseJson(text);
@@ -723,6 +757,10 @@ export class SmartModelRouter {
         errorCode: parsed === null ? 'MALFORMED_OUTPUT' : undefined
       };
     } catch (err: any) {
+      if (params.signal?.aborted) {
+        return this.cancelledResult(params.model.id, 'gemini', startTime);
+      }
+
       let errCode: GatewayErrorCode = 'PROVIDER_ERROR';
       const msg = err?.message || String(err);
 
@@ -757,6 +795,22 @@ export class SmartModelRouter {
         errorCode: errCode
       };
     }
+  }
+
+  private cancelledResult(modelId: string, providerUsed: GatewayResult['providerUsed'], startTime: number): GatewayResult {
+    return {
+      success: false,
+      rawText: '',
+      parsedResponse: null,
+      tokensUsed: 0,
+      modelId,
+      actualModelUsed: 'none',
+      providerUsed,
+      isFallback: false,
+      latencyMs: Date.now() - startTime,
+      error: 'Model request cancelled',
+      errorCode: 'CANCELLED'
+    };
   }
 
   /**

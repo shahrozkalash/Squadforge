@@ -94,8 +94,9 @@ export class AutomaticRepairEngine {
     files: ProjectFile[];
     contracts?: ProjectContract[];
     maxAttempts?: number;
+    signal?: AbortSignal;
   }): Promise<AutomaticRepairResult> {
-    const { buildId, userId, model, contracts = [], maxAttempts = this.MAX_REPAIR_ATTEMPTS } = params;
+    const { buildId, userId, model, contracts = [], maxAttempts = this.MAX_REPAIR_ATTEMPTS, signal } = params;
     let currentFiles = [...params.files];
     const resolvedDefects: string[] = [];
     const unresolvedDefects: string[] = [];
@@ -103,6 +104,8 @@ export class AutomaticRepairEngine {
     let attemptsCount = 0;
 
     while (attemptsCount < maxAttempts) {
+      if (signal?.aborted) break;
+
       attemptsCount++;
 
       // 1. Gather Real Evidence across all validation dimensions
@@ -219,8 +222,11 @@ export class AutomaticRepairEngine {
         systemInstruction: compiledPrompt.systemPrompt,
         allowFallback: true,
         buildId,
-        userId
+        userId,
+        signal
       });
+
+      if (signal?.aborted) break;
 
       if (!gatewayRes.success || !gatewayRes.parsedResponse || !Array.isArray(gatewayRes.parsedResponse.actions)) {
         unresolvedDefects.push(`Repair model produced invalid response for ${targetIssue.file}: ${gatewayRes.error || 'Empty actions'}`);
@@ -234,7 +240,7 @@ export class AutomaticRepairEngine {
         continue;
       }
 
-      const mergeRes = await MergeManager.applyBatchActions(buildId, model.id, actions);
+      const mergeRes = await MergeManager.applyBatchActions(buildId, model.id, actions, { signal });
       if (mergeRes.success) {
         modifiedFiles.add(targetIssue.file);
         // Refresh local currentFiles from db to inspect real modified state

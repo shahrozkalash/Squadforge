@@ -477,16 +477,31 @@ export class MergeManager {
   static async applyBatchActions(
     buildId: string,
     modelId: string,
-    actions: Array<{ action?: string; [key: string]: any }>
+    actions: Array<{ action?: string; [key: string]: any }>,
+    options: { signal?: AbortSignal } = {}
   ): Promise<{
     success: boolean;
     appliedCount: number;
     totalCount: number;
     error?: string;
     reverted?: boolean;
+    cancelled?: boolean;
     results: any[];
   }> {
     return this.enqueuePatch(buildId, async () => {
+      // The batch may have waited in the patch queue. The write below is one synchronous
+      // transaction, so this check covers every action in the batch.
+      if (options.signal?.aborted) {
+        return {
+          success: false,
+          appliedCount: 0,
+          totalCount: actions.length,
+          error: 'Cancelled before file changes were applied',
+          cancelled: true,
+          results: []
+        };
+      }
+
       this.cleanExpiredLeases(buildId);
 
       if (modelId !== 'system') {

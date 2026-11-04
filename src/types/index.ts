@@ -1626,6 +1626,8 @@ export interface CodeGenerationRun {
   tokenUsage: number;
   cost: number;
   error?: string;
+  cancellationReason?: string;
+  cancelledAt?: number;
   createdAt: number;
   completedAt?: number;
 }

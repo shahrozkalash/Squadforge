@@ -98,6 +98,7 @@ export interface GatewayCallParams {
   bypassCache?: boolean;
   buildId?: string;
   userId?: string;
+  signal?: AbortSignal;
 }
 
 /**
@@ -297,6 +298,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
     allowFallback: params.allowFallback,
     bypassCache: params.bypassCache,
     buildId: params.buildId,
-    userId: params.userId
+    userId: params.userId,
+    signal: params.signal
   });
 }

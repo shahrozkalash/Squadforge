@@ -136,6 +136,7 @@ export class LocalLLMService {
     systemInstruction?: string;
     temperature?: number;
     maxTokens?: number;
+    signal?: AbortSignal;
   }): Promise<GatewayResult> {
     const startTime = Date.now();
     const endpoint = this.config.endpointUrl.replace(/\/+$/, '');
@@ -144,6 +145,7 @@ export class LocalLLMService {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.config.timeoutMs);
     timeoutId.unref?.();
+    const requestSignal = params.signal ? AbortSignal.any([controller.signal, params.signal]) : controller.signal;
 
     try {
       const response = await fetch(`${endpoint}/chat/completions`, {
@@ -161,7 +163,7 @@ export class LocalLLMService {
           max_tokens: params.maxTokens ?? 3000,
           response_format: { type: 'json_object' }
         }),
-        signal: controller.signal
+        signal: requestSignal
       });
 
       if (!response.ok) {
@@ -208,8 +210,11 @@ export class LocalLLMService {
       };
     } catch (err: any) {
       clearTimeout(timeoutId);
+      const cancelled = Boolean(params.signal?.aborted);
       const isAbort = err.name === 'AbortError';
-      const errMsg = isAbort ? 'Local model request timed out' : (err.message || 'Local connection error');
+      const errMsg = cancelled
+        ? 'Model request cancelled'
+        : isAbort ? 'Local model request timed out' : (err.message || 'Local connection error');
 
       return {
         success: false,
@@ -223,7 +228,7 @@ export class LocalLLMService {
         isLocal: true,
         latencyMs: Date.now() - startTime,
         error: errMsg,
-        errorCode: 'LOCAL_LLM_OFFLINE'
+        errorCode: cancelled ? 'CANCELLED' : 'LOCAL_LLM_OFFLINE'
       };
     } finally {
       clearTimeout(timeoutId);
