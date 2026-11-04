@@ -1,6 +1,6 @@
 # SquadForge Agent Guide
 
-Last inspected commit: `472de53b41dcafb5e4140ae37b6fc1a873a7eaf0` on `feature/agent-context-and-lockfile`, based on `main` at `8cdd207` (2026-11-04). Update this with every handoff.
+Last inspected commit: `b8554f7` on `feature/agent-context-and-lockfile`, based on `main` at `8cdd207` (2026-11-04). Update this with every handoff.
 
 This guide comes from the project owner's reconstructed handoff and from repository inspection. The original AI Studio prompt and chats are unavailable. Treat the handoff as stated intent, and check its claims against the code. When historical evidence is missing, document the uncertainty instead of inventing a decision.
 
@@ -52,8 +52,8 @@ These are proposed by the handoff and still need confirming against the code.
 | Phases 1-6 | Original specs unavailable. Reconstruct them from commits, tests, and code, and separate original requirements from inferred behavior. |
 | Phase 7 | Universal Software Architecture Engine. `tests/phase7_project_export_verification.test.ts` suggests phase numbering may be inconsistent. |
 | Phase 8 | Historically reported as accepted. Not independently re-verified. |
-| Phase 9 | Advanced Code Generation Engine. In progress and unverified. Do not treat as accepted. See `PHASE_9_PROGRESS.md`. |
-| Phase 10 | Do not start until Phase 9 is finished and accepted. |
+| Phase 9 | Advanced Code Generation Engine. Not accepted, and acceptance is not recommended yet. See `PHASE_9_ACCEPTANCE_REPORT.md`. |
+| Phase 10 | In progress on `feature/phase-10-execution`, at the user's request and with Phase 9 blockers reported. |
 
 Later roadmap:
 
@@ -74,7 +74,7 @@ Do not present GitHub integration or deployment as complete until they are imple
 - The last passing run in the recent CI history is `6184ab1`, which had the lockfile. It predates the Phase 9 code generation commit.
 - The lockfile has been added and deleted repeatedly since at least 2026-10-30. The reason is unknown, and no owner decision to remove it is recorded. Find out what is deleting it, or a restored file may disappear again.
 - The restored lockfile has no Windows Rolldown binding, so `npm run build` and `tests/public_access.test.ts` fail on Windows. Linux is unaffected.
-- `tests/ci_workflow_integrity.test.ts` still fails because `.env.example` omits `GEMINI_API_KEY`. This depends on the open provider question below.
+- CI passes on `feature/agent-context-and-lockfile`. `.env.example` lists `GEMINI_API_KEY` because the CI test requires it, which does not settle the open provider question below.
 
 ## Phase 9 acceptance work
 
@@ -82,20 +82,18 @@ Complete these before accepting Phase 9 or starting Phase 10:
 
 Done on `feature/agent-context-and-lockfile`, not yet merged:
 
-- Approval authorization fixed, including removal of the `human_reviewer` exception.
-- Active generation and model requests are now cancelled through an `AbortSignal`.
+- Approval decisions come only from the build owner's session, and the `human_reviewer` exception is gone.
+- Code generation and swarm model requests are cancelled through an `AbortSignal` in a single process. Multi-process cancellation is not solved.
+- Direct approval gate bypasses are closed, and previews have an opaque origin.
+- Finalization is verified to reject unresolved validation errors.
 - The lockfile is restored on the branch. Why it keeps being deleted is still unexplained.
-- `PHASE_9_PROGRESS.md` added, with actual results and limitations.
+- `PHASE_9_PROGRESS.md` and `PHASE_9_ACCEPTANCE_REPORT.md` added.
 
 Still to do:
 
-1. Inspect the latest `main` commit.
-2. Verify finalization rejects unresolved validation errors.
-3. Resolve the `.env.example` test failure.
-4. Test cancellation against a real provider.
-5. Add `PHASE_9_ACCEPTANCE_REPORT.md`.
-6. Run the full test, lint, TypeScript, and production build checks.
-7. Record actual results and remaining limitations.
+1. Resolve the open findings in `PHASE_9_ACCEPTANCE_REPORT.md`, starting with F4: an approval covers a path, not reviewed content.
+2. Test cancellation against a real provider.
+3. Get the owner's acceptance decision.
 
 ## Fragile areas
 
