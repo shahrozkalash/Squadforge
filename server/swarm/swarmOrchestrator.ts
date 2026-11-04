@@ -50,6 +50,7 @@ import {
 interface ActiveSwarmControl {
   stopRequested: boolean;
   workerCount: number;
+  abortController: AbortController;
 }
 
 export class SwarmOrchestrator {
@@ -64,6 +65,7 @@ export class SwarmOrchestrator {
     const control = this.activeSwarms.get(buildId);
     if (control) {
       control.stopRequested = true;
+      control.abortController.abort(new Error('Build stopped by user'));
     }
 
     const build = db.getBuild(buildId);
@@ -98,7 +100,8 @@ export class SwarmOrchestrator {
 
     const control: ActiveSwarmControl = {
       stopRequested: false,
-      workerCount: 0
+      workerCount: 0,
+      abortController: new AbortController()
     };
     this.activeSwarms.set(buildId, control);
 
@@ -137,7 +140,8 @@ export class SwarmOrchestrator {
 
     const control: ActiveSwarmControl = {
       stopRequested: false,
-      workerCount: 0
+      workerCount: 0,
+      abortController: new AbortController()
     };
     this.activeSwarms.set(buildId, control);
 
@@ -358,7 +362,8 @@ Output ONLY JSON matching this structure:
       modelId: 'gemini',
       prompt: plannerPrompt,
       systemInstruction: SILENT_WORKER_SYSTEM_PROMPT,
-      allowFallback: true
+      allowFallback: true,
+      signal: this.activeSwarms.get(build.id)?.abortController.signal
     });
 
     if (plannerResult.success && plannerResult.parsedResponse) {
@@ -959,7 +964,10 @@ Never write placeholder comments. Implement functional code.`;
     let taskDone = false;
     let lastError = '';
 
-    while (!taskDone && attempts < 3) {
+    const swarmControl = this.activeSwarms.get(buildId);
+    const signal = swarmControl?.abortController.signal;
+
+    while (!taskDone && attempts < 3 && !signal?.aborted) {
       attempts++;
 
       const res = await callUnifiedGateway({
@@ -970,7 +978,8 @@ Never write placeholder comments. Implement functional code.`;
         systemInstruction: SILENT_WORKER_SYSTEM_PROMPT,
         allowFallback: true,
         buildId,
-        userId: build.userId
+        userId: build.userId,
+        signal
       });
 
       // Track usage on model and task
@@ -994,6 +1003,12 @@ Never write placeholder comments. Implement functional code.`;
         actualTokensUsed: task.actualTokensUsed,
         estimatedCost: task.estimatedCost
       });
+
+      // A response that arrives after Stop must not change the project
+      if (signal?.aborted) {
+        lastError = 'Build stopped by user';
+        break;
+      }
 
       if (!res.success || !res.parsedResponse) {
         lastError = res.error || 'Generation failed: Model produced no valid JSON response';
@@ -1023,7 +1038,7 @@ Never write placeholder comments. Implement functional code.`;
 
       if (fileActions.length > 0) {
         // Execute all file operations atomically with complete rollback on partial failure
-        const batchRes = await MergeManager.applyBatchActions(buildId, model.id, fileActions);
+        const batchRes = await MergeManager.applyBatchActions(buildId, model.id, fileActions, { signal });
         if (batchRes.success) {
           allActionsSucceeded = true;
           appliedCount = batchRes.appliedCount;
@@ -1279,7 +1294,8 @@ Output ONLY JSON in this exact schema:
       systemInstruction: 'You are an objective software verifier. Validate requirement coverage without bias. Output only JSON.',
       allowFallback: true,
       buildId: build.id,
-      userId: build.userId
+      userId: build.userId,
+      signal: this.activeSwarms.get(build.id)?.abortController.signal
     });
 
     const verifierData = parseVerifierResponse(verifyResult.rawText);
@@ -1546,7 +1562,8 @@ Output ONLY JSON in this exact schema:
     if (!this.activeSwarms.has(buildId)) {
       const control: ActiveSwarmControl = {
         stopRequested: false,
-        workerCount: 0
+        workerCount: 0,
+        abortController: new AbortController()
       };
       this.activeSwarms.set(buildId, control);
 

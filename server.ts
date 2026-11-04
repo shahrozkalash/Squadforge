@@ -649,6 +649,10 @@ app.post('/api/models', requireAuth, (req, res) => {
   if (!config.id || !config.displayName || !config.providerModel) {
     return res.status(400).json({ error: 'id, displayName, and providerModel are required' });
   }
+  // MergeManager exempts 'system' from approval checks
+  if (String(config.id).trim().toLowerCase() === 'system') {
+    return res.status(400).json({ error: 'The model id "system" is reserved' });
+  }
   modelRegistry.registerModel({
     ...config,
     strengths: config.strengths || ['backend'],
@@ -984,6 +988,9 @@ app.post('/api/builds/:id/stop', requireAuth, (req, res) => {
   }
 
   SwarmOrchestrator.stopSwarm(req.params.id);
+  for (const run of CodeGenerationEngine.getActiveRunsForBuild(req.params.id)) {
+    CodeGenerationEngine.cancelRun(run.id, 'Build stopped by user');
+  }
   res.json({ success: true });
 });
 
@@ -1101,7 +1108,7 @@ app.get('/api/builds/:id/preview', requireAuth, (req, res) => {
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://fonts.googleapis.com https://esm.sh; style-src 'self' 'unsafe-inline' https:; font-src https://fonts.gstatic.com data:; object-src 'none'; base-uri 'self';");
+  res.setHeader('Content-Security-Policy', "default-src 'self' 'unsafe-inline' https: data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com https://fonts.googleapis.com https://esm.sh; style-src 'self' 'unsafe-inline' https:; font-src https://fonts.gstatic.com data:; object-src 'none'; base-uri 'self';; sandbox allow-scripts allow-forms allow-modals");
   res.send(preview.html);
 });
 

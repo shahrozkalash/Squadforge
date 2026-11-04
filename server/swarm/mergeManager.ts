@@ -507,9 +507,10 @@ export class MergeManager {
       if (modelId !== 'system') {
         const sensitiveFiles: string[] = [];
         for (const a of actions) {
-          const p = a.path || a.oldPath || a.newPath;
-          if (p && ApprovalGateService.isSensitiveFilePath(p)) {
-            sensitiveFiles.push(p);
+          for (const p of [a.path, a.oldPath, a.newPath]) {
+            if (p && ApprovalGateService.isSensitiveFilePath(p)) {
+              sensitiveFiles.push(p);
+            }
           }
         }
         if (sensitiveFiles.length > 0 && !ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles)) {
