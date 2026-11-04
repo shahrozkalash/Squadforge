@@ -12,6 +12,7 @@ description: Start or finish a SquadForge work session safely when AI Studio or 
 3. Run `git log --diff-filter=D --name-status <last-inspected>..origin/main` to spot unexpected deletions. `package-lock.json` has been deleted repeatedly.
 4. Create a focused branch named `feature/<task>`. CI runs on `feature/**`. Never work directly on `main`.
 5. Check open branches and PRs so two agents do not change the same files.
+6. Confirm `git config --local user.name` and `user.email` match the commit attribution rule in `AGENTS.md`. Every commit goes under the project owner's name.
 
 ## When finishing
 

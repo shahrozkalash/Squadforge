@@ -111,6 +111,16 @@ The owner is actively developing the project, and AI Studio or another agent may
 
 The project owner keeps final merge approval unless it is explicitly delegated.
 
+### Commit attribution
+
+All work is done on behalf of the project owner, Shahroz. Every commit must use this author and committer identity:
+
+```text
+Shahrozkalash <shahrozkalash@gmail.com>
+```
+
+Set it for this repository only with `git config --local user.name` and `git config --local user.email`, then confirm it with `git log -1 --format='%an <%ae> | %cn <%ce>'` before pushing. Do not commit under another identity or change global git config.
+
 ## Open questions
 
 - **Accounts:** the owner asked to remove signup and login pages, and commit messages mention guest sessions and automatic user provisioning. The README still lists accounts and per-user isolation. The intended model is unconfirmed.
