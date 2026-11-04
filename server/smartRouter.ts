@@ -386,6 +386,13 @@ export class SmartModelRouter {
       });
     }
 
+    if (result.errorCode === 'CANCELLED') {
+      result.estimatedCost = 0;
+      result.actualCost = 0;
+      this.recordUsageLog(params, result);
+      return result;
+    }
+
     // 8. Cache successful deterministic results
     if (result.success && isDeterministic && result.parsedResponse) {
       safeResultCache.set({
@@ -505,6 +512,10 @@ export class SmartModelRouter {
                 errMsg = `OpenRouter error: ${errBody.error.message}`;
               }
             } catch (_) {}
+          }
+
+          if (params.signal?.aborted) {
+            return this.cancelledResult(model.id, 'openrouter', startTime);
           }
 
           quotaManager.recordOutcome({
@@ -663,6 +674,10 @@ export class SmartModelRouter {
     signal?: AbortSignal;
   }): Promise<GatewayResult> {
     const startTime = Date.now();
+    if (params.signal?.aborted) {
+      return this.cancelledResult(params.model.id, 'gemini', startTime);
+    }
+
     const genAI = getGoogleGenAI();
 
     if (!genAI) {

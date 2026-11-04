@@ -41,6 +41,22 @@ export class MergeManager {
    * to ensure serialized, conflict-free patch application across multiple processes.
    * Never executes a protected operation without acquiring the lock.
    */
+  /** Sensitive files in these actions that lack an approval for this exact change. */
+  private static approvalGate(buildId: string, modelId: string, actions: Array<{ [key: string]: any }>) {
+    if (modelId === 'system') return { blocked: [] as string[], consume: () => undefined };
+
+    const fingerprints: Record<string, string> = Object.assign(
+      {},
+      ...actions.map(action => ApprovalGateService.fingerprintAction(action))
+    );
+    const sensitive = Object.keys(fingerprints).filter(path => path && ApprovalGateService.isSensitiveFilePath(path));
+    const approved = ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitive, fingerprints);
+    return {
+      blocked: approved ? [] as string[] : sensitive,
+      consume: () => ApprovalGateService.consumeApprovedFiles(buildId, sensitive)
+    };
+  }
+
   static async enqueuePatch<T>(
     buildId: string, 
     operation: () => Promise<T>,
@@ -267,23 +283,24 @@ export class MergeManager {
       };
     }
 
-    if (modelId !== 'system' && ApprovalGateService.isSensitiveFilePath(cleanPath)) {
-      if (!ApprovalGateService.hasApprovedRequestForFiles(buildId, [cleanPath])) {
-        return {
-          success: false,
-          filePath: cleanPath,
-          error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive modification rejected.`
-        };
-      }
+    const gate = this.approvalGate(buildId, modelId, [{ action: 'create_file', ...action, path: cleanPath }]);
+    if (gate.blocked.length > 0) {
+      return {
+        success: false,
+        filePath: cleanPath,
+        error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive modification rejected.`
+      };
     }
 
-    return db.createFileAtomic(
+    const created = db.createFileAtomic(
       buildId,
       modelId,
       { ...action, path: cleanPath },
       this.MAX_FILE_SIZE_BYTES,
       this.MAX_PROJECT_SIZE_BYTES
     );
+    if (created.success) gate.consume();
+    return created;
   }
 
   /**
@@ -305,14 +322,13 @@ export class MergeManager {
       };
     }
 
-    if (modelId !== 'system' && ApprovalGateService.isSensitiveFilePath(cleanPath)) {
-      if (!ApprovalGateService.hasApprovedRequestForFiles(buildId, [cleanPath])) {
-        return {
-          success: false,
-          filePath: cleanPath,
-          error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive modification rejected.`
-        };
-      }
+    const gate = this.approvalGate(buildId, modelId, [{ action: 'patch_file', ...action, path: cleanPath }]);
+    if (gate.blocked.length > 0) {
+      return {
+        success: false,
+        filePath: cleanPath,
+        error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive modification rejected.`
+      };
     }
 
     const now = Date.now();
@@ -339,6 +355,7 @@ export class MergeManager {
 
     if (result.success) {
       buildPatches.set(patchSignature, { timestamp: now, result });
+      gate.consume();
     }
 
     return result;
@@ -359,17 +376,18 @@ export class MergeManager {
       return { success: false, filePath: action.path, error: `Invalid file path: ${pathError}` };
     }
 
-    if (modelId !== 'system' && ApprovalGateService.isSensitiveFilePath(cleanPath)) {
-      if (!ApprovalGateService.hasApprovedRequestForFiles(buildId, [cleanPath])) {
-        return {
-          success: false,
-          filePath: cleanPath,
-          error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive deletion rejected.`
-        };
-      }
+    const gate = this.approvalGate(buildId, modelId, [{ action: 'delete_file', path: cleanPath }]);
+    if (gate.blocked.length > 0) {
+      return {
+        success: false,
+        filePath: cleanPath,
+        error: `Human approval required for sensitive file "${cleanPath}". Unapproved sensitive deletion rejected.`
+      };
     }
 
-    return db.deleteFileAtomic(buildId, modelId, cleanPath);
+    const deleted = db.deleteFileAtomic(buildId, modelId, cleanPath);
+    if (deleted.success) gate.consume();
+    return deleted;
   }
 
   /**
@@ -392,19 +410,21 @@ export class MergeManager {
       return { success: false, oldPath: action.oldPath, newPath: action.newPath, error: `Invalid destination path: ${sanitizeNew.error}` };
     }
 
-    if (modelId !== 'system') {
-      const sensitivePaths = [sanitizeOld.cleanPath, sanitizeNew.cleanPath].filter(p => ApprovalGateService.isSensitiveFilePath(p));
-      if (sensitivePaths.length > 0 && !ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitivePaths)) {
-        return {
-          success: false,
-          oldPath: action.oldPath,
-          newPath: action.newPath,
-          error: `Human approval required for sensitive file rename (${sensitivePaths.join(', ')}). Action rejected.`
-        };
-      }
+    const gate = this.approvalGate(buildId, modelId, [{
+      action: 'rename_file',
+      oldPath: sanitizeOld.cleanPath,
+      newPath: sanitizeNew.cleanPath
+    }]);
+    if (gate.blocked.length > 0) {
+      return {
+        success: false,
+        oldPath: action.oldPath,
+        newPath: action.newPath,
+        error: `Human approval required for sensitive file rename (${gate.blocked.join(', ')}). Action rejected without valid approval.`
+      };
     }
 
-    return db.renameFileAtomic(
+    const renamed = db.renameFileAtomic(
       buildId,
       modelId,
       sanitizeOld.cleanPath,
@@ -412,6 +432,8 @@ export class MergeManager {
       action.commitMessage,
       action.taskId
     );
+    if (renamed.success) gate.consume();
+    return renamed;
   }
 
   /**
@@ -504,33 +526,26 @@ export class MergeManager {
 
       this.cleanExpiredLeases(buildId);
 
-      if (modelId !== 'system') {
-        const sensitiveFiles: string[] = [];
-        for (const a of actions) {
-          for (const p of [a.path, a.oldPath, a.newPath]) {
-            if (p && ApprovalGateService.isSensitiveFilePath(p)) {
-              sensitiveFiles.push(p);
-            }
-          }
-        }
-        if (sensitiveFiles.length > 0 && !ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles)) {
-          return {
-            success: false,
-            appliedCount: 0,
-            totalCount: actions.length,
-            error: `Human approval required for sensitive files: ${sensitiveFiles.join(', ')}. Action rejected without valid approval.`,
-            results: []
-          };
-        }
+      const gate = this.approvalGate(buildId, modelId, actions);
+      if (gate.blocked.length > 0) {
+        return {
+          success: false,
+          appliedCount: 0,
+          totalCount: actions.length,
+          error: `Human approval required for sensitive files: ${gate.blocked.join(', ')}. Action rejected without valid approval.`,
+          results: []
+        };
       }
 
-      return db.applyBatchActionsAtomic(
+      const applied = db.applyBatchActionsAtomic(
         buildId,
         modelId,
         actions,
         this.MAX_FILE_SIZE_BYTES,
         this.MAX_PROJECT_SIZE_BYTES
       );
+      if (applied.success) gate.consume();
+      return applied;
     });
   }
 

@@ -4273,8 +4273,9 @@ export class PersistentDatabase {
           id, build_id, task_id, patch_id, requesting_agent, requesting_role,
           operation_type, explanation, risk_level, affected_files,
           proposed_changes, review_results, test_results, status,
-          approved_by, resolution_notes, created_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          approved_by, resolution_notes, created_at, resolved_at,
+          content_hashes, consumed_files, proposed_actions
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         req.id,
         req.buildId,
@@ -4293,7 +4294,10 @@ export class PersistentDatabase {
         req.approvedBy || null,
         req.resolutionNotes || null,
         req.createdAt,
-        req.resolvedAt || null
+        req.resolvedAt || null,
+        req.contentHashes ? JSON.stringify(req.contentHashes) : null,
+        req.consumedFiles ? JSON.stringify(req.consumedFiles) : null,
+        req.proposedActions ? JSON.stringify(req.proposedActions) : null
       );
 
       this.broadcast(req.buildId, 'approval_request_updated', req);
@@ -4332,6 +4336,9 @@ export class PersistentDatabase {
         status: r.status,
         approvedBy: r.approved_by || undefined,
         resolutionNotes: r.resolution_notes || undefined,
+        contentHashes: r.content_hashes ? safeJsonParse<Record<string, string>>(r.content_hashes, {}) : undefined,
+        consumedFiles: r.consumed_files ? safeJsonParse<string[]>(r.consumed_files, []) : undefined,
+        proposedActions: r.proposed_actions ? safeJsonParse<any[]>(r.proposed_actions, []) : undefined,
         createdAt: r.created_at,
         resolvedAt: r.resolved_at || undefined
       }));
@@ -4361,6 +4368,9 @@ export class PersistentDatabase {
         status: r.status,
         approvedBy: r.approved_by || undefined,
         resolutionNotes: r.resolution_notes || undefined,
+        contentHashes: r.content_hashes ? safeJsonParse<Record<string, string>>(r.content_hashes, {}) : undefined,
+        consumedFiles: r.consumed_files ? safeJsonParse<string[]>(r.consumed_files, []) : undefined,
+        proposedActions: r.proposed_actions ? safeJsonParse<any[]>(r.proposed_actions, []) : undefined,
         createdAt: r.created_at,
         resolvedAt: r.resolved_at || undefined
       };
@@ -4524,8 +4534,8 @@ export class PersistentDatabase {
           model_id, status, current_pass, total_passes, passes,
           files_created, files_modified, patch_ids, contracts_established,
           validation_results, repair_attempts, repair_logs, token_usage,
-          cost, error, created_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          cost, error, created_at, completed_at, cancellation_reason, cancelled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         run.id,
         run.buildId,
@@ -4548,7 +4558,9 @@ export class PersistentDatabase {
         run.cost || 0.0,
         run.error || null,
         run.createdAt,
-        run.completedAt || null
+        run.completedAt || null,
+        run.cancellationReason || null,
+        run.cancelledAt || null
       );
 
       this.broadcast(run.buildId, 'code_generation_run_updated', run);
@@ -4556,6 +4568,15 @@ export class PersistentDatabase {
       this.handleDatabaseWriteError('saveGenerationRun', err);
     }
     return run;
+  }
+
+  /** Reads past the run cache, so a cancellation made by another process is visible. */
+  public getStoredRunCancellation(id: string): { reason?: string; cancelledAt?: number } | undefined {
+    const row = this.dbManager.db.prepare(
+      'SELECT status, error, cancellation_reason, cancelled_at FROM code_generation_runs WHERE id = ?'
+    ).get(id) as any;
+    if (row?.status !== 'cancelled') return undefined;
+    return { reason: row.cancellation_reason || row.error || undefined, cancelledAt: row.cancelled_at || undefined };
   }
 
   public getGenerationRun(id: string): CodeGenerationRun | undefined {
@@ -4588,7 +4609,9 @@ export class PersistentDatabase {
         cost: r.cost,
         error: r.error || undefined,
         createdAt: r.created_at,
-        completedAt: r.completed_at || undefined
+        completedAt: r.completed_at || undefined,
+        cancellationReason: r.cancellation_reason || undefined,
+        cancelledAt: r.cancelled_at || undefined
       };
       this.generationRuns.set(run.id, run);
       return run;
@@ -4625,7 +4648,9 @@ export class PersistentDatabase {
         cost: r.cost,
         error: r.error || undefined,
         createdAt: r.created_at,
-        completedAt: r.completed_at || undefined
+        completedAt: r.completed_at || undefined,
+        cancellationReason: r.cancellation_reason || undefined,
+        cancelledAt: r.cancelled_at || undefined
       }));
     } catch {
       return Array.from(this.generationRuns.values()).filter(r => r.buildId === buildId);
