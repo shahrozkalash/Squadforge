@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process';
 import * as esbuild from 'esbuild';
 import ts from 'typescript';
 import { ProjectFile } from '../types.js';
+import { db } from '../store.js';
+import { hashWorkspace } from '../execution/workspaceMaterializer.js';
 
 export interface SyntaxErrorDetail {
   filePath: string;
@@ -434,7 +436,14 @@ export class ExecutionAdapter {
       };
     }
 
-    // Create isolated temporary workspace
+    // Generated tests are untrusted code, so they only run in the sandbox.
+    // Host execution exists solely for this repository's own trusted test fixtures.
+    const trustedFixtureRun = process.env.SQUADFORGE_TRUSTED_HOST_TESTS === '1' && process.env.NODE_ENV !== 'production';
+    if (!trustedFixtureRun) {
+      return this.sandboxTestReport(buildId, files, testFiles.length);
+    }
+
+    // Create a temporary workspace for trusted fixtures
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `squadforge_test_${buildId}_`));
 
     try {
@@ -566,6 +575,37 @@ export class ExecutionAdapter {
   /**
    * Parses test output into structured test cases
    */
+  /** Reports the sandbox test run for exactly this workspace, or an honest skip. */
+  private static sandboxTestReport(buildId: string, files: ProjectFile[], testFileCount: number): TestExecutionReport {
+    const run = db.getSandboxTestRun(buildId, hashWorkspace(files));
+    if (!run) {
+      return {
+        status: 'skipped',
+        total: 0,
+        passed: 0,
+        failed: 0,
+        skipped: testFileCount,
+        details: [],
+        skipReason: 'Tests have not run in the sandbox for this version of the project. Generated tests never run on the server.'
+      };
+    }
+
+    const passed = run.endReason === 'exited' && run.exitCode === 0;
+    return {
+      status: passed ? 'passed' : 'failed',
+      total: 1,
+      passed: passed ? 1 : 0,
+      failed: passed ? 0 : 1,
+      skipped: 0,
+      details: [{
+        name: 'npm test in sandbox',
+        passed,
+        status: passed ? 'passed' : 'failed',
+        message: `Sandbox run ended with ${run.endReason} (exit code ${run.exitCode})`
+      }]
+    };
+  }
+
   private static parseTestOutput(stdout: string, stderr: string, testFiles: ProjectFile[]): TestCaseResult[] {
     const results: TestCaseResult[] = [];
     const lines = (stdout + '\n' + stderr).split('\n');

@@ -28,8 +28,8 @@ export interface SandboxCheckResult {
 
 export class SandboxRunner {
   /**
-   * Runs automated lint, type-check, security audit, and isolated test execution on generated files.
-   * Completely isolated; runs in scrubbed sandbox environment without host credentials.
+   * Runs automated lint, type-check, and security audit on generated files.
+   * Generated tests do not run here. Their results come from the Docker execution sandbox.
    */
   static runIntegrityCheck(buildId: string): SandboxCheckResult {
     const files = db.getAllFiles(buildId);

@@ -32,6 +32,9 @@ export class ApprovalGateService {
       case 'multi_file_wide_modification':
         return affectedFilesCount > 5;
       case 'large_dependency_change':
+      case 'code_execution':
+      case 'dependency_install':
+      case 'install_scripts':
         return true;
       default:
         return false;
@@ -91,6 +94,33 @@ export class ApprovalGateService {
   }
 
   /**
+   * Checks for a live approval of one operation on one exact workspace.
+   * Validity runs from creation, so changed code always needs a new approval.
+   */
+  static hasApprovedScope(buildId: string, operationType: ApprovalOperationType, scopeHash: string): boolean {
+    const now = Date.now();
+    return db.getApprovalRequests(buildId, 'approved').some(a =>
+      a.operationType === operationType &&
+      a.scopeHash === scopeHash &&
+      now <= a.createdAt + APPROVAL_TTL_MS
+    );
+  }
+
+  /** Finds a pending request for one operation on one exact workspace. */
+  static findPendingScope(
+    buildId: string,
+    operationType: ApprovalOperationType,
+    scopeHash: string
+  ): HumanApprovalRequest | undefined {
+    const now = Date.now();
+    return db.getApprovalRequests(buildId, 'pending').find(a =>
+      a.operationType === operationType &&
+      a.scopeHash === scopeHash &&
+      now <= a.createdAt + APPROVAL_TTL_MS
+    );
+  }
+
+  /**
    * Creates a formal human approval request for restricted operations
    */
   static requestApproval(
@@ -108,6 +138,7 @@ export class ApprovalGateService {
       proposedChanges: string;
       reviewResults?: string;
       testResults?: string;
+      scopeHash?: string;
     }
   ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
     const build = db.getBuild(buildId);
@@ -134,6 +165,7 @@ export class ApprovalGateService {
       proposedChanges: params.proposedChanges,
       reviewResults: params.reviewResults,
       testResults: params.testResults,
+      scopeHash: params.scopeHash,
       status: 'pending',
       createdAt: Date.now()
     };

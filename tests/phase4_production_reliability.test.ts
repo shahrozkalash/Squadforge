@@ -1,3 +1,6 @@
+// These tests run this repository's own trusted fixtures, not generated code.
+process.env.SQUADFORGE_TRUSTED_HOST_TESTS = '1';
+
 import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { db, PersistentDatabase } from '../server/store.js';

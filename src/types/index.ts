@@ -1652,5 +1652,86 @@ export interface AutomaticRepairResult {
   validationEvidence: any;
 }
 
+export type ExecutionSessionStatus =
+  | 'creating'
+  | 'ready'
+  | 'installing'
+  | 'starting'
+  | 'running'
+  | 'stopping'
+  | 'destroyed'
+  | 'failed';
 
+export type ExecutionEndReason =
+  | 'exited'
+  | 'failed'
+  | 'stopped'
+  | 'timed_out'
+  | 'out_of_memory'
+  | 'disk_limit';
 
+export type DependencyStatus =
+  | 'not_started'
+  | 'not_required'
+  | 'installing'
+  | 'installed'
+  | 'failed'
+  | 'unsupported';
+
+export interface ExecutionSession {
+  id: string;
+  buildId: string;
+  userId: string;
+  status: ExecutionSessionStatus;
+  backend: string;
+  workspaceHash: string;
+  script?: string;
+  processId?: string;
+  exitCode?: number;
+  endReason?: ExecutionEndReason;
+  failureReason?: string;
+  dependencyStatus: DependencyStatus;
+  missingDependencies: string[];
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number;
+  stoppedAt?: number;
+  lastActivityAt: number;
+}
+
+export interface ExecutionLogEntry {
+  id: number;
+  sessionId: string;
+  stream: 'stdout' | 'stderr' | 'system';
+  text: string;
+  createdAt: number;
+}
+
+export interface DependencyInstallRecord {
+  id: string;
+  sessionId: string;
+  buildId: string;
+  packageManager: string;
+  command: string;
+  status: 'installing' | 'installed' | 'failed';
+  error?: string;
+  lockfileGenerated: boolean;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+export interface PreviewSession {
+  id: string;
+  sessionId: string;
+  buildId: string;
+  userId: string;
+  status: 'active' | 'closed';
+  port: number;
+  relayHost: string;
+  relayPort: number;
+  tokenHash?: string;
+  tokenExpiresAt?: number;
+  cookieHash?: string;
+  createdAt: number;
+  lastAccessAt: number;
+}

@@ -51,6 +51,12 @@ import { modelRegistry } from './modelRegistry.js';
 import { quotaManager } from './quotaManager.js';
 import { safeResultCache } from './cache.js';
 import { localLLMService } from './localLLM.js';
+import type {
+  DependencyInstallRecord,
+  ExecutionLogEntry,
+  ExecutionSession,
+  PreviewSession
+} from './types.js';
 import { DatabaseManager } from './db/database.js';
 import { ExecutionAdapter } from './swarm/executionAdapter.js';
 
@@ -4273,8 +4279,8 @@ export class PersistentDatabase {
           id, build_id, task_id, patch_id, requesting_agent, requesting_role,
           operation_type, explanation, risk_level, affected_files,
           proposed_changes, review_results, test_results, status,
-          approved_by, resolution_notes, created_at, resolved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          approved_by, resolution_notes, created_at, resolved_at, scope_hash
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         req.id,
         req.buildId,
@@ -4293,7 +4299,8 @@ export class PersistentDatabase {
         req.approvedBy || null,
         req.resolutionNotes || null,
         req.createdAt,
-        req.resolvedAt || null
+        req.resolvedAt || null,
+        req.scopeHash || null
       );
 
       this.broadcast(req.buildId, 'approval_request_updated', req);
@@ -4332,6 +4339,7 @@ export class PersistentDatabase {
         status: r.status,
         approvedBy: r.approved_by || undefined,
         resolutionNotes: r.resolution_notes || undefined,
+        scopeHash: r.scope_hash || undefined,
         createdAt: r.created_at,
         resolvedAt: r.resolved_at || undefined
       }));
@@ -4361,6 +4369,7 @@ export class PersistentDatabase {
         status: r.status,
         approvedBy: r.approved_by || undefined,
         resolutionNotes: r.resolution_notes || undefined,
+        scopeHash: r.scope_hash || undefined,
         createdAt: r.created_at,
         resolvedAt: r.resolved_at || undefined
       };
@@ -4503,6 +4512,213 @@ export class PersistentDatabase {
       updatedAt: this.getTime()
     };
     return this.saveKnowledgeItem(merged);
+  }
+
+  // --- 11. Phase 10 Execution Environment ---
+
+  private mapExecutionSession(r: any): ExecutionSession {
+    return {
+      id: r.id,
+      buildId: r.build_id,
+      userId: r.user_id,
+      status: r.status,
+      backend: r.backend,
+      workspaceHash: r.workspace_hash,
+      script: r.script || undefined,
+      processId: r.process_id || undefined,
+      exitCode: r.exit_code ?? undefined,
+      endReason: r.end_reason || undefined,
+      failureReason: r.failure_reason || undefined,
+      dependencyStatus: r.dependency_status,
+      missingDependencies: safeJsonParse<string[]>(r.missing_dependencies, []),
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+      startedAt: r.started_at ?? undefined,
+      stoppedAt: r.stopped_at ?? undefined,
+      lastActivityAt: r.last_activity_at
+    };
+  }
+
+  // An upsert, because REPLACE would delete the row and cascade to its logs and previews
+  public saveExecutionSession(session: ExecutionSession): ExecutionSession {
+    session.updatedAt = Date.now();
+    this.dbManager.db.prepare(`
+      INSERT INTO execution_sessions (
+        id, build_id, user_id, status, backend, workspace_hash, script, process_id,
+        exit_code, end_reason, failure_reason, dependency_status, missing_dependencies,
+        created_at, updated_at, started_at, stopped_at, last_activity_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        status = excluded.status, workspace_hash = excluded.workspace_hash, script = excluded.script,
+        process_id = excluded.process_id, exit_code = excluded.exit_code, end_reason = excluded.end_reason,
+        failure_reason = excluded.failure_reason, dependency_status = excluded.dependency_status,
+        missing_dependencies = excluded.missing_dependencies, updated_at = excluded.updated_at,
+        started_at = excluded.started_at, stopped_at = excluded.stopped_at,
+        last_activity_at = excluded.last_activity_at
+    `).run(
+      session.id,
+      session.buildId,
+      session.userId,
+      session.status,
+      session.backend,
+      session.workspaceHash,
+      session.script ?? null,
+      session.processId ?? null,
+      session.exitCode ?? null,
+      session.endReason ?? null,
+      session.failureReason ?? null,
+      session.dependencyStatus,
+      JSON.stringify(session.missingDependencies),
+      session.createdAt,
+      session.updatedAt,
+      session.startedAt ?? null,
+      session.stoppedAt ?? null,
+      session.lastActivityAt
+    );
+    this.broadcast(session.buildId, 'execution_session_updated', session);
+    return session;
+  }
+
+  public getExecutionSession(id: string): ExecutionSession | undefined {
+    const row = this.dbManager.db.prepare('SELECT * FROM execution_sessions WHERE id = ?').get(id);
+    return row ? this.mapExecutionSession(row) : undefined;
+  }
+
+  public getExecutionSessions(buildId: string, limit = 50): ExecutionSession[] {
+    const rows = this.dbManager.db.prepare(
+      'SELECT * FROM execution_sessions WHERE build_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(buildId, limit);
+    return rows.map(row => this.mapExecutionSession(row));
+  }
+
+  public getLiveExecutionSessions(): ExecutionSession[] {
+    const rows = this.dbManager.db.prepare(
+      `SELECT * FROM execution_sessions WHERE status NOT IN ('destroyed', 'failed')`
+    ).all();
+    return rows.map(row => this.mapExecutionSession(row));
+  }
+
+  /** The newest finished test run for exactly this workspace, if any. */
+  public getSandboxTestRun(buildId: string, workspaceHash: string): ExecutionSession | undefined {
+    const row = this.dbManager.db.prepare(`
+      SELECT * FROM execution_sessions
+      WHERE build_id = ? AND workspace_hash = ? AND script = 'test' AND end_reason IS NOT NULL
+      ORDER BY stopped_at DESC LIMIT 1
+    `).get(buildId, workspaceHash);
+    return row ? this.mapExecutionSession(row) : undefined;
+  }
+
+  public appendExecutionLog(buildId: string, entry: Omit<ExecutionLogEntry, 'id'>): void {
+    const result = this.dbManager.db.prepare(
+      'INSERT INTO execution_logs (session_id, stream, text, created_at) VALUES (?, ?, ?, ?)'
+    ).run(entry.sessionId, entry.stream, entry.text, entry.createdAt);
+    this.broadcast(buildId, 'execution_log', { ...entry, id: Number(result.lastInsertRowid) });
+  }
+
+  public getExecutionLogs(sessionId: string, afterId = 0, limit = 500): ExecutionLogEntry[] {
+    const rows = this.dbManager.db.prepare(
+      'SELECT * FROM execution_logs WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?'
+    ).all(sessionId, afterId, limit) as any[];
+    return rows.map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      stream: r.stream,
+      text: r.text,
+      createdAt: r.created_at
+    }));
+  }
+
+  public saveDependencyInstall(record: DependencyInstallRecord): DependencyInstallRecord {
+    this.dbManager.db.prepare(`
+      INSERT OR REPLACE INTO dependency_installs (
+        id, session_id, build_id, package_manager, command, status, error,
+        lockfile_generated, started_at, finished_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      record.id,
+      record.sessionId,
+      record.buildId,
+      record.packageManager,
+      record.command,
+      record.status,
+      record.error ?? null,
+      record.lockfileGenerated ? 1 : 0,
+      record.startedAt,
+      record.finishedAt ?? null
+    );
+    return record;
+  }
+
+  public getDependencyInstalls(sessionId: string): DependencyInstallRecord[] {
+    const rows = this.dbManager.db.prepare(
+      'SELECT * FROM dependency_installs WHERE session_id = ? ORDER BY started_at DESC'
+    ).all(sessionId) as any[];
+    return rows.map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      buildId: r.build_id,
+      packageManager: r.package_manager,
+      command: r.command,
+      status: r.status,
+      error: r.error || undefined,
+      lockfileGenerated: Boolean(r.lockfile_generated),
+      startedAt: r.started_at,
+      finishedAt: r.finished_at ?? undefined
+    }));
+  }
+
+  private mapPreviewSession(r: any): PreviewSession {
+    return {
+      id: r.id,
+      sessionId: r.session_id,
+      buildId: r.build_id,
+      userId: r.user_id,
+      status: r.status,
+      port: r.port,
+      relayHost: r.relay_host,
+      relayPort: r.relay_port,
+      tokenHash: r.token_hash || undefined,
+      tokenExpiresAt: r.token_expires_at ?? undefined,
+      cookieHash: r.cookie_hash || undefined,
+      createdAt: r.created_at,
+      lastAccessAt: r.last_access_at
+    };
+  }
+
+  public savePreviewSession(preview: PreviewSession): PreviewSession {
+    this.dbManager.db.prepare(`
+      INSERT OR REPLACE INTO preview_sessions (
+        id, session_id, build_id, user_id, status, port, relay_host, relay_port,
+        token_hash, token_expires_at, cookie_hash, created_at, last_access_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      preview.id,
+      preview.sessionId,
+      preview.buildId,
+      preview.userId,
+      preview.status,
+      preview.port,
+      preview.relayHost,
+      preview.relayPort,
+      preview.tokenHash ?? null,
+      preview.tokenExpiresAt ?? null,
+      preview.cookieHash ?? null,
+      preview.createdAt,
+      preview.lastAccessAt
+    );
+    return preview;
+  }
+
+  public getPreviewSession(id: string): PreviewSession | undefined {
+    const row = this.dbManager.db.prepare('SELECT * FROM preview_sessions WHERE id = ?').get(id);
+    return row ? this.mapPreviewSession(row) : undefined;
+  }
+
+  public getActivePreviews(sessionId?: string): PreviewSession[] {
+    const rows = sessionId
+      ? this.dbManager.db.prepare(`SELECT * FROM preview_sessions WHERE status = 'active' AND session_id = ?`).all(sessionId)
+      : this.dbManager.db.prepare(`SELECT * FROM preview_sessions WHERE status = 'active'`).all();
+    return rows.map(row => this.mapPreviewSession(row));
   }
 
   // --- 10. Phase 9 Code Generation Runs ---

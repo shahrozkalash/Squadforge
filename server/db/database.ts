@@ -829,6 +829,78 @@ export class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_code_gen_status ON code_generation_runs(status);
           `);
         }
+      },
+      {
+        id: 10,
+        name: '010_execution_environment',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            ALTER TABLE approval_requests ADD COLUMN scope_hash TEXT;
+
+            CREATE TABLE IF NOT EXISTS execution_sessions (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              backend TEXT NOT NULL,
+              workspace_hash TEXT NOT NULL,
+              script TEXT,
+              process_id TEXT,
+              exit_code INTEGER,
+              end_reason TEXT,
+              failure_reason TEXT,
+              dependency_status TEXT NOT NULL DEFAULT 'not_started',
+              missing_dependencies TEXT NOT NULL DEFAULT '[]',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              started_at INTEGER,
+              stopped_at INTEGER,
+              last_activity_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_sessions_build ON execution_sessions(build_id);
+            CREATE INDEX IF NOT EXISTS idx_execution_sessions_status ON execution_sessions(status);
+
+            CREATE TABLE IF NOT EXISTS execution_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_id TEXT NOT NULL REFERENCES execution_sessions(id) ON DELETE CASCADE,
+              stream TEXT NOT NULL,
+              text TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_logs_session ON execution_logs(session_id, id);
+
+            CREATE TABLE IF NOT EXISTS dependency_installs (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES execution_sessions(id) ON DELETE CASCADE,
+              build_id TEXT NOT NULL,
+              package_manager TEXT NOT NULL,
+              command TEXT NOT NULL,
+              status TEXT NOT NULL,
+              error TEXT,
+              lockfile_generated INTEGER NOT NULL DEFAULT 0,
+              started_at INTEGER NOT NULL,
+              finished_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_dependency_installs_session ON dependency_installs(session_id);
+
+            CREATE TABLE IF NOT EXISTS preview_sessions (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL REFERENCES execution_sessions(id) ON DELETE CASCADE,
+              build_id TEXT NOT NULL,
+              user_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              port INTEGER NOT NULL,
+              relay_host TEXT NOT NULL,
+              relay_port INTEGER NOT NULL,
+              token_hash TEXT,
+              token_expires_at INTEGER,
+              cookie_hash TEXT,
+              created_at INTEGER NOT NULL,
+              last_access_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_preview_sessions_session ON preview_sessions(session_id);
+          `);
+        }
       }
     ];
 
