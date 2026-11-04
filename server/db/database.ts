@@ -832,7 +832,20 @@ export class DatabaseManager {
       },
       {
         id: 10,
-        name: '010_execution_environment',
+        name: '010_approval_content_binding',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            ALTER TABLE approval_requests ADD COLUMN content_hashes TEXT;
+            ALTER TABLE approval_requests ADD COLUMN consumed_files TEXT;
+            ALTER TABLE approval_requests ADD COLUMN proposed_actions TEXT;
+            ALTER TABLE code_generation_runs ADD COLUMN cancellation_reason TEXT;
+            ALTER TABLE code_generation_runs ADD COLUMN cancelled_at INTEGER;
+          `);
+        }
+      },
+      {
+        id: 11,
+        name: '011_execution_environment',
         up: (db: DatabaseSync) => {
           db.exec(`
             ALTER TABLE approval_requests ADD COLUMN scope_hash TEXT;

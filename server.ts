@@ -646,7 +646,16 @@ app.get('/api/agents', requireAuth, (req, res) => {
   res.json({ agents: modelRegistry.getAgentSpecs() });
 });
 
-app.post('/api/models', requireAuth, (req, res) => {
+// The model registry is shared by every user, so guests cannot change it in production
+const requireModelEditor: express.RequestHandler = (req, res, next) => {
+  const isGuest = req.user?.isAnonymous || req.user?.id.startsWith('guest_');
+  if (process.env.NODE_ENV === 'production' && isGuest) {
+    return res.status(403).json({ error: 'Guest sessions cannot change shared models.' });
+  }
+  next();
+};
+
+app.post('/api/models', requireAuth, requireModelEditor, (req, res) => {
   const config = req.body;
   if (!config.id || !config.displayName || !config.providerModel) {
     return res.status(400).json({ error: 'id, displayName, and providerModel are required' });
@@ -667,7 +676,7 @@ app.post('/api/models', requireAuth, (req, res) => {
   res.json({ success: true, models: modelRegistry.getAll() });
 });
 
-app.put('/api/models/:id', requireAuth, (req, res) => {
+app.put('/api/models/:id', requireAuth, requireModelEditor, (req, res) => {
   const updated = modelRegistry.updateModel(req.params.id, req.body);
   if (!updated) return res.status(404).json({ error: 'Model not found' });
   res.json({ success: true, model: updated });
@@ -2070,7 +2079,9 @@ app.post('/api/builds/:id/collaboration/approvals', requireAuth, (req, res) => {
   const build = verifyBuildOwnership(req, res, req.params.id);
   if (!build) return;
 
-  const result = ApprovalGateService.requestApproval(build.id, req.user!.id, req.body);
+  // A client can ask for review, but cannot supply what approval would apply or authorize
+  const { patchId, proposedActions, contentHashes, scopeHash, ...requestFields } = req.body;
+  const result = ApprovalGateService.requestApproval(build.id, req.user!.id, requestFields);
   if (!result.success) {
     return res.status(400).json({ error: result.error });
   }
@@ -2081,7 +2092,7 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
   const build = verifyBuildOwnership(req, res, req.params.id);
   if (!build) return;
 
-  const { approved, resolutionNotes } = req.body;
+  const { approved, resolutionNotes, notes } = req.body;
   if (typeof approved !== 'boolean') {
     return res.status(400).json({ error: 'approved (boolean) is required' });
   }
@@ -2089,11 +2100,40 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
   const result = ApprovalGateService.respondToApproval(build.id, req.user!.id, {
     requestId: req.params.approvalId,
     approved,
-    resolutionNotes
+    resolutionNotes: resolutionNotes ?? notes
   });
+
+  // A run waiting on a request that can no longer be approved must not wait forever
+  const decided = db.getApprovalRequest(req.params.approvalId);
+  if (decided?.buildId === build.id && decided.patchId && (decided.status === 'expired' || decided.status === 'rejected')) {
+    CodeGenerationEngine.cancelRun(decided.patchId, `Approval ${decided.status}`);
+  }
 
   if (!result.success) {
     return res.status(400).json({ error: result.error });
+  }
+
+  // Apply the reviewed changes in the background, because a run can take a while
+  if (approved && result.request) {
+    CodeGenerationEngine.continueApprovedRun(result.request, req.user!.id)
+      .catch(err => console.error('Approved run failed:', err.message));
+  }
+  res.json(result);
+});
+
+app.post('/api/builds/:id/collaboration/approvals/:approvalId/revoke', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const result = ApprovalGateService.revokeApproval(build.id, req.user!.id, req.params.approvalId);
+  if (!result.success) {
+    return res.status(400).json({ error: result.error });
+  }
+  if (result.request?.patchId) {
+    const run = db.getGenerationRun(result.request.patchId);
+    if (run?.buildId === build.id && run.status === 'pending_approval') {
+      CodeGenerationEngine.cancelRun(run.id, 'Approval revoked');
+    }
   }
   res.json(result);
 });
@@ -2290,10 +2330,10 @@ app.post('/api/builds/:id/codegen/runs/:runId/cancel', requireAuth, (req, res) =
 
   const { reason } = req.body;
   const cancellationReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'Run was cancelled by user';
-  CodeGenerationEngine.cancelRun(run.id, cancellationReason);
+  const cancelled = CodeGenerationEngine.cancelRun(run.id, cancellationReason);
 
   const updatedRun = db.getGenerationRun(run.id) || run;
-  res.json({ success: true, run: updatedRun });
+  res.json({ success: cancelled, run: updatedRun });
 });
 
 // Preview discovered project context & established contracts for a requirement

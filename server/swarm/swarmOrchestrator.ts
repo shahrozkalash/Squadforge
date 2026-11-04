@@ -1038,7 +1038,23 @@ Never write placeholder comments. Implement functional code.`;
 
       if (fileActions.length > 0) {
         // Execute all file operations atomically with complete rollback on partial failure
-        const batchRes = await MergeManager.applyBatchActions(buildId, model.id, fileActions, { signal });
+        // Sensitive files wait for the owner, and the rest of the work carries on
+        const { ready, held } = ApprovalGateService.holdSensitiveActions(buildId, build.userId, model.id, fileActions);
+        if (held.length > 0) {
+          db.addEvent({
+            id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            buildId,
+            timestamp: Date.now(),
+            type: 'approval_requested',
+            modelId: model.id,
+            taskId: task.id,
+            details: `${held.length} sensitive file change(s) are waiting for owner approval and were not applied.`
+          });
+        }
+
+        const batchRes = ready.length > 0
+          ? await MergeManager.applyBatchActions(buildId, model.id, ready, { signal })
+          : { success: true, appliedCount: 0, error: undefined };
         if (batchRes.success) {
           allActionsSucceeded = true;
           appliedCount = batchRes.appliedCount;

@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { db } from '../store.js';
+import { ExecutionAdapter } from './executionAdapter.js';
 import { 
   HumanApprovalRequest, 
   ApprovalOperationType, 
@@ -16,6 +17,12 @@ const KNOWN_AGENT_ROLES = [
   'devops_release_specialist', 'fullstack_developer', 'ui_ux_designer', 'performance_engineer',
   'documentation_engineer'
 ];
+
+const SENSITIVE_WORDS = new Set([
+  'auth', 'oauth', 'authn', 'authz', 'authentication', 'authorization',
+  'crypto', 'secret', 'secrets', 'password', 'passwords', 'credential', 'credentials',
+  'token', 'tokens', 'session', 'sessions', 'security', 'permission', 'permissions'
+]);
 
 export class ApprovalGateService {
   /**
@@ -49,11 +56,28 @@ export class ApprovalGateService {
     const sensitivePatterns = [
       /(?:^|\/)\.env(?:\..+)?$/,
       /(?:^|\/)package\.json$/,
+      /(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/,
+      /(?:^|\/)\.(?:npmrc|yarnrc|yarnrc\.yml)$/,
+      /(?:^|\/)dockerfile(?:\..+)?$/,
+      /(?:^|\/)(?:docker-)?compose[^/]*\.ya?ml$/,
+      /(?:^|\/)\.github\/workflows\//,
       /(?:^|\/)server\/(?:crypto|email|db\/database|gateway)\.ts$/,
-      /\b(auth|crypto|secret|password|credential|token|session|security|permission)\b/i,
+      /\.(?:pem|key|p12|pfx)$/,
       /(?:^|\/)migrations\//
     ];
-    return sensitivePatterns.some(pattern => pattern.test(normalized));
+    if (sensitivePatterns.some(pattern => pattern.test(normalized))) return true;
+
+    // Design tokens and docs about auth are not credentials
+    if (/\.(?:css|scss|less|svg|png|jpe?g|gif|md|mdx)$/.test(normalized)) return false;
+
+    // Split authMiddleware, AUTHService, auth_guard, and tokens.ts into words before matching
+    const words = filePath
+      .replace(/\\/g, '/')
+      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/);
+    return words.some(word => SENSITIVE_WORDS.has(word));
   }
 
   static isSensitiveFile(filePath: string): boolean {
@@ -67,30 +91,183 @@ export class ApprovalGateService {
     return filePaths.some(p => this.isSensitiveFilePath(p));
   }
 
+  /** The path a write will really use, so checks cannot be dodged with spaces or slashes. */
+  static normalizePath(rawPath: string): string {
+    const { valid, cleanPath } = ExecutionAdapter.sanitizeFilePath(rawPath);
+    return valid ? cleanPath : rawPath;
+  }
+
+  private static actionPaths(action: { [key: string]: any }): string[] {
+    return [action.path, action.oldPath, action.newPath]
+      .filter((p): p is string => typeof p === 'string' && p.length > 0)
+      .map(p => this.normalizePath(p));
+  }
+
   /**
-   * Checks whether an approved human approval request exists for the specified files.
-   * Every sensitive file must be explicitly covered by a valid, active, non-expired, non-rejected approval.
+   * Identifies the proposed changes to each file. Every action on a path counts, in order,
+   * so an approval for one change does not cover a different or additional change.
    */
-  static hasApprovedRequestForFiles(buildId: string, files: string[]): boolean {
+  static fingerprintActions(actions: Array<{ [key: string]: any }>): Record<string, string> {
+    const perPath = new Map<string, unknown[]>();
+    for (const action of actions) {
+      const paths = this.actionPaths(action);
+      const change = action.action === 'rename_file'
+        ? ['rename_file', ...paths]
+        : action.action === 'delete_file'
+          ? ['delete_file']
+          : action.action === 'patch_file'
+            ? ['patch_file', action.edits, action.find, action.replace]
+            : ['create_file', action.content];
+      for (const path of paths) perPath.set(path, [...(perPath.get(path) || []), change]);
+    }
+
+    return Object.fromEntries(Array.from(perPath, ([path, changes]) => [
+      path,
+      crypto.createHash('sha256').update(JSON.stringify(changes)).digest('hex')
+    ]));
+  }
+
+  /** Text the owner reviews. Everything that an approval would apply is listed. */
+  private static describeActions(actions: Array<{ [key: string]: any }>): string {
+    return actions.map(action => {
+      const body = action.content ?? (action.edits || action.find ? JSON.stringify(action.edits ?? [action.find, action.replace], null, 2) : '');
+      return `--- ${this.actionPaths(action).join(' -> ')} (${action.action})\n${body}`;
+    }).join('\n\n');
+  }
+
+  /**
+   * Creates a request for exactly these changes. Patches record the file version,
+   * so an approved patch cannot land on a file that changed after review.
+   */
+  static requestForActions(
+    buildId: string,
+    userId: string,
+    params: { agent: string; actions: Array<{ [key: string]: any }>; runId?: string }
+  ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
+    const fingerprints = this.fingerprintActions(params.actions);
+    const sensitive = Object.keys(fingerprints).filter(p => this.isSensitiveFilePath(p));
+    const contentHashes = Object.fromEntries(sensitive.map(p => [p, fingerprints[p]]));
+
+    const duplicate = db.getApprovalRequests(buildId, 'pending')
+      .find(r => JSON.stringify(r.contentHashes) === JSON.stringify(contentHashes));
+    if (duplicate) return { success: true, request: duplicate };
+
+    return this.requestApproval(buildId, userId, {
+      patchId: params.runId,
+      requestingAgent: params.agent,
+      requestingRole: 'security_specialist',
+      operationType: 'security_sensitive_change',
+      explanation: `Generated code changes sensitive files: ${sensitive.join(', ')}`,
+      affectedFiles: sensitive,
+      proposedChanges: this.describeActions(params.actions),
+      contentHashes,
+      proposedActions: params.actions.map(action => {
+        if (action.action !== 'patch_file') return action;
+        const file = db.getFile(buildId, this.normalizePath(action.path));
+        return file ? { ...action, expectedVersion: file.version } : action;
+      }),
+      riskLevel: 'high'
+    });
+  }
+
+  /**
+   * Splits a batch so ordinary files can continue while sensitive ones wait for the owner.
+   * Without this a build retries forever on a write nobody has been asked to approve.
+   */
+  static holdSensitiveActions(
+    buildId: string,
+    userId: string,
+    agent: string,
+    actions: Array<{ [key: string]: any }>
+  ): { ready: Array<{ [key: string]: any }>; held: Array<{ [key: string]: any }> } {
+    const fingerprints = this.fingerprintActions(actions);
+    const blocked = Object.keys(fingerprints).filter(p =>
+      this.isSensitiveFilePath(p) && !this.hasApprovedRequestForFiles(buildId, [p], fingerprints)
+    );
+    if (blocked.length === 0) return { ready: actions, held: [] };
+
+    const isHeld = (action: { [key: string]: any }) => this.actionPaths(action).some(p => blocked.includes(p));
+    const held = actions.filter(isHeld);
+    this.requestForActions(buildId, userId, { agent, actions: held });
+    return { ready: actions.filter(action => !isHeld(action)), held };
+  }
+
+  /** The owner's latest decision on a file is the one that counts. */
+  private static latestDecision(buildId: string, file: string): HumanApprovalRequest | undefined {
+    return db.getApprovalRequests(buildId)
+      .filter(a =>
+        a.buildId === buildId &&
+        (a.status === 'approved' || a.status === 'rejected') &&
+        Array.isArray(a.affectedFiles) &&
+        a.affectedFiles.includes(file)
+      )
+      // On a tie the rejection wins
+      .sort((a, b) => (b.resolvedAt || 0) - (a.resolvedAt || 0) || (a.status === 'rejected' ? -1 : 1))[0];
+  }
+
+  /**
+   * Checks that every sensitive file has a live, unused approval for this exact change.
+   * Validity runs from creation. An approval without a fingerprint authorizes nothing.
+   */
+  static hasApprovedRequestForFiles(buildId: string, files: string[], fingerprints: Record<string, string> = {}): boolean {
     if (!files || files.length === 0) return true;
     const sensitiveFiles = files.filter(f => this.isSensitiveFilePath(f));
     if (sensitiveFiles.length === 0) return true;
 
-    const approvals = db.getApprovalRequests(buildId);
     const now = Date.now();
-
-    // Every sensitive file must have a valid approval belonging to this exact build
     return sensitiveFiles.every(file => {
-      return approvals.some(a => {
-        if (a.buildId !== buildId) return false;
-        if (a.status !== 'approved') return false;
-        // Check for expired approval
-        if (a.resolvedAt && (now - a.resolvedAt) > APPROVAL_TTL_MS) return false;
-        if ((a as any).expiresAt && now > (a as any).expiresAt) return false;
-        // Verify affected file is explicitly listed
-        return Array.isArray(a.affectedFiles) && a.affectedFiles.includes(file);
-      });
+      const decision = this.latestDecision(buildId, file);
+      if (!decision || decision.status !== 'approved') return false;
+      if (now > decision.createdAt + APPROVAL_TTL_MS) return false;
+      if (decision.consumedFiles?.includes(file)) return false;
+
+      const expected = decision.contentHashes?.[file];
+      return expected !== undefined && expected === fingerprints[file];
     });
+  }
+
+  /** Marks approvals as used, so one approval cannot cover a second change. */
+  static consumeApprovedFiles(buildId: string, files: string[]): void {
+    for (const file of files) {
+      const decision = this.latestDecision(buildId, file);
+      if (decision?.status !== 'approved') continue;
+      db.saveApprovalRequest({ ...decision, consumedFiles: [...(decision.consumedFiles || []), file] });
+    }
+  }
+
+  /** Withdraws an approval. Anything already applied stays applied. */
+  static revokeApproval(
+    buildId: string,
+    userId: string,
+    requestId: string
+  ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
+    const build = db.getBuild(buildId);
+    if (!userId || !build || !build.userId || build.userId !== userId) {
+      return { success: false, error: 'Unauthorized or build not found' };
+    }
+    const request = db.getApprovalRequest(requestId);
+    if (!request || request.buildId !== buildId) {
+      return { success: false, error: `Approval request ${requestId} not found in this build` };
+    }
+    if (request.status !== 'approved') {
+      return { success: false, error: `Only an approved request can be revoked (status: ${request.status})` };
+    }
+    const revoked = db.saveApprovalRequest({
+      ...request,
+      status: 'rejected',
+      resolutionNotes: 'Approval revoked by the owner',
+      resolvedAt: Date.now()
+    });
+    return { success: true, request: revoked };
+  }
+
+  /** A request left by a cancelled run must not unlock files later. */
+  static cancelRequestsForRun(buildId: string, runId: string): void {
+    for (const request of db.getApprovalRequests(buildId, 'pending')) {
+      if (request.patchId === runId) {
+        db.saveApprovalRequest({ ...request, status: 'cancelled', resolvedAt: Date.now() });
+      }
+    }
   }
 
   /**
@@ -139,6 +316,8 @@ export class ApprovalGateService {
       reviewResults?: string;
       testResults?: string;
       scopeHash?: string;
+      contentHashes?: Record<string, string>;
+      proposedActions?: any[];
     }
   ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
     const build = db.getBuild(buildId);
@@ -166,6 +345,8 @@ export class ApprovalGateService {
       reviewResults: params.reviewResults,
       testResults: params.testResults,
       scopeHash: params.scopeHash,
+      contentHashes: params.contentHashes,
+      proposedActions: params.proposedActions,
       status: 'pending',
       createdAt: Date.now()
     };

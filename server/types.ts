@@ -1651,6 +1651,12 @@ export interface HumanApprovalRequest {
   resolutionNotes?: string;
   /** Ties an execution approval to one exact workspace. */
   scopeHash?: string;
+  /** Fingerprint of the reviewed change for each file. */
+  contentHashes?: Record<string, string>;
+  /** Files this approval has already been used for. Approvals work once per file. */
+  consumedFiles?: string[];
+  /** The exact reviewed changes, applied when the owner approves. */
+  proposedActions?: any[];
   createdAt: number;
   resolvedAt?: number;
 }

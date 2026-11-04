@@ -983,9 +983,15 @@ export const CollaborationView: React.FC = () => {
                           </span>
                         </div>
 
-                        <div className="text-xs text-neutral-300">
-                          <span className="text-neutral-500 font-mono text-[10px] block mb-1">REQUESTED BY: {req.requestedByRole}</span>
-                          {req.rationale}
+                        <div className="text-xs text-neutral-300 space-y-2">
+                          <span className="text-neutral-500 font-mono text-[10px] block">REQUESTED BY: {req.requestingAgent} ({req.requestingRole})</span>
+                          <p>{req.explanation}</p>
+                          {req.affectedFiles.length > 0 && (
+                            <p className="font-mono text-[11px] text-neutral-400">{req.affectedFiles.join(', ')}</p>
+                          )}
+                          <pre className="max-h-72 overflow-auto rounded border border-neutral-800 bg-black p-2 font-mono text-[11px] text-neutral-200 whitespace-pre-wrap break-words">
+                            {req.proposedChanges}
+                          </pre>
                         </div>
 
                         {req.status === 'pending' && (

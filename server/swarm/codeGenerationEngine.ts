@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { 
+import {
+  HumanApprovalRequest, 
   CodeGenerationRun, 
   GenerationPass, 
   GenerationProfile,
@@ -39,6 +40,8 @@ export interface CodeGenerationOptions {
   mockActionResponse?: ModelActionResponse;
   mockAiResponse?: ModelActionResponse;
   approvalGranted?: boolean;
+  /** Changes the owner reviewed and approved. The model is not asked again. */
+  approvedActions?: any[];
 }
 
 export class CodeGenerationEngine {
@@ -71,6 +74,7 @@ export class CodeGenerationEngine {
       run.cancelledAt = Date.now();
       run.completedAt = Date.now();
       db.saveGenerationRun(run);
+      ApprovalGateService.cancelRequestsForRun(run.buildId, run.id);
       return true;
     }
     return active?.isCancelled ?? false;
@@ -80,10 +84,7 @@ export class CodeGenerationEngine {
    * Checks if a run has been marked cancelled either in memory or storage.
    */
   static isRunCancelled(runId: string): boolean {
-    const active = this.activeRuns.get(runId);
-    if (active?.isCancelled) return true;
-    const run = db.getGenerationRun(runId);
-    return run?.status === 'cancelled';
+    return Boolean(this.activeRuns.get(runId)?.isCancelled || db.getStoredRunCancellation(runId));
   }
 
   /**
@@ -179,10 +180,11 @@ export class CodeGenerationEngine {
     // Helper to evaluate and apply cancellation
     const checkCancelled = (currentPassIndex?: number): boolean => {
       const active = this.activeRuns.get(runId);
-      const dbRun = db.getGenerationRun(runId);
-      if (active?.isCancelled || dbRun?.status === 'cancelled') {
-        const reason = active?.cancellationReason || dbRun?.error || 'Run was cancelled by user';
-        const timestamp = active?.cancelledAt || dbRun?.completedAt || Date.now();
+      // Read storage directly: the cache holds this run's own object, not another process's cancel
+      const stored = db.getStoredRunCancellation(runId);
+      if (active?.isCancelled || stored) {
+        const reason = active?.cancellationReason || stored?.reason || 'Run was cancelled by user';
+        const timestamp = active?.cancelledAt || stored?.cancelledAt || Date.now();
         runRecord.status = 'cancelled';
         runRecord.error = reason;
         runRecord.cancellationReason = reason;
@@ -228,7 +230,8 @@ export class CodeGenerationEngine {
       const pass1Start = Date.now();
 
       const existingFiles = db.getAllFiles(buildId);
-      const mockPaths = (options.mockActionResponse?.actions || options.mockAiResponse?.actions || []).map((a: any) => a.path).filter(Boolean);
+      const presetActions = options.approvedActions || options.mockActionResponse?.actions || options.mockAiResponse?.actions;
+      const mockPaths = (presetActions || []).map((a: any) => a.path).filter(Boolean);
       
       // Determine target file paths from profile or requirement hints
       const targetFiles = this.planTargetFiles(userRequest, profile, existingFiles, mockPaths);
@@ -283,9 +286,10 @@ export class CodeGenerationEngine {
 
       let actions: any[];
 
-      const mockResponse = options.mockActionResponse || options.mockAiResponse;
-      if (mockResponse && Array.isArray(mockResponse.actions)) {
-        actions = mockResponse.actions;
+      if (options.approvedActions) {
+        actions = options.approvedActions;
+      } else if (Array.isArray(presetActions)) {
+        actions = presetActions;
         runRecord.tokenUsage += 350;
         runRecord.cost += 0.001;
       } else {
@@ -302,7 +306,7 @@ export class CodeGenerationEngine {
         });
 
         runRecord.tokenUsage += genRes.tokensUsed || 0;
-        runRecord.cost += genRes.estimatedCost || (genRes.tokensUsed * 0.000003);
+        runRecord.cost += genRes.estimatedCost ?? (genRes.tokensUsed * 0.000003);
 
         // A response that arrives after cancellation must not change the run
         if (checkCancelled(1)) return runRecord;
@@ -322,20 +326,16 @@ export class CodeGenerationEngine {
 
       // SENSITIVE FILE DETECTION BEFORE APPLICATION:
       // Inspect target files before writing to disk or database
-      const proposedPaths = fileActions.map((a: any) => a.path);
-      const sensitiveFiles = proposedPaths.filter((p: string) => ApprovalGateService.isSensitiveFilePath(p));
-      const hasValidApproval = sensitiveFiles.length > 0 && ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles);
+      const fingerprints = ApprovalGateService.fingerprintActions(fileActions);
+      const sensitiveFiles = Object.keys(fingerprints).filter(p => ApprovalGateService.isSensitiveFilePath(p));
+      const hasValidApproval = sensitiveFiles.length > 0 && ApprovalGateService.hasApprovedRequestForFiles(buildId, sensitiveFiles, fingerprints);
 
       if (sensitiveFiles.length > 0 && !hasValidApproval) {
         // Request human approval and hold patch in pending state
-        ApprovalGateService.requestApproval(buildId, userId, {
-          requestingAgent: selectedModel.id,
-          requestingRole: 'security_specialist',
-          operationType: 'security_sensitive_change',
-          explanation: `Generated code touches sensitive security/auth/env files: ${sensitiveFiles.join(', ')}`,
-          affectedFiles: sensitiveFiles,
-          proposedChanges: `Proposed code generation touches: ${sensitiveFiles.join(', ')}`,
-          riskLevel: 'high'
+        ApprovalGateService.requestForActions(buildId, userId, {
+          agent: selectedModel.id,
+          actions: fileActions,
+          runId
         });
 
         passes[1].status = 'failed';
@@ -653,6 +653,47 @@ export class CodeGenerationEngine {
       return runRecord;
     } finally {
       this.activeRuns.delete(runId);
+    }
+  }
+
+  /**
+   * Continues a run that stopped for approval, using exactly the changes the owner approved.
+   * Asking the model again could produce different code from what was reviewed.
+   */
+  static async continueApprovedRun(request: HumanApprovalRequest, userId: string): Promise<CodeGenerationRun | null> {
+    if (!request.proposedActions?.length) return null;
+
+    // Swarm work has no run to continue, so the held changes are applied directly
+    if (!request.patchId) {
+      const applied = await MergeManager.applyBatchActions(request.buildId, request.requestingAgent, request.proposedActions);
+      if (!applied.success) {
+        this.emitEvent(request.buildId, 'codegen_failed', { approvalId: request.id, error: applied.error });
+      }
+      return null;
+    }
+
+    const original = db.getGenerationRun(request.patchId);
+    if (!original || original.buildId !== request.buildId || original.status !== 'pending_approval') return null;
+
+    try {
+      const continuation = await this.runGenerationPipeline({
+        buildId: request.buildId,
+        userId,
+        userRequest: original.userRequest,
+        profileId: original.generationProfile,
+        modelId: original.modelId,
+        taskId: original.taskId,
+        approvedActions: request.proposedActions
+      });
+      this.cancelRun(original.id, `Approved, and continued in run ${continuation.id}`);
+      return continuation;
+    } catch (err: any) {
+      original.status = 'failed';
+      original.error = `The approved changes could not be applied: ${err.message}`;
+      original.completedAt = Date.now();
+      db.saveGenerationRun(original);
+      this.emitEvent(request.buildId, 'codegen_failed', { runId: original.id, error: original.error });
+      return null;
     }
   }
 

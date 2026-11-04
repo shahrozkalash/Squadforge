@@ -333,7 +333,7 @@ export class ExecutionSessionManager {
     if (!content) return false;
     const lockfile = content.toString('utf-8');
 
-    const result = await MergeManager.applyBatchActions(build.id, 'execution_environment', [{
+    const result = await MergeManager.applyBatchActions(build.id, 'system', [{
       action: 'create_file',
       path: 'package-lock.json',
       content: lockfile,
