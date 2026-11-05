@@ -1399,6 +1399,8 @@ export interface HumanApprovalRequest {
   rationale?: string;
   riskLevel: 'low' | 'medium' | 'high' | 'critical';
   affectedFiles: string[];
+  /** Files this approval has already been used for. */
+  consumedFiles?: string[];
   proposedChanges: string;
   reviewResults?: string;
   testResults?: string;

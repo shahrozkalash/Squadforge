@@ -50,6 +50,13 @@ function sameOriginUpgrade(req: http.IncomingMessage): boolean {
   }
 }
 
+/** Opens a connection to the relay. It rejects anything that does not start with its token. */
+function connectRelay(preview: PreviewSession, onConnect?: () => void): net.Socket {
+  const socket = net.connect(preview.relayPort, preview.relayHost, onConnect);
+  if (preview.relayToken) socket.write(`SF-RELAY ${preview.relayToken}\n`);
+  return socket;
+}
+
 export function createPreviewServer(service: PreviewSessionService): http.Server {
   const { config } = service;
   const hostPattern = new RegExp(`^(pv[0-9a-f]{24})\\.${escapeForRegExp(config.baseDomain || '')}(?::\\d+)?$`, 'i');
@@ -96,8 +103,7 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
     }
 
     const upstream = http.request({
-      host: preview.relayHost,
-      port: preview.relayPort,
+      createConnection: () => connectRelay(preview),
       method: req.method,
       path: req.url,
       headers: forwardedHeaders(req, preview)
@@ -140,7 +146,7 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
       return;
     }
 
-    const upstream = net.connect(preview.relayPort, preview.relayHost, () => {
+    const upstream = connectRelay(preview, () => {
       const headers = forwardedHeaders(req, preview);
       const lines = Object.entries(headers).flatMap(([name, value]) =>
         (Array.isArray(value) ? value : [value]).map(item => `${name}: ${item}`)

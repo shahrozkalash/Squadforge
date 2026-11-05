@@ -1738,6 +1738,8 @@ export interface PreviewSession {
   port: number;
   relayHost: string;
   relayPort: number;
+  /** Sent to the relay only. Must never reach a client. */
+  relayToken?: string;
   tokenHash?: string;
   tokenExpiresAt?: number;
   cookieHash?: string;

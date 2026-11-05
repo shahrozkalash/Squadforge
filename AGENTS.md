@@ -81,6 +81,8 @@ The lockfile was added and deleted repeatedly on `main` before Phase 10, and the
 1. Test cancellation against a real provider.
 2. Run the sandbox tests on a real worker, with TLS and gVisor.
 3. Decide on guest execution, the worker, and the preview domain.
+4. Have `invariant-reviewer` check the fixes listed under "Fixed after acceptance" in `PHASE_9_ACCEPTANCE_REPORT.md`, and the relay token.
+5. Expire approval requests the owner never answers.
 
 ## Fragile areas
 

@@ -421,7 +421,11 @@ describe('Swarm tasks with sensitive files', () => {
     assert.ok(db.getFile(buildId, 'src/app.ts'));
     assert.equal(db.getFile(buildId, 'Dockerfile'), undefined);
     assert.equal(db.getTask(buildId, id)?.status, 'paused');
-    assert.equal(db.getPatchProposals(buildId).length, 0, 'a held change must not be recorded as applied');
+    assert.deepEqual(
+      db.getPatchProposals(buildId).map(p => p.targetFile),
+      ['src/app.ts'],
+      'the applied file is recorded, and a held change is not'
+    );
   });
 
   test('approval applies the held change and completes the task', async (t) => {

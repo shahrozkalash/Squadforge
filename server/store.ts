@@ -4687,6 +4687,7 @@ export class PersistentDatabase {
       port: r.port,
       relayHost: r.relay_host,
       relayPort: r.relay_port,
+      relayToken: r.relay_token || undefined,
       tokenHash: r.token_hash || undefined,
       tokenExpiresAt: r.token_expires_at ?? undefined,
       cookieHash: r.cookie_hash || undefined,
@@ -4698,9 +4699,9 @@ export class PersistentDatabase {
   public savePreviewSession(preview: PreviewSession): PreviewSession {
     this.dbManager.db.prepare(`
       INSERT OR REPLACE INTO preview_sessions (
-        id, session_id, build_id, user_id, status, port, relay_host, relay_port,
+        id, session_id, build_id, user_id, status, port, relay_host, relay_port, relay_token,
         token_hash, token_expires_at, cookie_hash, created_at, last_access_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       preview.id,
       preview.sessionId,
@@ -4710,6 +4711,7 @@ export class PersistentDatabase {
       preview.port,
       preview.relayHost,
       preview.relayPort,
+      preview.relayToken ?? null,
       preview.tokenHash ?? null,
       preview.tokenExpiresAt ?? null,
       preview.cookieHash ?? null,

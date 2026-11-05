@@ -648,9 +648,14 @@ app.get('/api/agents', requireAuth, (req, res) => {
 
 // The model registry is shared by every user, so guests cannot change it in production
 const requireModelEditor: express.RequestHandler = (req, res, next) => {
+  if (process.env.NODE_ENV !== 'production') return next();
   const isGuest = req.user?.isAnonymous || req.user?.id.startsWith('guest_');
-  if (process.env.NODE_ENV === 'production' && isGuest) {
+  if (isGuest) {
     return res.status(403).json({ error: 'Guest sessions cannot change shared models.' });
+  }
+  const admins = (process.env.MODEL_ADMIN_USER_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+  if (!admins.includes(req.user!.id)) {
+    return res.status(403).json({ error: 'Only a model administrator can change shared models.' });
   }
   next();
 };

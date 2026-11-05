@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
 import Docker from 'dockerode';
@@ -379,12 +380,13 @@ export class DockerBackend implements ExecutionBackend {
 
     const buildId = await this.buildIdForSession(sessionId);
     const portKey = `${RELAY_PORT}/tcp`;
+    const token = crypto.randomBytes(32).toString('hex');
     const relay = await this.docker.createContainer({
       name: this.relayName(sessionId),
       Image: this.config.image,
       Cmd: ['node', '/opt/squadforge/relay.mjs'],
       User: SANDBOX_USER,
-      Env: [`RELAY_TARGET_HOST=${address}`, `RELAY_TARGET_PORT=${port}`, `RELAY_LISTEN_PORT=${RELAY_PORT}`],
+      Env: [`RELAY_TARGET_HOST=${address}`, `RELAY_TARGET_PORT=${port}`, `RELAY_LISTEN_PORT=${RELAY_PORT}`, `RELAY_TOKEN=${token}`],
       Labels: this.labels(sessionId, buildId, 'relay'),
       ExposedPorts: { [portKey]: {} },
       HostConfig: {
@@ -399,7 +401,7 @@ export class DockerBackend implements ExecutionBackend {
     const details = await relay.inspect();
     const published = details.NetworkSettings.Ports?.[portKey]?.[0]?.HostPort;
     if (!published) throw new Error('The preview relay did not publish a port.');
-    return { host: this.config.previewHost, port: Number(published) };
+    return { host: this.config.previewHost, port: Number(published), token };
   }
 
   async closePreview(sessionId: string): Promise<void> {

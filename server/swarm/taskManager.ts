@@ -603,6 +603,14 @@ export class TaskManager {
   /**
    * Pauses a task when its token budget or rate limit is reached
    */
+  /** Whether this claim is still the live one. A reclaim sets a new lease, even for the same model. */
+  static holdsClaim(buildId: string, claimed: Task): boolean {
+    const current = db.getTask(buildId, claimed.id);
+    return Boolean(current) &&
+      current!.claimedBy === claimed.claimedBy &&
+      current!.leaseExpiresAt === claimed.leaseExpiresAt;
+  }
+
   static pauseTask(buildId: string, taskId: string, reason: string): void {
     const task = db.getTask(buildId, taskId);
     if (!task) return;

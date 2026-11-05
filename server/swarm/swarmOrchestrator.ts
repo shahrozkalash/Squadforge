@@ -87,6 +87,59 @@ export class SwarmOrchestrator {
     }
   }
 
+  /** Records applied file changes, so the patch history shows every change that landed. */
+  private static recordAppliedPatches(buildId: string, agent: string, role: AgentRole, task: Task, actions: any[]): void {
+    for (const fa of actions) {
+      const targetPath = ('path' in fa && typeof fa.path === 'string') 
+        ? fa.path 
+        : ('newPath' in fa ? (fa as any).newPath : '');
+      if (!targetPath) continue;
+
+      const fileNow = db.getFile(buildId, targetPath);
+      if (fileNow) {
+        let proposedChanges: PatchProposalHunk = { actionType: 'patch' };
+        if (fa.action === 'create_file') {
+          proposedChanges = { actionType: 'create', content: (fa as any).content || '' };
+        } else if (fa.action === 'patch_file') {
+          const firstEdit = (fa as any).edits?.[0];
+          proposedChanges = {
+            actionType: 'patch',
+            find: firstEdit?.find || (fa as any).find || '',
+            replace: firstEdit?.replace || (fa as any).replace || ''
+          };
+        } else if (fa.action === 'delete_file') {
+          proposedChanges = { actionType: 'delete' };
+        } else if (fa.action === 'rename_file') {
+          proposedChanges = {
+            actionType: 'rename',
+            oldPath: (fa as any).oldPath,
+            newPath: (fa as any).newPath
+          };
+        }
+
+        db.savePatchProposal({
+          id: `patch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          buildId,
+          authorAgent: agent,
+          authorRole: role,
+          relatedTaskId: task.id,
+          targetFile: targetPath,
+          baseFileVersion: Math.max(1, (fileNow.version || 1) - 1),
+          baseContentHash: fileNow.contentHash || '',
+          proposedChanges,
+          changeExplanation: fa.commitMessage || `Implementation for ${task.title}`,
+          expectedBehavior: task.description,
+          validationResults: { syntaxValid: true, pathAllowed: true, hashMatched: true, versionCurrent: true, errors: [] },
+          reviewStatus: 'approved',
+          applicationStatus: 'applied',
+          appliedFileVersion: fileNow.version,
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        });
+      }
+    }
+  }
+
   /**
    * Finishes a task that was waiting on the owner. An approval applies the reviewed change,
    * and anything else fails the task, so the build reports what really happened.
@@ -97,16 +150,44 @@ export class SwarmOrchestrator {
     if (!task || task.pausedReason !== this.AWAITING_APPROVAL) return;
 
     const paused = { isPaused: false, pausedReason: undefined };
+    const proposed = request.proposedActions || [];
+    const fileActions = proposed.filter(action => action.action !== 'create_task');
     let failure: string | undefined = request.status === 'approved' ? undefined : `Sensitive change ${request.status} by the owner`;
     if (request.status === 'approved') {
       try {
-        const applied = await MergeManager.applyBatchActions(buildId, request.requestingAgent, request.proposedActions || []);
+        const applied = await MergeManager.applyBatchActions(buildId, request.requestingAgent, fileActions);
         if (!applied.success) failure = `Approved changes could not be applied: ${applied.error}`;
       } catch (err: any) {
         failure = `Approved changes could not be applied: ${err.message}`;
       }
     }
-    db.updateTask(buildId, task.id, failure ? { ...paused, status: 'failed', error: failure } : { ...paused, status: 'completed' });
+
+    if (failure) {
+      db.updateTask(buildId, task.id, { ...paused, status: 'failed', error: failure });
+    } else {
+      this.recordAppliedPatches(buildId, request.requestingAgent, request.requestingRole, task, fileActions);
+      for (const action of proposed.filter(a => a.action === 'create_task')) {
+        TaskManager.createNewTask(buildId, {
+          title: action.title,
+          description: action.description,
+          filePaths: action.filePaths,
+          dependencies: action.dependencies,
+          assignedRole: action.assignedRole,
+          priority: action.priority || 3,
+          maxRetries: this.MAX_TASK_RETRIES
+        });
+      }
+
+      // The same completion check as any other task, which needs the task to be claimed
+      db.updateTask(buildId, task.id, {
+        ...paused,
+        status: 'in_progress',
+        claimedBy: request.requestingAgent,
+        leaseExpiresAt: Date.now() + 90 * 1000
+      });
+      const completed = TaskManager.completeTask(buildId, task.id, request.requestingAgent);
+      if (!completed.success) failure = completed.error || 'Task verification failed';
+    }
 
     const build = db.getBuild(buildId);
     if (build?.status !== 'running') return;
@@ -270,6 +351,33 @@ export class SwarmOrchestrator {
     }
   }
 
+  /** Writes the planner's files. The planner has no task of its own, so sensitive ones wait on a new one. */
+  private static async applyPlannedFiles(build: Build, actions: any[], milestone: string): Promise<void> {
+    const { ready, held } = ApprovalGateService.splitSensitiveActions(build.id, actions.filter(a => a.action === 'create_file'));
+    for (const action of ready) {
+      await MergeManager.createFile(build.id, 'software_architect', action as any);
+    }
+    if (held.length === 0) return;
+
+    const holder = TaskManager.createNewTask(build.id, {
+      title: 'Apply sensitive files from the plan',
+      description: 'Applies the sensitive files the planner proposed, once the owner approves them.',
+      filePaths: held.map(action => ApprovalGateService.normalizePath(action.path)),
+      priority: 1,
+      maxRetries: this.MAX_TASK_RETRIES,
+      assignedRole: 'software_architect',
+      milestone
+    });
+    build.milestones?.[0]?.taskIds.push(holder.id);
+    // Model run and event records need a real model id, not a role
+    ApprovalGateService.requestForActions(build.id, build.userId, {
+      agent: build.selectedModels[0] || 'gemini',
+      actions: held,
+      taskId: holder.id
+    });
+    TaskManager.pauseTask(build.id, holder.id, this.AWAITING_APPROVAL);
+  }
+
   /**
    * Phase 1: Universal Software Architecture Engine establishes requirements analysis, 
    * technology selection, architecture blueprint, complexity assessment, and dependency planning.
@@ -418,10 +526,10 @@ Output ONLY JSON matching this structure:
     });
 
     if (plannerResult.success && plannerResult.parsedResponse) {
+      await this.applyPlannedFiles(build, plannerResult.parsedResponse.actions, m1Id);
+
       for (const action of plannerResult.parsedResponse.actions) {
-        if (action.action === 'create_file') {
-          await MergeManager.createFile(build.id, 'software_architect', action);
-        } else if (action.action === 'create_task') {
+        if (action.action === 'create_task') {
           const t = TaskManager.createNewTask(build.id, {
             title: action.title,
             description: action.description,
@@ -437,7 +545,7 @@ Output ONLY JSON matching this structure:
     }
 
     // Seed structured dependency-aware tasks if needed
-    const currentTasks = db.getTasks(build.id);
+    const currentTasks = db.getTasks(build.id).filter(t => t.pausedReason !== this.AWAITING_APPROVAL);
     if (currentTasks.length < 4) {
       this.seedMilestoneTasks(build, m1Id, m2Id, m3Id, m4Id);
     }
@@ -1092,16 +1200,22 @@ Never write placeholder comments. Implement functional code.`;
         // Sensitive files wait for the owner, and the rest of the work carries on
         const { ready, held } = ApprovalGateService.splitSensitiveActions(buildId, fileActions);
 
+        // A worker that outlasted its lease must not pause a task another worker now holds
+        if (held.length > 0 && !TaskManager.holdsClaim(buildId, task)) return;
+
         const batchRes = ready.length > 0
           ? await MergeManager.applyBatchActions(buildId, model.id, ready, { signal })
           : { success: true, appliedCount: 0, error: undefined };
 
         // The task is not finished until the owner decides, so it must not retry or complete
         if (batchRes.success && held.length > 0) {
+          if (!TaskManager.holdsClaim(buildId, task)) return;
+          this.recordAppliedPatches(buildId, model.id, model.agentRole || 'fullstack_developer', task, ready);
           ApprovalGateService.requestForActions(buildId, build.userId, {
             agent: model.id,
             actions: held,
-            taskId: task.id
+            taskId: task.id,
+            followUpTasks: taskActions
           });
           TaskManager.pauseTask(buildId, task.id, this.AWAITING_APPROVAL);
           return;
@@ -1159,55 +1273,7 @@ Never write placeholder comments. Implement functional code.`;
 
         // Phase 8: Record applied patch proposals and broadcast progress message
         try {
-          for (const fa of fileActions) {
-            const targetPath = ('path' in fa && typeof fa.path === 'string') 
-              ? fa.path 
-              : ('newPath' in fa ? (fa as any).newPath : '');
-            if (!targetPath) continue;
-
-            const fileNow = db.getFile(buildId, targetPath);
-            if (fileNow) {
-              let proposedChanges: PatchProposalHunk = { actionType: 'patch' };
-              if (fa.action === 'create_file') {
-                proposedChanges = { actionType: 'create', content: (fa as any).content || '' };
-              } else if (fa.action === 'patch_file') {
-                const firstEdit = (fa as any).edits?.[0];
-                proposedChanges = {
-                  actionType: 'patch',
-                  find: firstEdit?.find || (fa as any).find || '',
-                  replace: firstEdit?.replace || (fa as any).replace || ''
-                };
-              } else if (fa.action === 'delete_file') {
-                proposedChanges = { actionType: 'delete' };
-              } else if (fa.action === 'rename_file') {
-                proposedChanges = {
-                  actionType: 'rename',
-                  oldPath: (fa as any).oldPath,
-                  newPath: (fa as any).newPath
-                };
-              }
-
-              db.savePatchProposal({
-                id: `patch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-                buildId,
-                authorAgent: model.id,
-                authorRole: model.agentRole || 'fullstack_developer',
-                relatedTaskId: task.id,
-                targetFile: targetPath,
-                baseFileVersion: Math.max(1, (fileNow.version || 1) - 1),
-                baseContentHash: fileNow.contentHash || '',
-                proposedChanges,
-                changeExplanation: fa.commitMessage || `Implementation for ${task.title}`,
-                expectedBehavior: task.description,
-                validationResults: { syntaxValid: true, pathAllowed: true, hashMatched: true, versionCurrent: true, errors: [] },
-                reviewStatus: 'approved',
-                applicationStatus: 'applied',
-                appliedFileVersion: fileNow.version,
-                createdAt: Date.now(),
-                updatedAt: Date.now()
-              });
-            }
-          }
+          this.recordAppliedPatches(buildId, model.id, model.agentRole || 'fullstack_developer', task, fileActions);
 
           CollaborationManager.sendMessage(buildId, build.userId, {
             sender: model.id,

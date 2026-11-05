@@ -148,7 +148,8 @@ Containers share the worker's kernel, so they are not strong isolation on their 
 - Use a dedicated worker, never the machine holding SquadForge's database or secrets.
 - Set `SANDBOX_RUNTIME=runsc` (gVisor), or use a disposable VM. gVisor support has not been tested yet.
 - Treat Docker API access as root access to the worker. Require TLS client certificates.
-- Keep `SANDBOX_PREVIEW_BIND_IP` on a private, firewalled address, because relay ports have no authentication.
+- Keep `SANDBOX_PREVIEW_BIND_IP` on a private, firewalled address. Relay ports require a token, but it travels without TLS.
+- Rebuild the sandbox image when upgrading. An older image's relay does not understand the token, and previews will fail.
 
 ### Setup
 
@@ -172,6 +173,7 @@ Containers share the worker's kernel, so they are not strong isolation on their 
 | `PREVIEW_PORT` | `3001` | Preview listener port |
 | `PREVIEW_IDLE_MINUTES` | `15` | Idle preview timeout |
 | `EXECUTION_ALLOW_GUESTS` | Off in production | Lets guest sessions run projects |
+| `MODEL_ADMIN_USER_IDS` | Empty | Comma-separated user ids that can change shared models in production. If empty, nobody can |
 | `EXECUTION_MAX_CONCURRENT` | `4` | Total live sessions |
 | `EXECUTION_MAX_PER_USER` | `2` | Live sessions per user |
 | `EXECUTION_MEMORY_MB` | `1024` | Memory limit |

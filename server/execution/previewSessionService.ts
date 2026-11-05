@@ -1,7 +1,9 @@
 import crypto from 'node:crypto';
 import http from 'node:http';
+import net from 'node:net';
 import { db } from '../store.js';
 import { Build, ExecutionSession, PreviewSession } from '../types.js';
+import { PreviewEndpoint } from './executionBackend.js';
 import { ExecutionError, ExecutionSessionManager } from './executionSessionManager.js';
 
 const TOKEN_TTL_MS = 60 * 1000;
@@ -65,11 +67,19 @@ export class PreviewSessionService {
   }
 
   /** The relay takes a moment to start, and a preview opened before then shows an error. */
-  private async waitForRelay(host: string, port: number): Promise<void> {
+  private async waitForRelay({ host, port, token }: PreviewEndpoint): Promise<void> {
     const deadline = Date.now() + this.config.portWaitMs;
     while (Date.now() < deadline) {
       const reachable = await new Promise<boolean>(resolve => {
-        const req = http.get({ host, port, path: '/', timeout: 2000 }, res => {
+        const req = http.get({
+          path: '/',
+          timeout: 2000,
+          createConnection: () => {
+            const socket = net.connect(port, host);
+            if (token) socket.write(`SF-RELAY ${token}\n`);
+            return socket;
+          }
+        }, res => {
           res.resume();
           resolve(true);
         });
@@ -102,7 +112,7 @@ export class PreviewSessionService {
 
     await this.closeForSession(session);
     const endpoint = await this.manager.backend.openPreview(session.id, session.processId, port);
-    await this.waitForRelay(endpoint.host, endpoint.port);
+    await this.waitForRelay(endpoint);
 
     if (db.getExecutionSession(session.id)?.status !== 'running') {
       await this.manager.backend.closePreview(session.id).catch(() => undefined);
@@ -120,6 +130,7 @@ export class PreviewSessionService {
       port,
       relayHost: endpoint.host,
       relayPort: endpoint.port,
+      relayToken: endpoint.token,
       tokenHash: hashSecret(token),
       tokenExpiresAt: now + TOKEN_TTL_MS,
       createdAt: now,

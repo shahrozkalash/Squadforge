@@ -56,6 +56,7 @@ interface SwarmContextType {
   sendAgentMessage: (params: { senderRole: AgentRole; recipient?: string; messageType: AgentMessageType; content: string; relatedTaskId?: string; relatedFiles?: string[] }) => Promise<boolean>;
   submitReviewVerdict: (reviewId: string, verdict: CodeReviewVerdict, checks?: Partial<CodeReviewChecks>, summary?: string) => Promise<boolean>;
   respondToApproval: (approvalId: string, approved: boolean, notes?: string) => Promise<boolean>;
+  revokeApproval: (approvalId: string) => Promise<boolean>;
   resolveFileConflict: (conflictId: string, resolvedContent: string, explanation: string) => Promise<boolean>;
   recordDefect: (params: { title: string; description: string; severity: DefectSeverity; reproductionSteps: string[]; expectedBehavior: string; actualBehavior: string; affectedFiles: string[]; taskId?: string }) => Promise<boolean>;
   startAIChallenge: (params: { subject: AIChallengeSubject; originalProposal: string; proposerRole: AgentRole; challengerRole?: AgentRole; taskId?: string }) => Promise<boolean>;
@@ -686,6 +687,22 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return false;
   };
 
+  const revokeApproval = async (approvalId: string): Promise<boolean> => {
+    if (!activeBuild) return false;
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/collaboration/approvals/${approvalId}/revoke`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        await refreshCollaboration(activeBuild.id);
+        return true;
+      }
+    } catch (err) {
+      console.error('Failed to revoke approval:', err);
+    }
+    return false;
+  };
+
   const resolveFileConflict = async (
     conflictId: string,
     resolvedContent: string,
@@ -808,6 +825,7 @@ export const SwarmProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       sendAgentMessage,
       submitReviewVerdict,
       respondToApproval,
+      revokeApproval,
       resolveFileConflict,
       recordDefect,
       startAIChallenge,

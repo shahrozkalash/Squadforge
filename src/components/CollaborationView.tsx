@@ -101,6 +101,7 @@ export const CollaborationView: React.FC = () => {
     sendAgentMessage,
     submitReviewVerdict,
     respondToApproval,
+    revokeApproval,
     resolveFileConflict,
     recordDefect,
     startAIChallenge,
@@ -1009,6 +1010,18 @@ export const CollaborationView: React.FC = () => {
                             >
                               <X className="w-3.5 h-3.5" />
                               <span>Deny Operation</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {req.status === 'approved' && (req.consumedFiles?.length || 0) < req.affectedFiles.length && (
+                          <div className="flex items-center gap-2 pt-2 border-t border-neutral-800">
+                            <button
+                              onClick={() => revokeApproval(req.id)}
+                              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-rose-300 bg-rose-500/10 border border-rose-500/30 rounded-lg hover:bg-rose-500/20"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                              <span>Revoke Approval</span>
                             </button>
                           </div>
                         )}

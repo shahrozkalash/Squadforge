@@ -10,7 +10,7 @@
 The feature works end to end, and all checks pass. Two things stop a production recommendation:
 
 1. Nothing has run on a real worker, over TLS, or with gVisor.
-2. The disk limit is not a hard quota, and relay ports have no authentication.
+2. The disk limit is not a hard quota.
 
 ## Isolation claims
 
@@ -54,7 +54,7 @@ The `invariant-reviewer` agent reviewed the work by reading code and running sma
 | 9: Session creation race and limits | Fixed and tested |
 | 10: Project cookies and socket origin | Fixed and tested |
 | 11: Cross-site requests | Fixed and tested |
-| 12: Relay port authentication | Open, documented |
+| 12: Relay port authentication | Fixed after acceptance: each relay needs its own random token, tested on real Docker. The token is not encrypted in transit, so relay ports must still stay on a private network |
 | 13: Weak test evidence | Partly fixed: results cannot be replaced. A pass still only proves an exit code |
 | 14: Approved install scripts reach | Open, documented |
 | 15: Stop and cleanup gaps | Mostly fixed. Failed network removal is not retried |

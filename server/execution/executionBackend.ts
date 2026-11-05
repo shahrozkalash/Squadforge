@@ -53,6 +53,8 @@ export interface ResourceUsage {
 export interface PreviewEndpoint {
   host: string;
   port: number;
+  /** Proves to the relay that a connection came from SquadForge. Never send it to a browser. */
+  token?: string;
 }
 
 export interface EnvironmentRecord {

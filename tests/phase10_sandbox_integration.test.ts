@@ -1,5 +1,6 @@
 // Real isolation tests. Project code here only ever runs inside Docker containers.
 // Run with SANDBOX_INTEGRATION=1, after: docker build -t squadforge-sandbox:1 sandbox
+import net from 'node:net';
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -10,6 +11,18 @@ import { materializeWorkspace } from '../server/execution/workspaceMaterializer.
 
 const enabled = process.env.SANDBOX_INTEGRATION === '1';
 const limits: SandboxLimits = { memoryMb: 256, cpus: 1, pids: 64, maxRuntimeSeconds: 60, tmpfsMb: 32, workspaceMb: 256 };
+
+/** Talks to a relay directly, and returns everything it sends back. */
+function relayRequest(endpoint: { host: string; port: number }, payload: string): Promise<string> {
+  return new Promise(resolve => {
+    let reply = '';
+    const socket = net.connect(endpoint.port, endpoint.host, () => socket.write(payload));
+    socket.setTimeout(3000, () => socket.destroy());
+    socket.on('data', chunk => { reply += chunk.toString(); });
+    socket.on('close', () => resolve(reply));
+    socket.on('error', () => undefined);
+  });
+}
 
 describe('Phase 10 sandbox integration', { skip: enabled ? false : 'Set SANDBOX_INTEGRATION=1 to run' }, () => {
   const docker = new Docker();
@@ -262,10 +275,12 @@ describe('Phase 10 sandbox integration', { skip: enabled ? false : 'Set SANDBOX_
     const endpoint = await backend.openPreview(sessionId, handle.id, 4173);
     let body = '';
     for (let attempt = 0; attempt < 20 && !body; attempt++) {
-      body = await fetch(`http://${endpoint.host}:${endpoint.port}/`).then(r => r.text()).catch(() => '');
+      body = await relayRequest(endpoint, `SF-RELAY ${endpoint.token}\nGET / HTTP/1.0\r\nHost: relay\r\n\r\n`)
+        .then(reply => reply.split('\r\n\r\n').slice(1).join('\r\n\r\n'));
       if (!body) await new Promise(resolve => setTimeout(resolve, 250));
     }
     assert.equal(body, 'preview-ok');
+    assert.equal(await relayRequest(endpoint, 'GET / HTTP/1.0\r\nHost: relay\r\n\r\n'), '', 'no token, no project');
 
     const usage = await backend.usage(handle.id);
     assert.ok(usage && usage.memoryBytes > 0 && usage.workspaceBytes > 0);

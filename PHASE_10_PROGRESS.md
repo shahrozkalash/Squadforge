@@ -82,7 +82,7 @@ Mocks did not catch these. They were found by real Docker, Linux CI, Chrome, or 
 
 - **Shared kernel:** the default `runc` runtime shares the worker's kernel. gVisor (`SANDBOX_RUNTIME=runsc`) is supported in code but has not been tested.
 - **Remote worker untested:** only a local Docker daemon was used. TLS connection to a remote worker has not been run.
-- **Relay port:** published preview ports have no authentication, so `SANDBOX_PREVIEW_BIND_IP` must be private and firewalled.
+- **Relay port:** each relay requires a random per-preview token, but the connection has no TLS, so `SANDBOX_PREVIEW_BIND_IP` must stay private and firewalled.
 - **Disk:** no hard volume quota. `du` runs in the sandbox and can be evaded. Cache volumes are removed by cleanup only.
 - **Install scripts:** when approved, they run third-party code with registry network access, and can write to the project's shared cache.
 - **Egress proxy:** it is a CONNECT tunnel filtered by hostname. It does not inspect TLS.

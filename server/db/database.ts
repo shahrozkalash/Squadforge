@@ -1,6 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 // @ts-ignore - node:sqlite is built-in in Node.js 22
 import { DatabaseSync } from 'node:sqlite';
 
@@ -23,7 +24,8 @@ export class DatabaseManager {
 
     if (!requestedPath && isTest && !isProduction) {
       const tmpDir = os.tmpdir();
-      requestedPath = path.join(tmpDir, `squadforge-test-${process.pid}.db`);
+      // Process ids get reused, and a leftover file would carry an old migration history
+      requestedPath = path.join(tmpDir, `squadforge-test-${process.pid}-${crypto.randomUUID()}.db`);
     }
 
     if (requestedPath === ':memory:' || dbPath === ':memory:') {
@@ -913,6 +915,13 @@ export class DatabaseManager {
             );
             CREATE INDEX IF NOT EXISTS idx_preview_sessions_session ON preview_sessions(session_id);
           `);
+        }
+      },
+      {
+        id: 12,
+        name: '012_preview_relay_token',
+        up: (db: DatabaseSync) => {
+          db.exec(`ALTER TABLE preview_sessions ADD COLUMN relay_token TEXT;`);
         }
       }
     ];

@@ -145,7 +145,14 @@ export class ApprovalGateService {
   static requestForActions(
     buildId: string,
     userId: string,
-    params: { agent: string; actions: Array<{ [key: string]: any }>; runId?: string; taskId?: string }
+    params: {
+      agent: string;
+      actions: Array<{ [key: string]: any }>;
+      runId?: string;
+      taskId?: string;
+      /** Tasks from the same response. They are created only if the owner approves. */
+      followUpTasks?: Array<{ [key: string]: any }>;
+    }
   ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
     const fingerprints = this.fingerprintActions(params.actions);
     const sensitive = Object.keys(fingerprints).filter(p => this.isSensitiveFilePath(p));
@@ -170,16 +177,19 @@ export class ApprovalGateService {
       operationType: 'security_sensitive_change',
       explanation: `Generated code changes sensitive files: ${sensitive.join(', ')}`,
       affectedFiles: sensitive,
-      proposedChanges: this.describeActions(params.actions),
+      proposedChanges: [
+        this.describeActions(params.actions),
+        ...(params.followUpTasks || []).map(task => `--- New task: ${task.title}\n${task.description || ''}`)
+      ].join('\n\n'),
       contentHashes,
-      proposedActions: params.actions.map(action => {
+      proposedActions: [...params.actions.map(action => {
         if (action.action !== 'patch_file') return action;
         const path = this.normalizePath(action.path);
         if (versionChecked.has(path)) return action;
         versionChecked.add(path);
         const file = db.getFile(buildId, path);
         return file ? { ...action, expectedVersion: file.version } : action;
-      }),
+      }), ...(params.followUpTasks || [])],
       riskLevel: 'high'
     });
   }

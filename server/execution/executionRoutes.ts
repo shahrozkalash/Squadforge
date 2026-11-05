@@ -69,7 +69,7 @@ export function createExecutionRouter(deps: RouteDependencies): express.Router {
   router.get('/sessions/:sessionId', owned((build, req) => ({
     session: requireOwnSession(build, req.params.sessionId),
     installs: db.getDependencyInstalls(req.params.sessionId),
-    previews: db.getActivePreviews(req.params.sessionId).map(({ tokenHash, cookieHash, ...preview }) => preview)
+    previews: db.getActivePreviews(req.params.sessionId).map(({ tokenHash, cookieHash, relayToken, ...preview }) => preview)
   })));
 
   router.get('/sessions/:sessionId/logs', owned((build, req) => {
