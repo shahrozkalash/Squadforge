@@ -1,6 +1,6 @@
 # SquadForge Agent Guide
 
-Last inspected commit: `45078d4` on `feature/phase-11-debugging` (2026-11-05). Phases 9, 10, and 11 are accepted by the owner and merged to `main`. Update this with every handoff.
+Last inspected commit: `4e3b8fd` (the last code change, merged to `main`) (2026-11-05). Phases 9, 10, and 11 are accepted by the owner and merged to `main`. Update this with every handoff.
 
 This guide comes from the project owner's reconstructed handoff and from repository inspection. The original AI Studio prompt and chats are unavailable. Treat the handoff as stated intent, and check its claims against the code. When historical evidence is missing, document the uncertainty instead of inventing a decision.
 
@@ -60,7 +60,7 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 8 | Historically reported as accepted. Not independently re-verified. |
 | Phase 9 | Advanced Code Generation Engine. Accepted by the owner on 2026-11-05 at `e87efe8`, with the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. |
 | Phase 10 | Execution environment. Accepted by the owner on 2026-11-05 at `e87efe8`. Off by default and still not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
-| Phase 11 | Advanced Debugging and Self-Improvement. Accepted by the owner on 2026-11-05 at `708e761`. Most limitations were then fixed at `45078d4`. See `PHASE_11_ACCEPTANCE_REPORT.md`. |
+| Phase 11 | Advanced Debugging and Self-Improvement. Accepted by the owner on 2026-11-05 at `708e761`. Most limitations were then fixed, in two rounds. See `PHASE_11_ACCEPTANCE_REPORT.md`. |
 | Phase 12 | Do not start until the owner asks. |
 
 Later roadmap:

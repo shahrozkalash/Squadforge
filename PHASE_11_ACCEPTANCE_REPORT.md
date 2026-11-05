@@ -101,7 +101,7 @@ The reviewer found these sound: approval gating of all writes, repeated and cros
 
 ## Fixed after acceptance
 
-The owner asked for the limitations above to be fixed before merging. These changes came after acceptance at `708e761`, and were checked at `45078d4`.
+The owner asked for the limitations above to be fixed before merging. These changes came after acceptance at `708e761`. The first round was checked at `45078d4`, and a second round of smaller gaps at `4e3b8fd`. The results below are from `4e3b8fd`.
 
 ### Check results at `45078d4`
 
@@ -120,7 +120,7 @@ The largest gap is closed for a local model. Repairs ran through the real gatewa
 | Test | Result across all runs |
 | :--- | :--- |
 | Type error | Verified every time |
-| Missing export in another file | Verified in 5 of 6 runs. Bad patches were refused by validation, and the model used that feedback. The cause of the one failure was not captured, and it did not repeat in 3 more runs |
+| Missing export in another file | Verified in most runs. In the last 5 completed runs, 4 verified and 1 failed. Bad patches were refused by validation, and the model used that feedback. The cause of the failures was never captured |
 | Cancelling a real request | Passed every time, in about a second |
 
 No cloud provider has been tested, because no API key is available here. A 7B model is also weaker than the models this will normally use, so this shows the pipeline works, not how good cloud repairs will be.
@@ -169,20 +169,31 @@ The `invariant-reviewer` agent reviewed them three more times, covering everythi
 
 Chrome at `45078d4`: analyze, Repair all, the held approval state, Cancel, and history rows all worked with no console errors. In one earlier run on an older build, the panels came back empty after clicking a waiting repair. That did not repeat, and the cause is unknown. Approving from the Collaboration tab was not clicked in a browser, but the real Docker tests use that route.
 
+### Smaller gaps closed in the second round
+
+| Gap | Now |
+| :--- | :--- |
+| A crash caused by a request could look like a crash at start | Counts as a crash at start only if nothing outside the sandbox could have reached the session. Any preview or route check disqualifies it, and project output cannot fake or hide that record |
+| A route failure on a long-running session could pass on a fresh start | Such a failure is recorded as `HTTP_PROBE_WARM`, which never proves a fix. Only a failure on a session under 10 minutes old with no outside traffic can be proven |
+| A GET route with side effects could be called | Routes are also skipped when their handler code writes, such as `.save(`, `.delete(`, or `INSERT INTO` |
+| Cancelling a repair could remove the owner's session | A repair removes only a session it created. If the owner already ran a script in the session for this version, the repair stops with a message saying what to do, and leaves it alone |
+| The Debug tab could keep polling after a failed chain | It stops after 15 seconds |
+| Generic failure messages could match an old failure | "Test suite failed to run" is no longer used to excuse a failure |
+| Code generation's checks blocked the server | They run in the check process too. Finalization re-checks if the project changed during the check, and fails if it keeps changing |
+| A cancelled check waited its turn | It stops at once |
+
+Review of these found one blocker: code generation could have been finalized for files that changed while the check ran. It is fixed and tested. The review also found a session leak when a repair paused for a second approval. It is fixed and tested.
+
 ### What is still limited
 
 - No cloud provider has been tested.
 - Static checks cover JavaScript and TypeScript, and the sandbox runs only Node projects.
 - A reported problem can never reach `verified`, because nothing shows the same request failed in the sandbox. The same goes for failures only a non-GET request or a logged-in user can show.
-- A crash caused by a request within 15 seconds of start could look like a crash at start.
-- A route failure found on a long-running session could pass on a fresh start, because state is lost.
 - With no earlier test run to compare, any test failure still rolls back the repair.
-- Failures sharing a generic message, such as "Test suite failed to run", can match an old failure. The result is never `verified`.
-- The unsafe-route list is by name, so a GET route with side effects can still be called, inside the sandbox only.
+- Route checks skip handlers by name and by what their code visibly does. A GET route that changes things in another way can still be called, inside the sandbox only.
 - A script mentioned in `package.json` exempts that file from the browser dependency check. TypeScript's own import errors still apply.
-- Code generation's own checks still block the server. Only repair checks moved to a separate process.
-- Cancelling a repair removes a session it adopted, even one the owner created for the same workspace.
-- If a chained repair cannot start, the Debug tab keeps polling until the page is left.
+- One check at a time runs in the check process, so a large project queues behind another and can time out after 5 minutes. A timeout is reported as a failed check, never a pass.
+- A run whose approval expires while it is paused leaves its sandbox session to the idle reaper.
 - A real worker, TLS, and gVisor are still unverified, as in Phase 10.
 
 ### Decisions still open

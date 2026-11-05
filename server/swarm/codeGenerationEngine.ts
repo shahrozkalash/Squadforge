@@ -24,10 +24,14 @@ import { PromptCompiler } from './promptCompiler.js';
 import { IncrementalEditor } from './incrementalEditor.js';
 import { AutomaticRepairEngine } from './automaticRepairEngine.js';
 import { ExecutionAdapter } from './executionAdapter.js';
-import { IntegrationAgent } from './integrationAgent.js';
+import { IntegrationAnalysisReport } from './integrationAgent.js';
+import { runCheckTask } from '../debugging/staticChecks.js';
+import { hashWorkspace } from '../execution/workspaceMaterializer.js';
 import { MergeManager } from './mergeManager.js';
 import { ApprovalGateService } from './approvalGateService.js';
 import { ProjectMemoryService } from './projectMemory.js';
+
+const MAX_FINAL_CHECKS = 3;
 
 export interface CodeGenerationOptions {
   buildId: string;
@@ -402,7 +406,12 @@ export class CodeGenerationEngine {
       const pass3Start = Date.now();
 
       const postGenFiles = db.getAllFiles(buildId);
-      const integrationReport = IntegrationAgent.analyzeProjectContracts(postGenFiles);
+      const integrationReport = await runCheckTask<IntegrationAnalysisReport>(
+        'integration',
+        postGenFiles,
+        [],
+        signal
+      );
 
       if (!integrationReport.passed && integrationReport.issues.length > 0) {
         passes[2].diagnostics = integrationReport.issues.map(i => `[${i.severity.toUpperCase()}] ${i.sourceFile}: ${i.message}`);
@@ -434,7 +443,7 @@ export class CodeGenerationEngine {
       const pass4Start = Date.now();
 
       const currentFiles = db.getAllFiles(buildId);
-      const validationSnapshot = AutomaticRepairEngine.evaluateValidationDimensions(currentFiles, establishedContracts);
+      const validationSnapshot = await AutomaticRepairEngine.checkDimensions(currentFiles, establishedContracts, signal);
       const hasErrors = !validationSnapshot.clean;
 
       runRecord.validationResults = {
@@ -542,8 +551,7 @@ export class CodeGenerationEngine {
       const pass6Start = Date.now();
 
       // Finalization must strictly revalidate the latest workspace state directly from storage
-      const finalWorkspaceFiles = db.getAllFiles(buildId);
-      const finalVerification = AutomaticRepairEngine.evaluateValidationDimensions(finalWorkspaceFiles, establishedContracts);
+      const finalVerification = await this.checkStableWorkspace(buildId, establishedContracts, signal);
 
       runRecord.validationResults = {
         syntaxErrors: finalVerification.syntaxErrorsCount,
@@ -654,6 +662,20 @@ export class CodeGenerationEngine {
     } finally {
       this.activeRuns.delete(runId);
     }
+  }
+
+  /**
+   * The check runs in another process, so the workspace can change while it runs. A run is
+   * finalized only for files that were really checked, so a change means checking again.
+   */
+  private static async checkStableWorkspace(buildId: string, contracts: ProjectContract[], signal: AbortSignal) {
+    for (let attempt = 0; attempt < MAX_FINAL_CHECKS; attempt++) {
+      const files = db.getAllFiles(buildId);
+      const checked = hashWorkspace(files);
+      const verification = await AutomaticRepairEngine.checkDimensions(files, contracts, signal);
+      if (hashWorkspace(db.getAllFiles(buildId)) === checked) return verification;
+    }
+    throw new Error('The project kept changing during final validation, so it could not be finalized.');
   }
 
   /**

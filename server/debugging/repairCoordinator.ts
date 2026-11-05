@@ -49,6 +49,7 @@ const MAX_REPAIR_CHAIN = 5;
 const SERVER_SCRIPTS = ['dev', 'start', 'preview'];
 const SERVER_START_WAIT_MS = 20000;
 const MAX_START_CRASH_MS = 15000;
+const FRESH_SESSION_MS = 10 * 60 * 1000;
 
 export class RepairError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -671,6 +672,8 @@ export class RepairCoordinator {
   private crashLifetime(item: DebugDiagnostic): number | undefined {
     const session = item.sessionId ? db.getExecutionSession(item.sessionId) : undefined;
     if (!session?.startedAt || !session.stoppedAt || session.endReason !== 'failed') return undefined;
+    // The sandbox has no way in except the relay, so with no relay no request caused this
+    if (db.sessionWasReached(session.id)) return undefined;
     const lifetime = session.stoppedAt - session.startedAt;
     return lifetime <= MAX_START_CRASH_MS ? lifetime : undefined;
   }
@@ -720,7 +723,7 @@ export class RepairCoordinator {
       this.checkpoint(run, signal);
       console.error(`Repair ${run.id} could not run the project:`, err.message);
     } finally {
-      if (sessionId) await this.execution.destroySession(build.id, sessionId).catch(err => console.error('Proof session cleanup failed:', err.message));
+      if (sessionId) await this.releaseSession(run, build, sessionId);
     }
     return false;
   }
@@ -765,6 +768,7 @@ export class RepairCoordinator {
     const startedAt = Date.now();
     const lifetimes = targets.map(item => this.crashLifetime(item) ?? 0);
     await new Promise<void>(resolve => {
+      if (signal.aborted) return resolve();
       const timer = setTimeout(resolve, Math.max(this.settleMs, ...lifetimes.map(lifetime => lifetime * 2)));
       signal.addEventListener('abort', () => {
         clearTimeout(timer);
@@ -853,7 +857,7 @@ export class RepairCoordinator {
 
     // "FAIL src/a.test.ts" names a file, so a new failure in it would look like an old one
     const failures = DiagnosticCollector.testFailures(session, db.getAllFiles(run.buildId))
-      .filter(item => item.message !== `Test failed: ${item.filePath}`);
+      .filter(item => item.message !== `Test failed: ${item.filePath}` && !/failed to run/i.test(item.message));
     const before = new Set(run.report!.diagnostics.filter(item => item.kind === 'test').map(item => item.fingerprint));
     return failures.length > 0 &&
       failures.every(item => before.has(item.fingerprint) && !cause.fingerprints.includes(item.fingerprint));
@@ -985,7 +989,7 @@ export class RepairCoordinator {
       const finished = await this.waitForEnd(started.id);
       this.checkpoint(run, signal);
       const evidence = this.evidenceFrom(finished, scope, affected);
-      await this.execution.destroySession(build.id, finished.id).catch(err => console.error('Test session cleanup failed:', err.message));
+      await this.releaseSession(run, build, finished.id);
       return evidence;
     } catch (err: any) {
       if (err instanceof RepairCancelled) throw err;
@@ -996,19 +1000,24 @@ export class RepairCoordinator {
 
   /** Tests need a session of their own with dependencies in place. */
   private async prepareSession(run: RepairRun, build: Build, user: User, files: ProjectFile[], signal: AbortSignal) {
-    const remember = (activeSessionId: string) => this.update(run, { activeSessionId });
+    const hash = hashWorkspace(files);
+    const existing = db.getLiveExecutionSessions().find(item => item.buildId === build.id && item.workspaceHash === hash)?.id;
+    const remember = (activeSessionId: string, activeSessionOwned: boolean) => this.update(run, { activeSessionId, activeSessionOwned });
 
     let session = await this.execution.createSession(build, user);
     if (isApprovalRequired(session)) return session;
-    remember(session.id);
+    // A run that paused for an approval finds its own session again, and it is still its own
+    const owned = session.id !== existing || (session.id === run.activeSessionId && Boolean(run.activeSessionOwned));
+    remember(session.id, owned);
 
     // An approved workspace can already have a used session, which cannot give trusted results
     if (session.script) {
+      if (!owned) throw new RepairError('A session that already ran a script is using this version. Delete it in the Run tab, then check this repair again.', 409);
       if (session.status !== 'ready') throw new RepairError('This workspace is busy running another script.', 409);
       await this.execution.destroySession(build.id, session.id);
       session = await this.execution.createSession(build, user);
       if (isApprovalRequired(session)) return session;
-      remember(session.id);
+      remember(session.id, true);
     }
 
     this.checkpoint(run, signal);
@@ -1024,6 +1033,12 @@ export class RepairCoordinator {
       return installed;
     }
     return session;
+  }
+
+  /** Removes a session this run created. One the owner already had stays theirs. */
+  private async releaseSession(run: RepairRun, build: Build, sessionId: string): Promise<void> {
+    if (!run.activeSessionOwned) return;
+    await this.execution.destroySession(build.id, sessionId).catch(err => console.error('Session cleanup failed:', err.message));
   }
 
   /** The process handle ends slightly before its session record is saved. */
@@ -1293,7 +1308,7 @@ export class RepairCoordinator {
     const sessionId = run.activeSessionId || run.verification?.tests.sessionId;
     if (sessionId) await this.execution.stop(build, sessionId).catch(() => undefined);
     await active?.done;
-    if (sessionId) await this.execution.destroySession(build.id, sessionId).catch(() => undefined);
+    if (sessionId) await this.releaseSession(db.getRepairRun(run.id)!, build, sessionId);
     return db.getRepairRun(run.id)!;
   }
 
@@ -1322,8 +1337,10 @@ export class RepairCoordinator {
       throw new RepairError('That session runs an older version of the project.', 409);
     }
     const routes = detectGetRoutes(files);
+    // Requests and time build up state that a fresh start would not have
+    const fresh = !db.sessionHadPreview(session.id) && Date.now() - (session.startedAt ?? 0) <= FRESH_SESSION_MS;
     const results = await this.execution.probeHttp(build, session.id, routes.map(route => route.path));
-    return DiagnosticCollector.fromProbes(results, session, routes);
+    return DiagnosticCollector.fromProbes(results, session, routes, fresh);
   }
 
   /** Off unless REPAIR_AUTO_START=true, because each repair spends model tokens. */

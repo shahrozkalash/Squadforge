@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { db } from '../store.js';
+import { ROUTE_CHECK_LOG, db } from '../store.js';
 import {
   Build,
   DependencyInstallRecord,
@@ -605,6 +605,8 @@ export class ExecutionSessionManager {
       throw new ExecutionError('The project is not running.', 409);
     }
     const safePaths = paths.filter(path => /^\/(?!\/)[\w./~-]*$/.test(path)).slice(0, MAX_PROBES);
+    // Written directly, because the log limit must not be able to hide this
+    db.appendExecutionLog(session.buildId, { sessionId: session.id, stream: 'system', text: ROUTE_CHECK_LOG, createdAt: Date.now() });
 
     const open = db.getActivePreviews(session.id)[0];
     let endpoint: PreviewEndpoint | undefined = open && { host: open.relayHost, port: open.relayPort, token: open.relayToken };

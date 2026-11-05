@@ -425,9 +425,9 @@ describe('Phase 9 cancellation', () => {
 describe('Phase 9 finalization', () => {
   test('finalization rejects a defect that appears after validation passed', async (t) => {
     const buildId = makeBuild('late_defect');
-    const evaluate = AutomaticRepairEngine.evaluateValidationDimensions.bind(AutomaticRepairEngine);
+    const evaluate = AutomaticRepairEngine.checkDimensions.bind(AutomaticRepairEngine);
     let calls = 0;
-    t.mock.method(AutomaticRepairEngine, 'evaluateValidationDimensions', (files: any[], contracts: any[]) => {
+    t.mock.method(AutomaticRepairEngine, 'checkDimensions', (files: any[], contracts: any[]) => {
       calls += 1;
       if (calls === 1) return evaluate(files, contracts);
       return evaluate([...files, {

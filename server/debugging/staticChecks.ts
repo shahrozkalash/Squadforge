@@ -2,10 +2,12 @@ import { ChildProcess, fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { DebugDiagnostic, DiagnosticCheck, ProjectContract, ProjectFile } from '../types.js';
 
-const CHECK_TIMEOUT_MS = 120000;
+const CHECK_TIMEOUT_MS = 300000;
 const IDLE_EXIT_MS = 30000;
 const WORKER_PATH = fileURLToPath(new URL('./staticCheckWorker.ts', import.meta.url));
 const PASSED_ENV = ['PATH', 'Path', 'SystemRoot', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE'];
+
+type CheckTask = 'static' | 'dimensions' | 'integration';
 
 export interface StaticCheckResult {
   diagnostics: DebugDiagnostic[];
@@ -60,8 +62,8 @@ class StaticCheckRunner {
     if (this.worker === worker) this.worker = undefined;
   }
 
-  private execute(buildId: string, files: ProjectFile[], contracts: ProjectContract[], signal?: AbortSignal) {
-    return new Promise<StaticCheckResult>((resolve, reject) => {
+  private execute<T>(task: CheckTask, buildId: string, files: ProjectFile[], contracts: ProjectContract[], signal?: AbortSignal) {
+    return new Promise<T>((resolve, reject) => {
       if (signal?.aborted) return reject(new Error('Checks cancelled'));
       clearTimeout(this.idleTimer);
 
@@ -93,16 +95,24 @@ class StaticCheckRunner {
       worker.once('exit', onExit);
       worker.once('error', onError);
       signal?.addEventListener('abort', onAbort, { once: true });
-      worker.send({ id, buildId, contracts, files: files.map(({ path, content }) => ({ path, content })) }, err => {
+      worker.send({ id, task, buildId, contracts, files }, err => {
         if (err) onError(err);
       });
     });
   }
 
-  run(buildId: string, files: ProjectFile[], contracts: ProjectContract[], signal?: AbortSignal): Promise<StaticCheckResult> {
-    const task = this.queue.then(() => this.execute(buildId, files, contracts, signal));
+  run<T>(kind: CheckTask, buildId: string, files: ProjectFile[], contracts: ProjectContract[], signal?: AbortSignal): Promise<T> {
+    // The store's objects change in place, so the files are copied when the check is asked for
+    const snapshot = files.map(({ history, ...file }) => file as ProjectFile);
+    const task = this.queue.then(() => this.execute<T>(kind, buildId, snapshot, contracts, signal));
     this.queue = task.catch(() => undefined);
-    return task;
+    if (!signal) return task;
+
+    // A cancelled check must not wait for its turn in the queue
+    const cancelled = new Promise<never>((_, reject) => {
+      signal.addEventListener('abort', () => reject(new Error('Checks cancelled')), { once: true });
+    });
+    return Promise.race([task, cancelled]);
   }
 }
 
@@ -114,5 +124,10 @@ export function runStaticChecks(
   contracts: ProjectContract[] = [],
   signal?: AbortSignal
 ): Promise<StaticCheckResult> {
-  return runner.run(buildId, files, contracts, signal);
+  return runner.run('static', buildId, files, contracts, signal);
+}
+
+/** Runs one named check set in the check process, so a slow type check holds nothing up. */
+export function runCheckTask<T>(task: CheckTask, files: ProjectFile[], contracts: ProjectContract[] = [], signal?: AbortSignal): Promise<T> {
+  return runner.run<T>(task, '', files, contracts, signal);
 }

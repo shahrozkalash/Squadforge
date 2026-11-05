@@ -414,7 +414,12 @@ export class DiagnosticCollector {
   }
 
   /** A failed call to a running project. This is direct evidence, not parsed output. */
-  static fromProbes(results: HttpProbeResult[], session: Pick<ExecutionSession, 'id' | 'script'>, routes: Array<{ path: string; filePath: string }>) {
+  static fromProbes(
+    results: HttpProbeResult[],
+    session: Pick<ExecutionSession, 'id' | 'script'>,
+    routes: Array<{ path: string; filePath: string }>,
+    fresh: boolean
+  ) {
     return results
       .filter(result => result.status === undefined || result.status >= 500)
       .map(result => diagnostic({
@@ -422,7 +427,7 @@ export class DiagnosticCollector {
         source: 'sandbox',
         sessionId: session.id,
         script: session.script,
-        code: 'HTTP_PROBE',
+        code: fresh ? 'HTTP_PROBE' : 'HTTP_PROBE_WARM',
         message: `GET ${result.path} ${result.status === undefined ? `failed: ${result.error}` : `returned ${result.status}`}`,
         filePath: routes.find(route => route.path === result.path)?.filePath
       }));

@@ -1,6 +1,6 @@
 # Phase 11 Progress: Advanced Debugging and Self-Improvement
 
-**Status:** Accepted by the owner on 2026-11-05 at `708e761`, with the limitations in `PHASE_11_ACCEPTANCE_REPORT.md`. Most were fixed afterwards, at `45078d4`, and the tables below are from `708e761`. See "Fixed after acceptance" in that report.
+**Status:** Accepted by the owner on 2026-11-05 at `708e761`, with the limitations in `PHASE_11_ACCEPTANCE_REPORT.md`. Most were fixed afterwards, in two rounds, and the tables below are from `708e761`. See "Fixed after acceptance" in that report.
 **Assessed commit:** `708e761` on `feature/phase-11-debugging`
 **Date:** 2026-11-05
 

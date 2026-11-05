@@ -70,6 +70,9 @@ interface ClientSSEListener {
 const DATA_FILE = path.resolve(process.cwd(), '.squadforge_data.json');
 const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
+/** Logged by a route check. Project output cannot write to the system stream. */
+export const ROUTE_CHECK_LOG = 'Route check started.\n';
+
 export function safeJsonParse<T>(value: any, fallback: T): T {
   if (value === null || value === undefined || value === '') return fallback;
   if (typeof value === 'object') return value;
@@ -4732,6 +4735,19 @@ export class PersistentDatabase {
   public getPreviewSession(id: string): PreviewSession | undefined {
     const row = this.dbManager.db.prepare('SELECT * FROM preview_sessions WHERE id = ?').get(id);
     return row ? this.mapPreviewSession(row) : undefined;
+  }
+
+  /** A preview is the only way a person's requests reach a sandbox process. */
+  public sessionHadPreview(sessionId: string): boolean {
+    return Boolean(this.dbManager.db.prepare('SELECT 1 FROM preview_sessions WHERE session_id = ? LIMIT 1').get(sessionId));
+  }
+
+  /** Whether anything outside the sandbox could have sent this session a request. */
+  public sessionWasReached(sessionId: string): boolean {
+    if (this.sessionHadPreview(sessionId)) return true;
+    return Boolean(this.dbManager.db.prepare(
+      `SELECT 1 FROM execution_logs WHERE session_id = ? AND stream = 'system' AND text = ? LIMIT 1`
+    ).get(sessionId, ROUTE_CHECK_LOG));
   }
 
   public getActivePreviews(sessionId?: string): PreviewSession[] {
