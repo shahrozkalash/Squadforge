@@ -1,6 +1,6 @@
 # SquadForge Agent Guide
 
-Last inspected commit: `88c1336` (2026-11-05). Phases 9 and 10 are on `main`. Update this with every handoff.
+Last inspected commit: `e87efe8` (2026-11-05). Phases 9 and 10 are on `main` and accepted by the owner. Update this with every handoff.
 
 This guide comes from the project owner's reconstructed handoff and from repository inspection. The original AI Studio prompt and chats are unavailable. Treat the handoff as stated intent, and check its claims against the code. When historical evidence is missing, document the uncertainty instead of inventing a decision.
 
@@ -56,8 +56,8 @@ These are proposed by the handoff and still need confirming against the code.
 | Phases 1-6 | Original specs unavailable. Reconstruct them from commits, tests, and code, and separate original requirements from inferred behavior. |
 | Phase 7 | Universal Software Architecture Engine. `tests/phase7_project_export_verification.test.ts` suggests phase numbering may be inconsistent. |
 | Phase 8 | Historically reported as accepted. Not independently re-verified. |
-| Phase 9 | Advanced Code Generation Engine. Merged to `main` at the user's request. Formal owner acceptance is still open. See `PHASE_9_ACCEPTANCE_REPORT.md`. |
-| Phase 10 | Execution environment. Merged to `main` at the user's request, off by default, and not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
+| Phase 9 | Advanced Code Generation Engine. Accepted by the owner on 2026-11-05 at `e87efe8`, with the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. |
+| Phase 10 | Execution environment. Accepted by the owner on 2026-11-05 at `e87efe8`. Off by default and still not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
 | Phase 11 | Do not start until the owner asks. |
 
 Later roadmap:
@@ -78,10 +78,9 @@ The lockfile was added and deleted repeatedly on `main` before Phase 10, and the
 
 ## Open work
 
-1. Get the owner's acceptance decisions for Phases 9 and 10.
-2. Test cancellation against a real provider.
-3. Run the sandbox tests on a real worker, with TLS and gVisor.
-4. Decide on guest execution, the worker, and the preview domain.
+1. Test cancellation against a real provider.
+2. Run the sandbox tests on a real worker, with TLS and gVisor.
+3. Decide on guest execution, the worker, and the preview domain.
 
 ## Fragile areas
 

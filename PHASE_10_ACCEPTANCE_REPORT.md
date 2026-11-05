@@ -1,6 +1,7 @@
 # Phase 10 Acceptance Report
 
-**Recommendation:** Do not use in production yet. Suitable for development and evaluation on a trusted Docker host. It is merged to `main` but off by default. Acceptance is the project owner's decision.
+**Status:** Accepted by the project owner on 2026-11-05 at `e87efe8`, with the limitations below. The owner decisions and production steps at the end of this report are still open.
+**Recommendation:** Do not use in production yet. Suitable for development and evaluation on a trusted Docker host. It is merged to `main` but off by default.
 **Assessed commit:** the commit that merged Phases 9 and 10 to `main`
 **Date:** 2026-11-05
 

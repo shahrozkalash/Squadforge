@@ -1,6 +1,6 @@
 # Phase 9 Progress: Advanced Code Generation Engine
 
-**Status:** Fixes complete except for the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. Formal acceptance is the owner's decision.
+**Status:** Accepted by the owner on 2026-11-05 at `e87efe8`, with the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`.
 **Latest assessment:** see `PHASE_9_ACCEPTANCE_REPORT.md`. The tables below were recorded at `472de53`, and several limitations listed here have since been fixed there.
 **Date:** 2026-11-04
 
@@ -69,9 +69,7 @@ Running the new test file against the previous code gave 9 failures and 4 cancel
 - Cancelling a run leaves its pending approval requests pending, and approving one later still unlocks the file for other runs.
 - No run resumes automatically after an approval is granted.
 
-## Remaining before acceptance
+## Remaining after acceptance
 
-1. Resolve the open review findings in `PHASE_9_ACCEPTANCE_REPORT.md`, starting with F4.
-2. Test cancellation against a real provider.
-3. Find out what keeps deleting `package-lock.json`, and decide whether the lockfile should support Windows.
-4. Get the owner's acceptance decision.
+1. Test cancellation against a real provider.
+2. Find out what keeps deleting `package-lock.json`, and decide whether the lockfile should support Windows.

@@ -1,6 +1,6 @@
 # Phase 9 Acceptance Report
 
-**Status:** Fixes complete except for the items listed below. Formal acceptance is the project owner's decision.
+**Status:** Accepted by the project owner on 2026-11-05 at `e87efe8`, with the limitations listed below.
 **Assessed commit:** the commit that merged Phases 9 and 10 to `main`
 **Date:** 2026-11-05
 
