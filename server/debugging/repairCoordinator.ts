@@ -764,7 +764,13 @@ export class RepairCoordinator {
     }
     const startedAt = Date.now();
     const lifetimes = targets.map(item => this.crashLifetime(item) ?? 0);
-    await new Promise(resolve => setTimeout(resolve, Math.max(this.settleMs, ...lifetimes.map(lifetime => lifetime * 2))));
+    await new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, Math.max(this.settleMs, ...lifetimes.map(lifetime => lifetime * 2)));
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        resolve();
+      }, { once: true });
+    });
     this.checkpoint(run, signal);
 
     const wanted = [...targets.map(item => apiPath(item.message)).filter((path): path is string => Boolean(path)), ...detectGetRoutes(files).map(route => route.path)];
@@ -886,9 +892,11 @@ export class RepairCoordinator {
       const runtime = run.verification!.runtime;
       const path = item.kind === 'api' ? apiPath(item.message) : undefined;
       const probe = path ? runtime?.probes.find(result => result.path === path) : undefined;
-      // 401 and 404 show nothing, and a dev server answers 200 for routes that no longer exist
+      // 401 and 404 show nothing, and a dev server answers 200 for routes that no longer exist.
+      // A 200 also proves a fix only if this same call failed before, so a report never qualifies:
+      // it may have needed a login or some data that the sandbox does not have.
       const answered = probe?.status !== undefined && probe.status >= 200 && probe.status < 300;
-      if (answered && routes.includes(path!)) return false;
+      if (item.code === 'HTTP_PROBE' && answered && routes.includes(path!)) return false;
 
       if (item.source === 'reported') return true;
 
@@ -1285,6 +1293,7 @@ export class RepairCoordinator {
     const sessionId = run.activeSessionId || run.verification?.tests.sessionId;
     if (sessionId) await this.execution.stop(build, sessionId).catch(() => undefined);
     await active?.done;
+    if (sessionId) await this.execution.destroySession(build.id, sessionId).catch(() => undefined);
     return db.getRepairRun(run.id)!;
   }
 

@@ -1602,12 +1602,12 @@ describe('Phase 11: limitation fixes', () => {
     assert.equal(content(build, 'src/app.ts'), serverProject['src/app.ts']);
   });
 
-  test('a reported API failure is proven only by a real call to that route', async t => {
+  test('a report is never proven by a call, because it may have needed a login', async t => {
     const owner = makeUser('apiproof');
     const reports = [{ kind: 'api' as const, message: 'GET /api/users returned 500', filePath: 'src/app.ts' }];
     const patch = () => fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;');
 
-    for (const [status, expected] of [[200, 'verified'], [500, 'rolled_back']] as const) {
+    for (const [status, expected] of [[200, 'applied_unverified'], [500, 'rolled_back']] as const) {
       const build = await makeBuild(owner, serverProject);
       t.mock.restoreAll();
       scriptAgents(t, { patches: [patch()] });
@@ -1622,6 +1622,34 @@ describe('Phase 11: limitation fixes', () => {
         assert.equal(finished.status, expected, finished.outcome);
       });
     }
+  });
+
+  test('a failure found by calling the route is proven by the same call', async t => {
+    const owner = makeUser('probeproof');
+    const build = await makeBuild(owner, serverProject);
+    const backend = new FakeBackend();
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 10 });
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    let status = 500;
+
+    await withRelay(backend, () => status, async () => {
+      const first = await manager.createSession(build, owner);
+      assert.ok('approvalRequired' in first);
+      decide(build, owner, first.approvalRequired.id, true);
+      const created = await manager.createSession(build, owner);
+      assert.ok('id' in created);
+      await manager.startScript(build, created.id, 'start');
+
+      const held = await repair(repairs, build, owner, { probeSessionId: created.id });
+      assert.equal(held.status, 'awaiting_test_approval', held.outcome);
+      assert.equal(held.report?.diagnostics[0].code, 'HTTP_PROBE');
+
+      status = 200;
+      await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+      const finished = (await repairs.settled(held.id))!;
+      assert.equal(finished.status, 'verified', finished.outcome);
+    });
   });
 
   test('other request methods are never called, so such a report stays unproven', async t => {

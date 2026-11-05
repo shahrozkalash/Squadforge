@@ -249,7 +249,7 @@ export class RepairPatchValidator {
 
     // Garbled code hides errors in its own file. Anything new elsewhere came from the patch
     const couldBeHidden = (item: DebugDiagnostic) => {
-      const lines = item.filePath ? ranges.get(item.filePath) : undefined;
+      const lines = item.filePath === cause.primaryFile && item.filePath ? ranges.get(item.filePath) : undefined;
       if (!lines || lines === 'whole_file' || (item.kind !== 'type' && item.kind !== 'integration')) return false;
       // With no line it cannot be pinned on the patch, and being revealed still blocks verified
       return item.line === undefined || !lines.some(([from, to]) => item.line! >= from && item.line! <= to);

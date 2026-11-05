@@ -69,8 +69,10 @@ export const DebuggingView: React.FC = () => {
   const [error, setError] = useState('');
 
   const base = activeBuild ? `/api/builds/${activeBuild.id}/debugging` : '';
-  const selected = repairs.find(run => run.id === selectedId) ?? repairs[0];
-  const hasOpenRepair = repairs.some(run => WORKING.has(run.status) || WAITING.has(run.status));
+  const openRepair = repairs.find(run => WORKING.has(run.status) || WAITING.has(run.status));
+  const hasOpenRepair = Boolean(openRepair);
+  // Repair all starts new runs by itself, and the one needing attention must be the one shown
+  const selected = repairs.find(run => run.id === selectedId) ?? openRepair ?? repairs[0];
 
   const refresh = useCallback(async () => {
     if (!base) return;
@@ -103,7 +105,8 @@ export const DebuggingView: React.FC = () => {
   }, [refresh]);
 
   useEffect(() => {
-    if (!repairs.some(run => WORKING.has(run.status))) return;
+    const chainContinues = repairs[0]?.repairAll && repairs[0].status === 'verified' && (repairs[0].chainDepth ?? 0) < 4;
+    if (!repairs.some(run => WORKING.has(run.status)) && !chainContinues) return;
     const timer = setInterval(() => refresh().catch(() => undefined), POLL_MS);
     return () => clearInterval(timer);
   }, [repairs, refresh]);
@@ -116,7 +119,7 @@ export const DebuggingView: React.FC = () => {
 
   const startRepair = (options: { rootCauseId?: string; repairAll?: boolean }) => act(async () => {
     const result = await request<{ repair: RepairRun }>(`${base}/repairs`, 'POST', options);
-    setSelectedId(result.repair.id);
+    setSelectedId(options.repairAll ? null : result.repair.id);
   });
 
   /** Adds real calls to the running app to the analysis. */
