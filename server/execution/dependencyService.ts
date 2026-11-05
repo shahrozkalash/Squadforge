@@ -99,6 +99,21 @@ export function buildInstallCommand(
   ];
 }
 
+/** Script name of a scoped test run. It never counts as a run of the whole test suite. */
+export const AFFECTED_TEST_SCRIPT = 'test:affected';
+
+/**
+ * Arguments that limit a test script to some files, or null when that cannot be done safely.
+ * A compound script would pass them to its last command, so it runs in full instead.
+ */
+export function affectedTestArgs(definition: string, testFiles: string[]): string[] | null {
+  if (testFiles.length === 0 || /[;&|]/.test(definition)) return null;
+  if (!testFiles.every(file => /^[\w][\w./-]*$/.test(file))) return null;
+  if (/\bvitest\b/.test(definition)) return ['--run', ...testFiles];
+  if (/\bjest\b/.test(definition)) return ['--runTestsByPath', ...testFiles];
+  return null;
+}
+
 /** Finds packages a project failed to load, from real process output. */
 export function detectMissingModules(output: string): string[] {
   const missing = new Set<string>();

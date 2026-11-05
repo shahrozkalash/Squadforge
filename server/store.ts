@@ -55,6 +55,7 @@ import type {
   DependencyInstallRecord,
   ExecutionLogEntry,
   ExecutionSession,
+  RepairRun,
   PreviewSession
 } from './types.js';
 import { DatabaseManager } from './db/database.js';
@@ -877,7 +878,8 @@ export class PersistentDatabase {
             const error = `Ambiguity: "find" text appears ${occurrences} times in ${cleanPath}. Provide more surrounding context lines in "find".`;
             return { success: false, filePath: cleanPath, error, currentContent: content };
           }
-          content = content.replace(edit.find, edit.replace);
+          // A function keeps $& and $' in the new text literal
+          content = content.replace(edit.find, () => edit.replace);
         }
 
         const byteLength = Buffer.byteLength(content, 'utf-8');
@@ -1286,7 +1288,13 @@ export class PersistentDatabase {
           } else if (item.action === 'patch_file') {
             res = this.applyPatchAtomic(buildId, modelId, item as any, maxFileSize);
           } else if (item.action === 'delete_file') {
-            res = this.deleteFileAtomic(buildId, modelId, (item as any).path);
+            const expected = (item as any).expectedVersion;
+            const row = expected === undefined ? undefined : this.dbManager.db.prepare(
+              'SELECT version FROM project_files WHERE build_id = ? AND path = ?'
+            ).get(buildId, (item as any).path) as any;
+            res = expected !== undefined && row?.version !== expected
+              ? { success: false, error: `Version conflict: ${(item as any).path} is no longer at v${expected}.` }
+              : this.deleteFileAtomic(buildId, modelId, (item as any).path);
           } else if (item.action === 'rename_file') {
             res = this.renameFileAtomic(buildId, modelId, (item as any).oldPath, (item as any).newPath, (item as any).commitMessage, (item as any).taskId);
           } else if (item.action === 'create_task') {
@@ -4877,6 +4885,41 @@ export class PersistentDatabase {
 
   public getGenerationRunsByBuild(buildId: string): CodeGenerationRun[] {
     return this.getGenerationRuns(buildId);
+  }
+
+  // --- Repair runs (Phase 11) ---
+
+  /** Cancelled is terminal except for rollback, so a late writer cannot revive a run. */
+  public saveRepairRun(run: RepairRun): RepairRun {
+    const stored = this.getRepairRun(run.id);
+    const next: RepairRun = stored?.status === 'cancelled' && run.status !== 'rolled_back'
+      ? { ...run, status: 'cancelled', outcome: stored.outcome, completedAt: stored.completedAt }
+      : run;
+    next.updatedAt = Date.now();
+
+    this.dbManager.db.prepare(`
+      INSERT OR REPLACE INTO repair_runs (id, build_id, user_id, status, data, created_at, updated_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      next.id, next.buildId, next.userId, next.status, JSON.stringify(next),
+      next.createdAt, next.updatedAt, next.completedAt ?? null
+    );
+    this.broadcast(next.buildId, 'repair_run_updated', { id: next.id, status: next.status });
+    return next;
+  }
+
+  public getRepairRun(id: string): RepairRun | undefined {
+    const row = this.dbManager.db.prepare('SELECT data FROM repair_runs WHERE id = ?').get(id) as any;
+    return row ? safeJsonParse<RepairRun | undefined>(row.data, undefined) : undefined;
+  }
+
+  public getRepairRuns(buildId: string, limit = 50): RepairRun[] {
+    const rows = this.dbManager.db.prepare(
+      'SELECT data FROM repair_runs WHERE build_id = ? ORDER BY created_at DESC LIMIT ?'
+    ).all(buildId, limit) as any[];
+    return rows
+      .map(row => safeJsonParse<RepairRun | undefined>(row.data, undefined))
+      .filter((run): run is RepairRun => Boolean(run));
   }
 }
 

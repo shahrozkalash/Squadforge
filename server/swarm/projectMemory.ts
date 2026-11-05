@@ -19,8 +19,12 @@ import {
   TargetPlatform,
   ConfirmedRequirement,
   TechnicalAssumption,
-  UnresolvedQuestion
+  UnresolvedQuestion,
+  RepairLesson
 } from '../types.js';
+
+const REPAIR_LESSON_PREFIX = 'repair-lesson:';
+const MAX_REPAIR_LESSONS = 50;
 
 export type { ArchitectureDecision, ADRStatus, ADRHistoryEntry, RequirementItem, ProjectRevision };
 
@@ -1106,6 +1110,15 @@ export class ProjectMemoryService {
       sections.push(`ACTIVE DEFECTS TO REMEDY:\n${defectLines.join('\n')}`);
     }
 
+    // Agents editing these files learn from repairs this project has already tried
+    const lessons = this.getRepairLessons(buildId, userId, { files: task.filePaths }).slice(0, 4);
+    if (lessons.length > 0) {
+      const lessonLines = lessons.map(lesson =>
+        `- [${lesson.outcome === 'verified' ? 'VERIFIED FIX' : 'FAILED APPROACH'}] ${lesson.summary}`
+      );
+      sections.push(`REPAIR HISTORY:\n${lessonLines.join('\n')}`);
+    }
+
     // 5. Confirmed Facts (Prioritized: user_revision > user_prompt > architect)
     const confirmedFacts = memory.facts
       .filter(f => f.confidence === 'confirmed' && !f.statement.startsWith('[SUPERSEDED'))
@@ -1469,6 +1482,81 @@ export class ProjectMemoryService {
     db.saveKnowledgeItem(newItem);
 
     return { success: true, newItem };
+  }
+
+  /**
+   * Remembers how a repair ended. Lessons live in this project's knowledge, so another
+   * project or user never sees them. Seeing the same lesson again strengthens it.
+   */
+  static recordRepairLesson(
+    buildId: string,
+    userId: string,
+    lesson: Omit<RepairLesson, 'id' | 'timesSeen' | 'createdAt'>
+  ): RepairLesson | null {
+    const build = db.getBuild(buildId);
+    if (!build || build.userId !== userId) return null;
+
+    const category = lesson.outcome === 'verified' ? 'reusable_solution' : 'known_limitation';
+    const key = lesson.patchFingerprint || lesson.fingerprints[0] || lesson.repairId;
+    const title = `${REPAIR_LESSON_PREFIX}${lesson.outcome}:${key}`;
+
+    const existing = db.getKnowledgeItems(buildId, { category, status: 'active' }).find(item => item.title === title);
+    if (existing) {
+      const parsed = this.parseRepairLesson(existing);
+      if (!parsed) return null;
+      const updated = { ...parsed, timesSeen: parsed.timesSeen + 1, evidence: lesson.evidence };
+      db.saveKnowledgeItem({ ...existing, content: JSON.stringify(updated), updatedAt: Date.now() });
+      return updated;
+    }
+
+    const created = this.recordKnowledgeItem(buildId, userId, {
+      sourceAgent: 'repair_coordinator',
+      sourceRole: 'debugging_specialist',
+      category,
+      title,
+      content: JSON.stringify({ ...lesson, timesSeen: 1, createdAt: Date.now() }),
+      relevantFiles: lesson.files
+    });
+    return created.item ? this.parseRepairLesson(created.item) : null;
+  }
+
+  private static parseRepairLesson(item: import('../types.js').SharedKnowledgeItem): RepairLesson | null {
+    if (!item.title.startsWith(REPAIR_LESSON_PREFIX)) return null;
+    try {
+      return { ...JSON.parse(item.content), id: item.id };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Reads this project's lessons, newest first. A non-owner gets nothing. */
+  static getRepairLessons(
+    buildId: string,
+    userId: string,
+    filter: { fingerprints?: string[]; files?: string[] } = {}
+  ): RepairLesson[] {
+    const build = db.getBuild(buildId);
+    if (!build || build.userId !== userId) return [];
+
+    return db.getKnowledgeItems(buildId, { status: 'active', search: REPAIR_LESSON_PREFIX })
+      .map(item => this.parseRepairLesson(item))
+      .filter((lesson): lesson is RepairLesson => Boolean(lesson))
+      .filter(lesson => !filter.fingerprints || lesson.fingerprints.some(print => filter.fingerprints!.includes(print)))
+      .filter(lesson => !filter.files || lesson.files.some(file => filter.files!.includes(file)))
+      .slice(0, MAX_REPAIR_LESSONS);
+  }
+
+  /** A repair that was rolled back no longer counts as a verified fix. */
+  static retractRepairLessons(buildId: string, userId: string, repairId: string): number {
+    const build = db.getBuild(buildId);
+    if (!build || build.userId !== userId) return 0;
+
+    const verified = db.getKnowledgeItems(buildId, { category: 'reusable_solution', status: 'active' })
+      .filter(item => this.parseRepairLesson(item)?.repairId === repairId);
+    for (const item of verified) {
+      db.saveKnowledgeItem({ ...item, status: 'superseded', supersedeReason: 'The repair was rolled back', updatedAt: Date.now() });
+    }
+    return verified.length;
   }
 
   /**

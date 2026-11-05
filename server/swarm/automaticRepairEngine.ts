@@ -16,6 +16,7 @@ import { PromptCompiler } from './promptCompiler.js';
 import { GenerationProfileRegistry } from './generationProfiles.js';
 import { ProjectContextEngine } from './projectContextEngine.js';
 import { ApprovalGateService } from './approvalGateService.js';
+import { RepairPatchValidator } from '../debugging/repairPatchValidator.js';
 
 export interface RepairValidationSnapshot {
   syntaxPassed: boolean;
@@ -236,6 +237,22 @@ export class AutomaticRepairEngine {
       const actions = gatewayRes.parsedResponse.actions.filter((a: any) => a.path === targetIssue.file);
       if (actions.length === 0) {
         unresolvedDefects.push(`Model returned no actions addressing ${targetIssue.file}`);
+        continue;
+      }
+
+      // A repair must never make the project worse, so a copy is checked before the real write
+      const dryRun = RepairPatchValidator.normalize(actions);
+      const candidate = RepairPatchValidator.applyToCopy(currentFiles, dryRun.actions);
+      if (dryRun.rejected.length > 0 || !candidate.files) {
+        unresolvedDefects.push(`Repair of ${targetIssue.file} refused before applying: ${dryRun.rejected[0] || candidate.error}`);
+        continue;
+      }
+      const candidateSnapshot = this.evaluateValidationDimensions(candidate.files, contracts);
+      const withoutLine = (d: string) => d.replace(/:\d+:/, ':');
+      const known = new Set(snapshot.diagnostics.map(withoutLine));
+      const introduced = candidateSnapshot.diagnostics.filter(d => !known.has(withoutLine(d)));
+      if (introduced.length > 0) {
+        unresolvedDefects.push(`Repair of ${targetIssue.file} refused before applying, because it adds a defect: ${introduced[0]}`);
         continue;
       }
 

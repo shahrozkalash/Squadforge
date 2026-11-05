@@ -739,7 +739,7 @@ export class CodeGenerationEngine {
   /**
    * Resolves the AI model configuration to use for code generation.
    */
-  private static resolveGenerationModel(requestedModelId?: string): ModelConfig {
+  static resolveGenerationModel(requestedModelId?: string): ModelConfig {
     if (requestedModelId) {
       const model = modelRegistry.getModel(requestedModelId);
       if (model && model.enabled) return model;

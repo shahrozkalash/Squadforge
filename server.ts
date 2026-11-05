@@ -40,6 +40,8 @@ import { AIChallengeEngine } from './server/swarm/aiChallengeEngine.js';
 import { CollaborativeDebuggingEngine } from './server/swarm/collaborativeDebuggingEngine.js';
 import { ApprovalGateService } from './server/swarm/approvalGateService.js';
 import { executionManager, previewService, startExecutionServices } from './server/execution/index.js';
+import { repairCoordinator } from './server/debugging/index.js';
+import { createDebuggingRouter } from './server/debugging/debuggingRoutes.js';
 import { createExecutionRouter } from './server/execution/executionRoutes.js';
 import { SharedWorkspaceService } from './server/swarm/sharedWorkspaceService.js';
 import { CodeGenerationEngine } from './server/swarm/codeGenerationEngine.js';
@@ -2117,6 +2119,10 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
   if (decided?.buildId === build.id && decided.patchId && decided.status === 'rejected') {
     CodeGenerationEngine.cancelRun(decided.patchId, 'Approval rejected');
   }
+  if (decided?.buildId === build.id) {
+    repairCoordinator.handleApprovalDecision(decided, req.user!)
+      .catch(err => console.error('Repair could not continue:', err.message));
+  }
 
   if (!result.success) {
     return res.status(400).json({ error: result.error });
@@ -2382,6 +2388,13 @@ app.use('/api/builds/:id/execution', createExecutionRouter({
   verifyBuildOwnership,
   manager: executionManager,
   previews: previewService
+}));
+
+// Debugging and repair of a project's own errors
+app.use('/api/builds/:id/debugging', createDebuggingRouter({
+  requireAuth,
+  verifyBuildOwnership,
+  coordinator: repairCoordinator
 }));
 
 // Mount Vite in dev mode or serve static bundle in production

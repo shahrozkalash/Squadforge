@@ -152,6 +152,9 @@ export class ApprovalGateService {
       taskId?: string;
       /** Tasks from the same response. They are created only if the owner approves. */
       followUpTasks?: Array<{ [key: string]: any }>;
+      /** Evidence shown to the owner next to the change. */
+      reviewResults?: string;
+      explanation?: string;
     }
   ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
     const fingerprints = this.fingerprintActions(params.actions);
@@ -175,7 +178,8 @@ export class ApprovalGateService {
       requestingAgent: params.agent,
       requestingRole: 'security_specialist',
       operationType: 'security_sensitive_change',
-      explanation: `Generated code changes sensitive files: ${sensitive.join(', ')}`,
+      explanation: params.explanation || `Generated code changes sensitive files: ${sensitive.join(', ')}`,
+      reviewResults: params.reviewResults,
       affectedFiles: sensitive,
       proposedChanges: [
         this.describeActions(params.actions),
@@ -282,6 +286,18 @@ export class ApprovalGateService {
       if (request.taskId && !request.patchId) {
         db.saveApprovalRequest({ ...request, status: 'cancelled', resolvedAt: Date.now() });
       }
+    }
+  }
+
+  static hasExpired(request: HumanApprovalRequest): boolean {
+    return Date.now() > request.createdAt + APPROVAL_TTL_MS;
+  }
+
+  /** Withdraws one unanswered request. */
+  static cancelRequest(buildId: string, requestId: string): void {
+    const request = db.getApprovalRequest(requestId);
+    if (request?.buildId === buildId && request.status === 'pending') {
+      db.saveApprovalRequest({ ...request, status: 'cancelled', resolvedAt: Date.now() });
     }
   }
 

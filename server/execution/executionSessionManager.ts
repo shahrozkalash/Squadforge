@@ -13,7 +13,9 @@ import { ApprovalGateService } from '../swarm/approvalGateService.js';
 import { MergeManager } from '../swarm/mergeManager.js';
 import { ProjectMemoryService } from '../swarm/projectMemory.js';
 import {
+  AFFECTED_TEST_SCRIPT,
   RUNNABLE_SCRIPTS,
+  affectedTestArgs,
   buildInstallCommand,
   detectMissingModules,
   planDependencies
@@ -349,7 +351,8 @@ export class ExecutionSessionManager {
     return true;
   }
 
-  async startScript(build: Build, sessionId: string, script: string): Promise<ExecutionSession> {
+  /** With testFiles, a test run covers only those files when the test runner supports it. */
+  async startScript(build: Build, sessionId: string, script: string, testFiles?: string[]): Promise<ExecutionSession> {
     const session = this.requireSession(build.id, sessionId);
     this.requireIdleEnvironment(session);
 
@@ -358,7 +361,7 @@ export class ExecutionSessionManager {
     }
 
     // Earlier code could change the test files, and a later run would replace the result
-    if (session.script && (script === 'test' || session.script === 'test')) {
+    if (session.script && (script === 'test' || session.script === 'test' || session.script === AFFECTED_TEST_SCRIPT)) {
       throw new ExecutionError('Tests run in their own session, so their results can be trusted. Create a new session.', 409);
     }
 
@@ -383,9 +386,11 @@ export class ExecutionSessionManager {
     if (/\bvite\b/.test(definition) && (script === 'dev' || script === 'preview')) {
       argv.push('--', '--host', '0.0.0.0');
     }
+    const scope = script === 'test' && testFiles ? affectedTestArgs(definition, testFiles) : null;
+    if (scope) argv.push('--', ...scope);
 
     session.status = 'starting';
-    session.script = script;
+    session.script = scope ? AFFECTED_TEST_SCRIPT : script;
     session.exitCode = undefined;
     session.endReason = undefined;
     session.failureReason = undefined;
