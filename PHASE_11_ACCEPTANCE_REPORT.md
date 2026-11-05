@@ -1,7 +1,7 @@
 # Phase 11 Acceptance Report
 
-**Status:** Waiting for the owner's decision. Only the owner can accept a phase.
-**Recommendation:** Recommend acceptance for development and evaluation, with the limitations below. Not for production use. Production readiness is roadmap Phase 16.
+**Status:** Accepted by the project owner on 2026-11-05 at `708e761`, with the limitations below. The owner decisions at the end of this report are still open, except the first.
+**Recommendation:** Suitable for development and evaluation. Not for production use. Production readiness is roadmap Phase 16.
 **Assessed commit:** `708e76176d2b80638bc717f903b4307a17839f98` on `feature/phase-11-debugging`
 **Date:** 2026-11-05
 **Environments:** GitHub Actions on Linux with Node 22, and Windows 11 with Node 24.3.0 and Docker 29.8.1
@@ -93,7 +93,7 @@ The reviewer found these sound: approval gating of all writes, repeated and cros
 
 ## Decisions for the owner
 
-1. **Accept Phase 11, or ask for changes.** Phase 12 should not start until then.
+1. **Accept Phase 11, or ask for changes.** Accepted on 2026-11-05. Phase 12 starts only when the owner asks.
 2. **Test with a real provider** before relying on repair quality.
 3. **Rollback without approval.** `requiresApproval('project_rollback')` returns true, but non-sensitive repairs roll back without a request. Automatic rollback only undoes the repair's own unverified patch, and a manual one is the owner's own action. Sensitive files always ask. Is this acceptable?
 4. **Existing rollback routes.** `/rollback-checkpoint` and `/rollback-file` write as `system` or `user`, skip conflict checks, and can overwrite later user changes. They predate this phase and were not changed. Should they use the new protections?
