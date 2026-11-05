@@ -444,6 +444,29 @@ describe('Swarm tasks with sensitive files', () => {
     assert.equal(db.getTask(buildId, id)?.status, 'failed');
   });
 
+  test('rejecting a task other tasks depend on fails the build instead of leaving it running', async (t) => {
+    const buildId = makeBuild('held_dependents');
+    const { id } = await runTask(t, buildId, [dockerfile]);
+    db.addTask(buildId, {
+      id: `task_dependent_${Date.now()}`,
+      buildId,
+      title: 'Needs the Dockerfile',
+      description: 'Needs the Dockerfile',
+      status: 'pending',
+      priority: 1,
+      dependencies: [id],
+      filePaths: ['src/later.ts'],
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    } as any);
+
+    await decide(buildId, false);
+
+    const build = db.getBuild(buildId);
+    assert.equal(build?.status, 'failed');
+    assert.match(build?.failureReason || '', /rejected by the owner/);
+  });
+
   test('Stop withdraws waiting requests', async (t) => {
     const buildId = makeBuild('held_stop');
     await runTask(t, buildId, [dockerfile]);

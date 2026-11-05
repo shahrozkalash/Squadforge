@@ -97,18 +97,34 @@ export class SwarmOrchestrator {
     if (!task || task.pausedReason !== this.AWAITING_APPROVAL) return;
 
     const paused = { isPaused: false, pausedReason: undefined };
+    let failure: string | undefined = request.status === 'approved' ? undefined : `Sensitive change ${request.status} by the owner`;
     if (request.status === 'approved') {
-      const applied = await MergeManager.applyBatchActions(buildId, request.requestingAgent, request.proposedActions || []);
-      db.updateTask(buildId, task.id, applied.success
-        ? { ...paused, status: 'completed' }
-        : { ...paused, status: 'failed', error: `Approved changes could not be applied: ${applied.error}` });
-    } else {
-      db.updateTask(buildId, task.id, { ...paused, status: 'failed', error: `Sensitive change ${request.status} by the owner` });
+      try {
+        const applied = await MergeManager.applyBatchActions(buildId, request.requestingAgent, request.proposedActions || []);
+        if (!applied.success) failure = `Approved changes could not be applied: ${applied.error}`;
+      } catch (err: any) {
+        failure = `Approved changes could not be applied: ${err.message}`;
+      }
+    }
+    db.updateTask(buildId, task.id, failure ? { ...paused, status: 'failed', error: failure } : { ...paused, status: 'completed' });
+
+    const build = db.getBuild(buildId);
+    if (build?.status !== 'running') return;
+
+    // Dependents of a failed task can never start, so the build would wait forever
+    if (failure && db.getTasks(buildId).some(t => t.dependencies?.includes(task.id))) {
+      build.status = 'failed';
+      build.completedAt = Date.now();
+      build.failureReason = `Task "${task.title}" failed: ${failure}`;
+      build.error = build.failureReason;
+      db.saveBuild(build);
+      const control = this.activeSwarms.get(buildId);
+      if (control) control.stopRequested = true;
+      return;
     }
 
     // Workers may have finished while the task waited
-    const build = db.getBuild(buildId);
-    if (build?.status === 'running' && !this.activeSwarms.has(buildId)) await this.resumeSwarm(buildId);
+    if (!this.activeSwarms.has(buildId)) await this.resumeSwarm(buildId);
   }
 
   /**

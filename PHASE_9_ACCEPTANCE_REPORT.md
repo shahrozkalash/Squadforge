@@ -1,13 +1,8 @@
 # Phase 9 Acceptance Report
 
-**Recommendation:** Do not accept yet. Acceptance is the project owner's decision.
-**Assessed commit:** `b8554f7` on `feature/agent-context-and-lockfile`
-**Date:** 2026-11-04
-**Environment:** Linux container, Node 22.23.4
-
-## Why acceptance is not recommended
-
-All checks pass, but an independent review found open problems in approval handling. The most important is that an approval covers a file path, not the change the owner reviewed (finding F4). Passing tests do not settle these, because the tests do not cover them.
+**Status:** Fixes complete except for the items listed below. Formal acceptance is the project owner's decision.
+**Assessed commit:** the commit that merged Phases 9 and 10 to `main`
+**Date:** 2026-11-05
 
 ## Check results
 
@@ -15,59 +10,57 @@ All checks pass, but an independent review found open problems in approval handl
 | :--- | :--- |
 | `npm ci` | Pass |
 | `npm run lint` | Pass |
-| `npm test` | 496 of 496 pass |
+| `npm test` | 604 of 604 pass, with Phase 10 included |
 | `npm run build` | Pass |
 
-These ran locally in a Linux container. No real AI provider was called. Windows has known local failures, listed in `PHASE_9_PROGRESS.md`.
+These ran in a Linux container on Node 22. No real AI provider was called.
 
-## Independent review
+## How approvals work now
 
-The `invariant-reviewer` agent reviewed the branch at `d929a34` by reading and tracing code. It did not run anything. It made 13 findings.
+- An approval covers the exact changes the owner reviewed, identified by a fingerprint of every action on each file.
+- Paths are normalized first, so spaces or doubled slashes cannot hide a sensitive file.
+- Each approval works once per file, and lasts 24 hours from creation.
+- The owner's latest decision on a file wins, so a rejection overrides an earlier approval.
+- An approval without a fingerprint authorizes nothing. Clients cannot supply fingerprints or stored changes.
+- The approval card shows the agent, the files, and the full change.
+- Approving applies the stored changes. The model is not asked again.
+- The owner can revoke an approval through `POST .../approvals/:id/revoke`. There is no UI button for this yet.
 
-### Fixed in `b8554f7`, with regression tests
+A swarm task applies its ordinary files, then pauses with its sensitive changes in an approval request. Approval applies them and completes the task. Rejection or expiry fails the task, so the build cannot finish as a success with those changes missing. Stop withdraws waiting requests. A code generation run pauses as a whole until the owner decides.
 
-| Finding | Problem | Fix |
-| :--- | :--- | :--- |
-| F1 | Generated preview code ran on the app's origin and could approve its own requests | Previews get an opaque origin through a CSP `sandbox` policy, and the iframe no longer has `allow-same-origin` |
-| F2 | A request could claim the `system` actor and skip the sensitive-file gate | `proposePatch` and `resolveConflict` reject the reserved actor |
-| F3 | Batch renames did not check the destination path | Every path in a batch action is now checked |
-| F5 | Stop did not stop model requests or file writes | Stop aborts swarm requests, blocks later writes, and cancels active code generation runs |
-| F6 | Any session could register a model with the id `system` | The id is reserved, and updates cannot change a model's id |
+The owner's own edits through the ownership-checked file routes do not need an approval.
 
-The F1 test covers the header on the static preview route. The bundled React preview path was not traced, and no browser test was run.
+## Review findings
 
-### Still open
+Independent reviews ran at `d929a34`, `66a94e4`, `11b5b9c`, and `88c1336`, by reading and tracing code. The last one found nothing blocking.
 
-| Finding | Severity | Problem |
-| :--- | :--- | :--- |
-| F4 | High | An approval covers a path, not reviewed content. Later runs can write different content, approvals are not consumed, rejection does not revoke an earlier approval, and an approved request cannot be withdrawn. This needs a design decision |
-| F7 | Medium | Sensitive-path patterns miss common files, such as `src/authService.ts`, `config/credentials.json`, `.npmrc`, `.github/workflows/ci.yml`, and `Dockerfile` |
-| F8 | Medium | An approved request can stay usable for almost 48 hours after creation. The owner should decide when the 24 hours starts |
-| F9 | Medium if multi-process | The in-memory cache hides a cancellation made by another process, so that process can keep running and write files |
-| F10 | Low | The stored cancellation guard is not reached by the pipeline in one process, and `cancellationReason` can be lost |
-| F11 | Low | Cancelling while an OpenRouter error body is read records a false provider failure |
-| F12 | Low | Cancelled requests log an invented cost |
-| F13 | Low | The cancel route reports success when nothing was cancelled |
-
-Two related problems also remain:
-
-- `applyApprovedPatch` does not check that a patch passed review.
-- `PUT /api/models/:id` lets any session change a model for every tenant.
-
-## Requirement status
-
-| Requirement | Status |
+| Finding | Status |
 | :--- | :--- |
-| Approval decisions come only from the build owner's session | Verified |
-| Sensitive changes need approval | Partial: see F4 and F7 |
-| Cancellation of active generation | Verified with stubbed network |
-| Stop halts swarm work | Verified with stubbed network |
-| Finalization rejects unresolved validation errors | Verified, including a defect appearing after validation passed |
-| Reproducible dependency installation | Partial: the lockfile is restored on this branch, but what keeps deleting it is unknown |
-| Other Phase 9 capabilities: profiles, multi-pass generation, incremental editing, repair | Implemented, not assessed requirement by requirement |
+| Preview could use the owner's session | Fixed |
+| Reserved `system` actor and model id | Fixed |
+| Batch renames not checking the destination | Fixed |
+| Approval covered a path, not content (F4) | Fixed |
+| Stop not stopping model requests or writes | Fixed |
+| Sensitive path detection gaps (F7) | Fixed |
+| Approved request valid for nearly 48 hours (F8) | Fixed. Validity now runs from creation |
+| Stored cancellation hidden by the cache (F9) | Fixed for the checks in the pipeline |
+| Cancellation details lost (F10) | Fixed |
+| False provider failure, invented cost, and false success on cancel (F11-F13) | Fixed |
+| Spaced paths, duplicate actions, and unbound approvals | Fixed |
+| Swarm stalls, false task completion, stuck runs, and blocked repair | Fixed |
 
-## Owner decisions
+## Remaining limitations
 
-1. Accept Phase 9 with these items open, or require F4, F7, and F8 first.
-2. Decide what an approval should cover, and when its validity period starts.
-3. Confirm whether `GEMINI_API_KEY` stays required. It was added to `.env.example` so CI passes, which does not settle the question.
+- **Real providers:** cancellation has only been tested with a stubbed network. An abort may not stop a provider's work or billing.
+- **Multiple processes:** another process stops a run at its next check, but cannot abort a request in flight.
+- **Patch review:** `applyApprovedPatch` does not check `reviewStatus`, because nothing in the code ever sets it. Enforcing it would block every patch. The sensitive-file gate still applies.
+- **Repair:** sensitive files are not repaired automatically. The run ends as failed, and the owner must approve a new change.
+- **Waiting builds:** a build waiting on the owner shows as `running`. If it reaches its time limit, it resumes when the owner decides.
+- **Planner writes:** a sensitive file written by the initial planner is dropped without a request.
+- **Held tasks:** after approval, a task skips the per-task completion check, though project verification still runs. `create_task` actions in a held response are lost, and ordinary files applied on that path get no patch record.
+- **Slow workers:** a worker whose model call outlasts its 90-second lease could still pause a task another worker holds.
+- **Test coverage:** the HTTP approval routes, the expiry path, and task re-opening on resume have no direct tests.
+- **Lockfile:** what kept deleting `package-lock.json` from `main` is still unknown. It may happen again.
+- **Rollbacks:** `revertToCheckpoint` and `revertFileVersion` are owner-only, and bypass the sensitive-file gate.
+- **Shared models:** in production, guests cannot change the model registry. Any signed-in user still can.
+- **Approval timing:** a crash between a write and marking an approval used would leave it usable, for that same content only.

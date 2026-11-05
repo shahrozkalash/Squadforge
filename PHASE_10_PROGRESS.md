@@ -1,10 +1,8 @@
 # Phase 10 Progress: Execution and Development Environment
 
-**Status:** Implemented and tested on local Docker and GitHub CI. Not accepted. See `PHASE_10_ACCEPTANCE_REPORT.md`.
-**Assessed commit:** `bb0d750` on `feature/phase-10-execution`
-**Date:** 2026-11-04
-
-Phase 9 is not accepted either. This phase was built at the user's request, with Phase 9's blockers reported in `PHASE_9_ACCEPTANCE_REPORT.md`.
+**Status:** Implemented and tested on local Docker and GitHub CI. Off by default. Not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`.
+**Assessed commit:** the commit that merged Phases 9 and 10 to `main`
+**Date:** 2026-11-05
 
 ## Architecture
 
@@ -59,10 +57,10 @@ There is no fallback that runs project code as a host process. Without a configu
 
 ## Check results
 
-| Check | Linux, Node 22 | GitHub CI at `bb0d750` | Windows, Node 24 |
+| Check | Linux, Node 22 | GitHub CI | Windows, Node 24 at `bb0d750` |
 | :--- | :--- | :--- | :--- |
 | `npm run lint` | Pass | Pass | Pass |
-| `npm test` | 574 pass, 0 fail | Pass | 572 pass, 2 fail |
+| `npm test` | 604 pass, 0 fail | Pass | 572 pass, 2 fail |
 | `npm run build` | Pass | Pass | Pass, with extra local packages |
 | Real Docker tests | Not applicable | Pass | 19 of 19 pass |
 
@@ -94,4 +92,5 @@ Mocks did not catch these. They were found by real Docker, Linux CI, Chrome, or 
 - **Network leak:** a failed network removal is not retried.
 - **Runtimes:** Node with npm only, on one Node 22 image.
 - **Third-party cookies:** previews rely on a `SameSite=None` cookie. Browsers that block third-party cookies may refuse it when the preview is on another site. Using a subdomain of the app's site avoids this.
+- **Databases from the Phase 10 branch:** a database created by that branch before the migrations were renumbered will not start. Delete it. `main` databases upgrade normally.
 - **Live logs:** the dashboard polls every 1.5 seconds. It does not use the SSE stream.

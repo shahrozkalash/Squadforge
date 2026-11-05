@@ -1,7 +1,7 @@
 # Phase 9 Progress: Advanced Code Generation Engine
 
-**Status:** In progress and unverified. Phase 9 is not accepted.
-**Latest assessment:** see `PHASE_9_ACCEPTANCE_REPORT.md` for results at `b8554f7`, and for the independent review. The tables below were recorded at `472de53`.
+**Status:** Fixes complete except for the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. Formal acceptance is the owner's decision.
+**Latest assessment:** see `PHASE_9_ACCEPTANCE_REPORT.md`. The tables below were recorded at `472de53`, and several limitations listed here have since been fixed there.
 **Date:** 2026-11-04
 
 This file covers the approval authorization and cancellation work. The rest of Phase 9 has not been re-assessed requirement by requirement.

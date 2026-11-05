@@ -1,16 +1,15 @@
 # Phase 10 Acceptance Report
 
-**Recommendation:** Do not accept for production. Suitable for development and evaluation on a trusted Docker host. Acceptance is the project owner's decision.
-**Assessed commit:** `bb0d750` on `feature/phase-10-execution`
-**Date:** 2026-11-04
+**Recommendation:** Do not use in production yet. Suitable for development and evaluation on a trusted Docker host. It is merged to `main` but off by default. Acceptance is the project owner's decision.
+**Assessed commit:** the commit that merged Phases 9 and 10 to `main`
+**Date:** 2026-11-05
 
 ## Why production is not recommended
 
-The feature works end to end, and all checks pass. Three things stop a production recommendation:
+The feature works end to end, and all checks pass. Two things stop a production recommendation:
 
-1. Phase 9 is not accepted, and its approval problem F4 is still open.
-2. Nothing has run on a real worker, over TLS, or with gVisor.
-3. An independent review of the fixes has not been repeated. The first review ran before the fixes in `bb0d750`.
+1. Nothing has run on a real worker, over TLS, or with gVisor.
+2. The disk limit is not a hard quota, and relay ports have no authentication.
 
 ## Isolation claims
 
@@ -30,17 +29,17 @@ This is **not** a claim of strong isolation. Containers share the worker's kerne
 
 | Check | Result |
 | :--- | :--- |
-| GitHub CI at `bb0d750` | `validate-and-test` and `sandbox-integration` both pass |
-| Linux, Node 22, in a container | Lint and build pass, 574 tests pass |
-| Windows, Node 24 | Lint passes, 572 of 574 tests pass. Phase 4 tests 14 and 16 fail, as they did before this work |
+| GitHub CI | `validate-and-test` and `sandbox-integration` both pass |
+| Linux, Node 22, in a container | Lint and build pass, 604 tests pass |
+| Windows, Node 24 at `bb0d750` | Lint passes, 572 of 574 tests pass. Phase 4 tests 14 and 16 fail, as they did before this work |
 | Real Docker tests, local | 19 of 19 pass |
-| Chrome, on the final code | Approve, create, install, start, preview, stop, and delete all worked with a real Vite project |
+| Chrome at `bb0d750` | Approve, create, install, start, preview, stop, and delete all worked with a real Vite project |
 
 No real AI provider was involved.
 
 ## Independent review
 
-The `invariant-reviewer` agent reviewed the work before the last fixes, by reading code and running small probes. It made 16 findings.
+The `invariant-reviewer` agent reviewed the work by reading code and running small probes. It made 16 findings. A later review of the merged code checked how execution uses approvals.
 
 | Finding | Status |
 | :--- | :--- |
@@ -65,11 +64,9 @@ The `invariant-reviewer` agent reviewed the work before the last fixes, by readi
 1. **Guest execution:** `EXECUTION_ALLOW_GUESTS` is off by default in production. If the app has no accounts, nobody can run projects there until this is decided. Anonymous execution invites abuse.
 2. **Worker:** provision a dedicated machine, and decide whether to require gVisor.
 3. **Preview domain:** choose a domain for `PREVIEW_BASE_DOMAIN`. A subdomain of the app's site works best with third-party cookie blocking.
-4. **Phase 9:** decide on F4, F7, and F8 before relying on approvals in production.
 
 ## Before production
 
 1. Run the real Docker tests on the actual worker, with TLS and gVisor.
 2. Add a hard disk quota, or accept the limitation.
-3. Repeat the independent review on the final code.
-4. Decide the items above.
+3. Decide the items above.

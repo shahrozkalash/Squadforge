@@ -1,6 +1,6 @@
 # SquadForge Agent Guide
 
-Last inspected commit: `bb0d750` on `feature/phase-10-execution`, based on `main` at `8cdd207` (2026-11-04). Update this with every handoff.
+Last inspected commit: `88c1336` (2026-11-05). Phases 9 and 10 are on `main`. Update this with every handoff.
 
 This guide comes from the project owner's reconstructed handoff and from repository inspection. The original AI Studio prompt and chats are unavailable. Treat the handoff as stated intent, and check its claims against the code. When historical evidence is missing, document the uncertainty instead of inventing a decision.
 
@@ -56,8 +56,8 @@ These are proposed by the handoff and still need confirming against the code.
 | Phases 1-6 | Original specs unavailable. Reconstruct them from commits, tests, and code, and separate original requirements from inferred behavior. |
 | Phase 7 | Universal Software Architecture Engine. `tests/phase7_project_export_verification.test.ts` suggests phase numbering may be inconsistent. |
 | Phase 8 | Historically reported as accepted. Not independently re-verified. |
-| Phase 9 | Advanced Code Generation Engine. Not accepted, and acceptance is not recommended yet. See `PHASE_9_ACCEPTANCE_REPORT.md`. |
-| Phase 10 | Implemented on `feature/phase-10-execution`, at the user's request. Not accepted, and not recommended for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
+| Phase 9 | Advanced Code Generation Engine. Merged to `main` at the user's request. Formal owner acceptance is still open. See `PHASE_9_ACCEPTANCE_REPORT.md`. |
+| Phase 10 | Execution environment. Merged to `main` at the user's request, off by default, and not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
 | Phase 11 | Do not start until the owner asks. |
 
 Later roadmap:
@@ -72,33 +72,16 @@ Later roadmap:
 
 Do not present GitHub integration or deployment as complete until they are implemented and tested, even where the README lists them. The "production ready" wording in the Phase 8 report does not describe the whole product.
 
-## Known CI and dependency problem
+## Known dependency problem
 
-- `package-lock.json` was deleted from `main` in `ef3a927`. It is restored on `feature/agent-context-and-lockfile` from `6184ab1`, and `package.json` is unchanged since then.
-- CI on `main` has failed since that deletion. In the run for `8cdd207`, `Set up Node.js` failed, so install, TypeScript, and test steps were skipped. The `vite: not found` build error follows from the skipped install.
-- The last passing run in the recent CI history is `6184ab1`, which had the lockfile. It predates the Phase 9 code generation commit.
-- The lockfile has been added and deleted repeatedly since at least 2026-10-30. The reason is unknown, and no owner decision to remove it is recorded. Find out what is deleting it, or a restored file may disappear again.
-- The restored lockfile has no Windows Rolldown binding, so `npm run build` and `tests/public_access.test.ts` fail on Windows. Linux is unaffected.
-- CI passes on `feature/agent-context-and-lockfile`. `.env.example` lists `GEMINI_API_KEY` because the CI test requires it, which does not settle the open provider question below.
+The lockfile was added and deleted repeatedly on `main` before Phase 10, and the cause is unknown. If it disappears, `npm ci` and CI fail. Restore it, and do not regenerate it unless dependencies changed. It was generated on Linux, so Windows builds need the native packages installed locally with `npm i --no-save`.
 
-## Phase 9 acceptance work
+## Open work
 
-Complete these before accepting Phase 9 or starting Phase 10:
-
-Done on `feature/agent-context-and-lockfile`, not yet merged:
-
-- Approval decisions come only from the build owner's session, and the `human_reviewer` exception is gone.
-- Code generation and swarm model requests are cancelled through an `AbortSignal` in a single process. Multi-process cancellation is not solved.
-- Direct approval gate bypasses are closed, and previews have an opaque origin.
-- Finalization is verified to reject unresolved validation errors.
-- The lockfile is restored on the branch. Why it keeps being deleted is still unexplained.
-- `PHASE_9_PROGRESS.md` and `PHASE_9_ACCEPTANCE_REPORT.md` added.
-
-Still to do:
-
-1. Resolve the open findings in `PHASE_9_ACCEPTANCE_REPORT.md`, starting with F4: an approval covers a path, not reviewed content.
+1. Get the owner's acceptance decisions for Phases 9 and 10.
 2. Test cancellation against a real provider.
-3. Get the owner's acceptance decision.
+3. Run the sandbox tests on a real worker, with TLS and gVisor.
+4. Decide on guest execution, the worker, and the preview domain.
 
 ## Fragile areas
 

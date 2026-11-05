@@ -2080,7 +2080,7 @@ app.post('/api/builds/:id/collaboration/approvals', requireAuth, (req, res) => {
   if (!build) return;
 
   // A client can ask for review, but cannot supply what approval would apply or authorize
-  const { patchId, proposedActions, contentHashes, scopeHash, ...requestFields } = req.body;
+  const { patchId, taskId, proposedActions, contentHashes, scopeHash, ...requestFields } = req.body;
   const result = ApprovalGateService.requestApproval(build.id, req.user!.id, requestFields);
   if (!result.success) {
     return res.status(400).json({ error: result.error });
