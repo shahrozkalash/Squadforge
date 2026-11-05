@@ -6,6 +6,7 @@ import {
   DiagnosticKind,
   DiagnosticReport,
   ExecutionSession,
+  HttpProbeResult,
   ProjectContract,
   ProjectFile
 } from '../types.js';
@@ -14,6 +15,7 @@ import { hashWorkspace } from '../execution/workspaceMaterializer.js';
 import { ContractFirstEngine } from '../swarm/contractFirstEngine.js';
 import { ExecutionAdapter } from '../swarm/executionAdapter.js';
 import { IntegrationAgent } from '../swarm/integrationAgent.js';
+import { runStaticChecks } from './staticChecks.js';
 
 const MAX_MESSAGE_LENGTH = 600;
 const MAX_DIAGNOSTICS = 100;
@@ -34,6 +36,9 @@ export interface ReportedProblem {
 /** Project output and reports can hold credentials, and they reach model prompts and history. */
 export function redactSecrets(text: string): string {
   return text
+    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, '[REDACTED]')
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, '[REDACTED]')
+    .replace(/(["']?(?:password|passwd|secret|api[_-]?key|access[_-]?token)["']?\s*[:=]\s*)["'][^"'\n]{6,}["']/gi, '$1"[REDACTED]"')
     .replace(/\b(?:sk|pk|rk)[-_][A-Za-z0-9_-]{16,}/g, '[REDACTED]')
     .replace(/\b(?:ghp|gho|ghs|github_pat)_[A-Za-z0-9_]{16,}/g, '[REDACTED]')
     .replace(/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED]')
@@ -42,6 +47,29 @@ export function redactSecrets(text: string): string {
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [REDACTED]')
     .replace(/\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)=\S+/g, '$1=[REDACTED]')
     .replace(/(\/\/[^/\s:@]+:)[^/\s@]+@/g, '$1[REDACTED]@');
+}
+
+/** Files whose contents must never leave this server, even for a repair. */
+export function isSecretFile(path: string): boolean {
+  return /(?:^|\/)\.env(?:\..+)?$|\.(?:pem|key|p12|pfx)$/i.test(path);
+}
+
+/** Values a project keeps in its own env files. Patterns cannot know these, but this can. */
+function declaredSecretValues(files: ProjectFile[]): string[] {
+  const values = new Set<string>();
+  for (const file of files) {
+    if (!/(?:^|\/)\.env(?:\..+)?$/.test(file.path) || /\.(?:example|sample|template)$/.test(file.path)) continue;
+    for (const line of file.content.split(/\r?\n/)) {
+      const value = line.match(/^\s*(?:export\s+)?[A-Za-z_][\w]*\s*=\s*(.*)$/)?.[1].trim().replace(/^["']|["']$/g, '');
+      if (value && value.length >= 6) values.add(value);
+    }
+  }
+  return Array.from(values).sort((a, b) => b.length - a.length);
+}
+
+function withoutValues(item: DebugDiagnostic, values: string[]): DebugDiagnostic {
+  const clean = (text: string) => values.reduce((result, value) => result.split(value).join('[REDACTED]'), text);
+  return { ...item, message: clean(item.message), stack: item.stack?.map(clean) };
 }
 
 /** Line numbers and temporary paths change between runs, so they are not part of identity. */
@@ -303,7 +331,16 @@ export class DiagnosticCollector {
     return { diagnostics: mergeDuplicates(diagnostics), checks };
   }
 
-  private static readOutput(sessionId: string): string {
+  static parseOutput(session: ExecutionSession, files: ProjectFile[]): DebugDiagnostic[] {
+    return parseProcessOutput(this.readOutput(session.id), session, files);
+  }
+
+  /** The failures a test run printed, as diagnostics that can be compared across runs. */
+  static testFailures(session: ExecutionSession, files: ProjectFile[]): DebugDiagnostic[] {
+    return this.parseOutput(session, files).filter(item => item.kind === 'test');
+  }
+
+  static readOutput(sessionId: string): string {
     const text = db.getExecutionLogs(sessionId, 0, MAX_LOG_ENTRIES)
       .filter(entry => entry.stream !== 'system')
       .map(entry => entry.text)
@@ -375,12 +412,32 @@ export class DiagnosticCollector {
     return db.getGenerationRuns(buildId)[0]?.contractsEstablished || [];
   }
 
+  /** A failed call to a running project. This is direct evidence, not parsed output. */
+  static fromProbes(results: HttpProbeResult[], session: Pick<ExecutionSession, 'id' | 'script'>, routes: Array<{ path: string; filePath: string }>) {
+    return results
+      .filter(result => result.status === undefined || result.status >= 500)
+      .map(result => diagnostic({
+        kind: 'api',
+        source: 'sandbox',
+        sessionId: session.id,
+        script: session.script,
+        code: 'HTTP_PROBE',
+        message: `GET ${result.path} ${result.status === undefined ? `failed: ${result.error}` : `returned ${result.status}`}`,
+        filePath: routes.find(route => route.path === result.path)?.filePath
+      }));
+  }
+
   /** Gathers every kind of error for the current workspace. It reads and never writes. */
-  static collect(buildId: string, reports: ReportedProblem[] = []): DiagnosticReport {
-    const files = db.getAllFiles(buildId);
+  static async collect(
+    buildId: string,
+    reports: ReportedProblem[] = [],
+    options: { signal?: AbortSignal; probes?: DebugDiagnostic[] } = {}
+  ): Promise<DiagnosticReport> {
+    const files = db.getAllFiles(buildId).map(file => ({ ...file }));
     const workspaceHash = hashWorkspace(files);
-    const staticResult = this.collectStatic(buildId, files, this.contractsFor(buildId));
+    const staticResult = await runStaticChecks(buildId, files, this.contractsFor(buildId), options.signal);
     const sandbox = this.collectSandbox(buildId, files, workspaceHash);
+    const secrets = declaredSecretValues(files);
 
     const hasRun = db.getExecutionSessions(buildId, 20).some(item => item.workspaceHash === workspaceHash && item.endReason);
     const runtimeCheck: DiagnosticCheck = sandbox.current.length > 0
@@ -395,9 +452,10 @@ export class DiagnosticCollector {
       diagnostics: mergeDuplicates([
         ...staticResult.diagnostics,
         ...sandbox.current,
+        ...(options.probes || []),
         ...this.fromReports(reports, files)
-      ]),
-      staleDiagnostics: mergeDuplicates(sandbox.stale),
+      ]).map(item => withoutValues(item, secrets)),
+      staleDiagnostics: mergeDuplicates(sandbox.stale).map(item => withoutValues(item, secrets)),
       checks: [...staticResult.checks, runtimeCheck],
       collectedAt: Date.now()
     };

@@ -6,6 +6,7 @@ import {
   ProjectFile,
   ExecutionEndReason,
   ExecutionSession,
+  HttpProbeResult,
   HumanApprovalRequest,
   User
 } from '../types.js';
@@ -20,7 +21,7 @@ import {
   detectMissingModules,
   planDependencies
 } from './dependencyService.js';
-import { BackendCapabilities, ExecutionBackend, ProcessHandle, SandboxLimits } from './executionBackend.js';
+import { BackendCapabilities, ExecutionBackend, PreviewEndpoint, ProcessHandle, SandboxLimits, relayGet } from './executionBackend.js';
 import { hashWorkspace, materializeWorkspace } from './workspaceMaterializer.js';
 
 export class ExecutionError extends Error {
@@ -73,6 +74,8 @@ interface ActiveProcess {
   finished: Promise<void>;
 }
 
+const MAX_PROBES = 10;
+const PROBE_READY_MS = 20000;
 const LIVE_PROCESS_STATES = new Set(['creating', 'installing', 'starting', 'running', 'stopping']);
 /** Execution approvals last 24 hours, so a session cannot outlive that window by much. */
 const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000;
@@ -590,6 +593,48 @@ export class ExecutionSessionManager {
     for (const preview of db.getActivePreviews()) {
       db.savePreviewSession({ ...preview, status: 'closed' });
     }
+  }
+
+  /**
+   * Calls GET routes of a running project through its relay. Only the owner's approved session
+   * is reached, and the paths are checked here, so this cannot be pointed anywhere else.
+   */
+  async probeHttp(build: Build, sessionId: string, paths: string[]): Promise<HttpProbeResult[]> {
+    const session = this.requireSession(build.id, sessionId);
+    if (session.status !== 'running' || !session.processId) {
+      throw new ExecutionError('The project is not running.', 409);
+    }
+    const safePaths = paths.filter(path => /^\/(?!\/)[\w./~-]*$/.test(path)).slice(0, MAX_PROBES);
+
+    const open = db.getActivePreviews(session.id)[0];
+    let endpoint: PreviewEndpoint | undefined = open && { host: open.relayHost, port: open.relayPort, token: open.relayToken };
+    if (!endpoint) {
+      const ports = await this.waitForPort(session.processId);
+      if (ports.length === 0) throw new ExecutionError('The project did not start listening on a port.', 504);
+      endpoint = await this.backend.openPreview(session.id, session.processId, ports.includes(3000) ? 3000 : ports[0]);
+    }
+
+    try {
+      await relayGet(endpoint, '/', PROBE_READY_MS);
+      const results: HttpProbeResult[] = [];
+      for (const path of safePaths) {
+        results.push(await relayGet(endpoint, path, 0));
+      }
+      return results;
+    } finally {
+      if (!open) await this.backend.closePreview(session.id).catch(() => undefined);
+    }
+  }
+
+  /** Waits for a process to listen, and gives up early if it exits. */
+  async waitForPort(processId: string, waitMs = PROBE_READY_MS): Promise<number[]> {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      const ports = await this.backend.listeningPorts(processId).catch(() => [] as number[]);
+      if (ports.length > 0) return ports;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return [];
   }
 
   /** Test support: waits for the current process in a session to finish. */

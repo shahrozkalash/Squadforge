@@ -10,7 +10,7 @@ import {
   RootCause
 } from '../types.js';
 import { ExecutionAdapter } from '../swarm/executionAdapter.js';
-import { DiagnosticCollector } from './diagnosticCollector.js';
+import { runStaticChecks } from './staticChecks.js';
 import { isTestFile, joinRelativePath } from './importGraph.js';
 
 const MAX_CHANGED_LINES = 80;
@@ -175,7 +175,10 @@ export class RepairPatchValidator {
 
     for (const item of context.baseline) {
       if (!context.cause.fingerprints.includes(item.fingerprint) || !item.filePath) continue;
+      const importer = context.files.find(file => file.path === item.filePath)?.content || '';
       for (const match of item.message.matchAll(/['"](\.{1,2}\/[^'"]+)['"]/g)) {
+        // Output can claim anything, so the import must really be in the file
+        if (!importer.includes(match[1])) continue;
         paths.add(joinRelativePath(item.filePath, match[1]).replace(/\.[cm]?[tj]sx?$/, ''));
       }
     }
@@ -210,6 +213,39 @@ export class RepairPatchValidator {
     return undefined;
   }
 
+  /**
+   * A syntax error garbles the code after it, so fixing one can reveal errors that were always
+   * there. A new error outside the lines the patch touched is one of those, and on those lines it
+   * is the patch's own fault. Either way the run cannot end as verified.
+   */
+  static splitRevealed(
+    cause: RootCause,
+    baseline: DebugDiagnostic[],
+    after: DebugDiagnostic[],
+    actions: RepairAction[],
+    files: ProjectFile[]
+  ): { comparable: DebugDiagnostic[]; revealed: DebugDiagnostic[] } {
+    if (cause.category !== 'syntax_error') return { comparable: after, revealed: [] };
+
+    const known = new Set(baseline.map(item => item.fingerprint));
+    const ranges = new Map<string, Array<[number, number]>>();
+    for (const action of actions) {
+      const content = files.find(file => file.path === action.path)?.content || '';
+      ranges.set(action.path, (action.edits || []).map(edit => {
+        const start = content.slice(0, Math.max(content.indexOf(edit.replace), 0)).split('\n').length;
+        return [start, start + edit.replace.split('\n').length - 1];
+      }));
+    }
+
+    const touchedByPatch = (item: DebugDiagnostic) => {
+      const lines = item.filePath ? ranges.get(item.filePath) : undefined;
+      // With no line it cannot be pinned on the patch, and being revealed still blocks verified
+      return Boolean(lines) && item.line !== undefined && lines!.some(([from, to]) => item.line! >= from && item.line! <= to);
+    };
+    const isRevealed = (item: DebugDiagnostic) => !known.has(item.fingerprint) && item.kind !== 'syntax' && !touchedByPatch(item);
+    return { comparable: after.filter(item => !isRevealed(item)), revealed: after.filter(isRevealed) };
+  }
+
   /** Compares a finished state with the baseline. Used on the dry run and on the real result. */
   static compare(cause: RootCause, baseline: DebugDiagnostic[], after: DebugDiagnostic[]) {
     const before = new Map(baseline.map(item => [item.fingerprint, item]));
@@ -230,7 +266,7 @@ export class RepairPatchValidator {
    * Decides whether a patch may be applied. Nothing is written. The dry run re-checks a copy of
    * the project, so a patch passes only if its target is gone and nothing new is wrong.
    */
-  static validate(context: ValidationContext, rawActions: any[]): RepairPatchValidation {
+  static async validate(context: ValidationContext, rawActions: any[], signal?: AbortSignal): Promise<RepairPatchValidation> {
     const { actions, rejected } = this.normalize(rawActions);
     const checks: PatchValidationCheck[] = [];
     const add = (name: string, passed: boolean, detail?: string) => checks.push({ name, passed, detail });
@@ -244,6 +280,7 @@ export class RepairPatchValidator {
       remainingFingerprints: context.cause.fingerprints,
       newDiagnostics: [],
       needsRuntimeProof: [],
+      revealedDiagnostics: [],
       ...extra
     });
 
@@ -277,7 +314,7 @@ export class RepairPatchValidator {
       .filter(finding => !before.includes(finding));
     add('security_audit', newFindings.length === 0, newFindings.length ? `New findings: ${newFindings.join('; ').slice(0, 400)}` : undefined);
 
-    const candidate = DiagnosticCollector.collectStatic(context.buildId, applied.files, context.contracts);
+    const candidate = await runStaticChecks(context.buildId, applied.files, context.contracts, signal);
 
     const ranBefore = new Set(context.baselineChecks.filter(check => check.status !== 'skipped').map(check => check.name));
     const stopped = candidate.checks.filter(check => check.status === 'skipped' && ranBefore.has(check.name));
@@ -285,7 +322,13 @@ export class RepairPatchValidator {
 
     // Errors from a check that could not run before are not caused by this patch
     const skippedBefore = new Set(context.baselineChecks.filter(check => check.status === 'skipped').map(check => check.name));
-    const comparable = candidate.diagnostics.filter(item => !skippedBefore.has(item.kind));
+    const { comparable, revealed } = this.splitRevealed(
+      context.cause,
+      context.baseline,
+      candidate.diagnostics.filter(item => !skippedBefore.has(item.kind)),
+      actions,
+      applied.files
+    );
     const comparison = this.compare(context.cause, context.baseline, comparable);
 
     add('target_cleared', comparison.remainingFingerprints.length === 0, comparison.remainingFingerprints.length
@@ -293,6 +336,10 @@ export class RepairPatchValidator {
       : undefined);
     add('no_regressions', comparison.newDiagnostics.length === 0, comparison.newDiagnostics.slice(0, 5).join('; ') || undefined);
 
-    return result({ changedLines: lines, ...comparison });
+    return result({
+      changedLines: lines,
+      ...comparison,
+      revealedDiagnostics: revealed.map(item => `[${item.kind}] ${item.filePath || 'project'}: ${item.message}`)
+    });
   }
 }

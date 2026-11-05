@@ -2125,6 +2125,8 @@ export interface RepairPatchValidation {
   newDiagnostics: string[];
   /** Targets that only a real run can confirm. */
   needsRuntimeProof: string[];
+  /** Errors that were hidden until the patch, outside the lines it touched. */
+  revealedDiagnostics: string[];
 }
 
 export interface RepairAttempt {
@@ -2149,6 +2151,8 @@ export interface RepairFileChange {
   beforeContent?: string;
   afterVersion: number;
   afterHash: string;
+  /** Whole lines to swap back, so a rollback can leave later edits to other lines alone. */
+  undoEdits?: Array<{ find: string; replace: string }>;
 }
 
 export interface RepairTestEvidence {
@@ -2161,6 +2165,24 @@ export interface RepairTestEvidence {
   detail: string;
 }
 
+export interface HttpProbeResult {
+  path: string;
+  status?: number;
+  error?: string;
+}
+
+/** What happened when the failed script ran again in the sandbox. */
+export interface RepairRuntimeEvidence {
+  script: string;
+  sessionId: string;
+  /** A server stayed up, or a script exited cleanly. */
+  survived: boolean;
+  /** Target fingerprints that appeared again. */
+  reproduced: string[];
+  probes: HttpProbeResult[];
+  detail: string;
+}
+
 export interface RepairVerification {
   clearedFingerprints: string[];
   remainingFingerprints: string[];
@@ -2169,6 +2191,7 @@ export interface RepairVerification {
   /** Problems from checks that could not run before the repair. Shown, never hidden. */
   unmaskedDiagnostics: string[];
   tests: RepairTestEvidence;
+  runtime?: RepairRuntimeEvidence;
   checkedAt: number;
 }
 
@@ -2177,6 +2200,8 @@ export interface RepairRollback {
   reason: string;
   conflicts: string[];
   automatic: boolean;
+  /** Files where later edits by someone else were kept. */
+  keptLaterEdits?: string[];
   at: number;
 }
 
@@ -2202,6 +2227,11 @@ export interface RepairRun {
   verification?: RepairVerification;
   rollback?: RepairRollback;
   pendingApproval?: { requestId: string; purpose: 'apply' | 'tests' | 'rollback' };
+  /** The sandbox session in use, so a cancel can stop it. */
+  activeSessionId?: string;
+  /** Continue with the next root cause after this one is verified. */
+  repairAll?: boolean;
+  chainDepth?: number;
   defectId?: string;
   memoryDefectId?: string;
   tokenUsage: number;

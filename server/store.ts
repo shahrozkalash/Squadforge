@@ -4908,6 +4908,16 @@ export class PersistentDatabase {
     return next;
   }
 
+  /** Tells other server processes this run is alive, without touching its data. */
+  public touchRepairRun(id: string): void {
+    this.dbManager.db.prepare('UPDATE repair_runs SET updated_at = ? WHERE id = ?').run(Date.now(), id);
+  }
+
+  public getRepairHeartbeat(id: string): number {
+    const row = this.dbManager.db.prepare('SELECT updated_at FROM repair_runs WHERE id = ?').get(id) as any;
+    return row?.updated_at ?? 0;
+  }
+
   public getRepairRun(id: string): RepairRun | undefined {
     const row = this.dbManager.db.prepare('SELECT data FROM repair_runs WHERE id = ?').get(id) as any;
     return row ? safeJsonParse<RepairRun | undefined>(row.data, undefined) : undefined;

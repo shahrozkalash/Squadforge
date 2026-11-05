@@ -96,6 +96,7 @@ export interface GatewayCallParams {
   responseMimeType?: string;
   allowFallback?: boolean;
   bypassCache?: boolean;
+  allowReportOnly?: boolean;
   buildId?: string;
   userId?: string;
   signal?: AbortSignal;
@@ -304,6 +305,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
     maxTokens: params.maxTokens,
     allowFallback: params.allowFallback,
     bypassCache: params.bypassCache,
+    allowReportOnly: params.allowReportOnly,
     buildId: params.buildId,
     userId: params.userId,
     signal: params.signal

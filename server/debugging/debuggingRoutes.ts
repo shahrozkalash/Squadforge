@@ -2,6 +2,7 @@ import express from 'express';
 import { db } from '../store.js';
 import { Build, RepairRun } from '../types.js';
 import { requireSameOrigin } from '../execution/executionRoutes.js';
+import { ExecutionError } from '../execution/executionSessionManager.js';
 import { ProjectMemoryService } from '../swarm/projectMemory.js';
 import { DiagnosticCollector, ReportedProblem } from './diagnosticCollector.js';
 import { RepairCoordinator, RepairError } from './repairCoordinator.js';
@@ -55,7 +56,7 @@ export function createDebuggingRouter(deps: RouteDependencies): express.Router {
       try {
         res.json(await action(build, req));
       } catch (err: any) {
-        const status = err instanceof RepairError ? err.status : 500;
+        const status = err instanceof RepairError || err instanceof ExecutionError ? err.status : 500;
         res.status(status).json({ error: err.message || 'Debugging request failed' });
       }
     };
@@ -63,8 +64,10 @@ export function createDebuggingRouter(deps: RouteDependencies): express.Router {
   router.use(requireSameOrigin);
   router.use(requireAuth);
 
-  router.post('/analyze', owned((build, req) => {
-    const report = DiagnosticCollector.collect(build.id, parseReports(req.body?.reports));
+  router.post('/analyze', owned(async (build, req) => {
+    const { probeSessionId } = req.body || {};
+    const probes = typeof probeSessionId === 'string' ? await coordinator.probe(build, probeSessionId) : [];
+    const report = await DiagnosticCollector.collect(build.id, parseReports(req.body?.reports), { probes });
     const lessons = ProjectMemoryService.getRepairLessons(build.id, req.user!.id);
     return {
       report,
@@ -75,12 +78,14 @@ export function createDebuggingRouter(deps: RouteDependencies): express.Router {
   router.get('/repairs', owned(build => ({ repairs: coordinator.list(build).map(publicRun) })));
 
   router.post('/repairs', owned((build, req) => {
-    const { rootCauseId, modelId, maxAttempts, reports } = req.body || {};
+    const { rootCauseId, modelId, maxAttempts, reports, repairAll, probeSessionId } = req.body || {};
     const run = coordinator.start(build, req.user!, {
       rootCauseId: typeof rootCauseId === 'string' ? rootCauseId : undefined,
       modelId: typeof modelId === 'string' ? modelId : undefined,
       maxAttempts: typeof maxAttempts === 'number' ? maxAttempts : undefined,
-      reports: parseReports(reports)
+      reports: parseReports(reports),
+      repairAll: repairAll === true,
+      probeSessionId: typeof probeSessionId === 'string' ? probeSessionId : undefined
     });
     return { repair: publicRun(run) };
   }));

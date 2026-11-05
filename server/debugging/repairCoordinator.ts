@@ -11,6 +11,7 @@ import {
   RepairFileChange,
   RepairLesson,
   RepairRun,
+  RepairRuntimeEvidence,
   RepairStatus,
   RepairTestEvidence,
   RootCause,
@@ -27,9 +28,10 @@ import { MergeManager } from '../swarm/mergeManager.js';
 import { ProjectMemoryService } from '../swarm/projectMemory.js';
 import { DebugAgentTeam } from './debugAgentTeam.js';
 import { DiagnosticCollector, ReportedProblem } from './diagnosticCollector.js';
-import { isTestFile, selectAffectedTests } from './importGraph.js';
+import { detectGetRoutes, isTestFile, selectAffectedTests } from './importGraph.js';
 import { RepairAction, RepairPatchValidator, ValidationContext } from './repairPatchValidator.js';
 import { RootCauseEngine } from './rootCauseEngine.js';
+import { runStaticChecks } from './staticChecks.js';
 
 const DEFAULT_ATTEMPTS = 3;
 const REPAIR_ACTOR = 'debugging_specialist';
@@ -41,6 +43,11 @@ const BUSY_RUN_STATES = ['planning', 'generating', 'integrating', 'validating', 
 const RUN_STALE_MS = 60 * 60 * 1000;
 const PROCESS_END_WAIT_MS = 5000;
 const UNUSED_APPROVAL = 'Closed automatically: the approved change was not applied';
+/** Another server process keeps a live run fresher than this. */
+const HEARTBEAT_STALE_MS = 30000;
+const MAX_REPAIR_CHAIN = 5;
+const SERVER_SCRIPTS = ['dev', 'start', 'preview'];
+const SERVER_START_WAIT_MS = 20000;
 
 export class RepairError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -55,6 +62,40 @@ export interface StartRepairOptions {
   modelId?: string;
   maxAttempts?: number;
   reports?: ReportedProblem[];
+  /** Carry on with the next root cause each time one is verified. */
+  repairAll?: boolean;
+  chainDepth?: number;
+  /** A running session to call, so failing routes become diagnostics. */
+  probeSessionId?: string;
+}
+
+export interface RepairCoordinatorOptions {
+  heartbeatMs?: number;
+  /** How long a restarted server must stay up to count as surviving. */
+  settleMs?: number;
+}
+
+/** Whole-line swaps that undo edits, newest first. Lines are what a later edit can leave intact. */
+function undoEditsFor(before: string, edits: Array<{ find: string; replace: string }>) {
+  const undo: Array<{ find: string; replace: string }> = [];
+  let content = before;
+  for (const edit of edits) {
+    const index = content.indexOf(edit.find);
+    if (index < 0) return undefined;
+    const start = content.lastIndexOf('\n', index) + 1;
+    const newline = content.indexOf('\n', index + edit.find.length);
+    const end = newline < 0 ? content.length : newline;
+    const block = content.slice(start, end);
+    const changed = block.replace(edit.find, () => edit.replace);
+    if (!changed) return undefined;
+    undo.unshift({ find: changed, replace: block });
+    content = content.slice(0, start) + changed + content.slice(end);
+  }
+  return undo;
+}
+
+function apiPath(message: string): string | undefined {
+  return message.match(/\bGET\s+(\/[\w./~-]*)/)?.[1];
 }
 
 /**
@@ -78,7 +119,13 @@ export class RepairCoordinator {
   private readonly active = new Map<string, { abort: AbortController; done: Promise<void> }>();
   private readonly rollingBack = new Set<string>();
 
-  constructor(private readonly execution: ExecutionSessionManager) {}
+  private readonly heartbeatMs: number;
+  private readonly settleMs: number;
+
+  constructor(private readonly execution: ExecutionSessionManager, options: RepairCoordinatorOptions = {}) {
+    this.heartbeatMs = options.heartbeatMs ?? 5000;
+    this.settleMs = options.settleMs ?? 3000;
+  }
 
   // --- Bookkeeping ---
 
@@ -128,11 +175,23 @@ export class RepairCoordinator {
   /** Runs one stage in the background and records anything it throws as a failure. */
   private track(run: RepairRun, stage: (signal: AbortSignal) => Promise<void>): void {
     const abort = new AbortController();
-    // Checks block while they run, so the caller gets its answer first
+
+    // Shows other server processes this run is alive, and hears a cancel made in one of them
+    const heartbeat = setInterval(() => {
+      db.touchRepairRun(run.id);
+      const stored = db.getRepairRun(run.id);
+      if (stored?.status !== 'cancelled' || abort.signal.aborted) return;
+      abort.abort(new Error('Repair cancelled'));
+      const build = db.getBuild(run.buildId);
+      if (build && stored.activeSessionId) void this.execution.stop(build, stored.activeSessionId).catch(() => undefined);
+    }, this.heartbeatMs);
+    heartbeat.unref();
+
+    // The caller gets its answer before any work starts
     const done = new Promise(resolve => setImmediate(resolve))
       .then(() => stage(abort.signal))
       .catch(err => {
-        if (err instanceof RepairCancelled) return;
+        if (err instanceof RepairCancelled || abort.signal.aborted) return;
         console.error(`Repair ${run.id} failed:`, err.message);
         const applied = run.fileChanges.length > 0 && !run.rollback;
         if (applied) {
@@ -141,7 +200,10 @@ export class RepairCoordinator {
           this.finish(run, 'failed', err.message || 'The repair failed');
         }
       })
-      .finally(() => this.active.delete(run.id));
+      .finally(() => {
+        clearInterval(heartbeat);
+        this.active.delete(run.id);
+      });
     this.active.set(run.id, { abort, done });
   }
 
@@ -157,6 +219,8 @@ export class RepairCoordinator {
       if (this.active.has(run.id)) continue;
 
       if (WORKING.includes(run.status)) {
+        // Another server process may own this run
+        if (Date.now() - db.getRepairHeartbeat(run.id) < HEARTBEAT_STALE_MS) continue;
         const message = 'The server restarted during this repair.';
         if (run.fileChanges.length > 0) this.finish(run, 'applied_unverified', `${message} The patch is applied and was not fully checked.`);
         else this.finish(run, 'failed', message);
@@ -223,6 +287,8 @@ export class RepairCoordinator {
       rootCauses: [],
       attempts: [],
       fileChanges: [],
+      repairAll: options.repairAll,
+      chainDepth: options.chainDepth ?? 0,
       tokenUsage: 0,
       createdAt: now,
       updatedAt: now
@@ -261,7 +327,8 @@ export class RepairCoordinator {
   }
 
   private async pipeline(run: RepairRun, build: Build, user: User, options: StartRepairOptions, signal: AbortSignal): Promise<void> {
-    const report = DiagnosticCollector.collect(build.id, options.reports);
+    const probes = options.probeSessionId ? await this.probe(build, options.probeSessionId) : [];
+    const report = await DiagnosticCollector.collect(build.id, options.reports, { signal, probes });
     this.update(run, { status: 'analyzing', report, workspaceHash: report.workspaceHash });
     this.checkpoint(run, signal);
 
@@ -384,7 +451,8 @@ export class RepairCoordinator {
       }
 
       this.update(run, { status: 'validating' });
-      const validation = RepairPatchValidator.validate(context, proposal.actions);
+      const validation = await RepairPatchValidator.validate(context, proposal.actions, signal);
+      this.checkpoint(run, signal);
       attempt.validation = validation;
 
       if (!validation.passed) {
@@ -505,7 +573,8 @@ export class RepairCoordinator {
         beforeHash: previous ? previous.contentHash || computeContentHash(previous.content) : '',
         beforeContent: previous && !inHistory ? previous.content : undefined,
         afterVersion: outcome.version,
-        afterHash: computeContentHash(content)
+        afterHash: computeContentHash(content),
+        undoEdits: previous && action.action === 'patch_file' ? undoEditsFor(previous.content, action.edits) : undefined
       };
     });
     const applied = [
@@ -533,18 +602,22 @@ export class RepairCoordinator {
     this.update(run, { status: 'verifying' });
     const cause = this.target(run);
 
-    const after = DiagnosticCollector.collectStatic(build.id, files, DiagnosticCollector.contractsFor(build.id));
+    const after = await runStaticChecks(build.id, files, DiagnosticCollector.contractsFor(build.id), signal);
+    this.checkpoint(run, signal);
     const skippedBefore = new Set(run.report!.checks.filter(check => check.status === 'skipped').map(check => check.name));
-    const comparison = RepairPatchValidator.compare(
+    const { actions } = RepairPatchValidator.normalize(run.attempts[run.attempts.length - 1]?.actions || []);
+    const { comparable, revealed } = RepairPatchValidator.splitRevealed(
       cause,
       run.report!.diagnostics,
-      after.diagnostics.filter(item => !skippedBefore.has(item.kind))
+      after.diagnostics.filter(item => !skippedBefore.has(item.kind)),
+      actions,
+      files
     );
+    const comparison = RepairPatchValidator.compare(cause, run.report!.diagnostics, comparable);
 
     // These are not this patch's fault, but they do mean the project is not known to be good
     const unmaskedDiagnostics = [
-      ...after.diagnostics
-        .filter(item => skippedBefore.has(item.kind))
+      ...[...revealed, ...after.diagnostics.filter(item => skippedBefore.has(item.kind))]
         .map(item => `[${item.kind}] ${item.filePath || 'project'}: ${item.message}`),
       ...after.checks
         .filter(check => check.status === 'skipped' && !skippedBefore.has(check.name))
@@ -563,7 +636,124 @@ export class RepairCoordinator {
     const tests = await this.runTests(run, build, user, cause, files, signal);
     if (!tests) return;
     this.update(run, { verification: { ...run.verification!, tests, checkedAt: Date.now() } });
+
+    if (tests.status !== 'failed') {
+      const paused = await this.proveRuntime(run, build, user, files, signal);
+      if (paused) return;
+    }
     await this.conclude(run, cause, tests);
+  }
+
+  private runtimeTargets(run: RepairRun): DebugDiagnostic[] {
+    return run.verification!.needsRuntimeProof
+      .map(print => run.report!.diagnostics.find(item => item.fingerprint === print))
+      .filter((item): item is DebugDiagnostic => Boolean(item) && item!.kind !== 'test');
+  }
+
+  /**
+   * Runs what failed again, so a runtime fix is judged by the real thing. A server is given time
+   * to crash, and its GET routes are called. Other request methods could change data, so they
+   * are never called, and a problem only they can show stays unproven.
+   */
+  private async proveRuntime(run: RepairRun, build: Build, user: User, files: ProjectFile[], signal: AbortSignal): Promise<boolean> {
+    const targets = this.runtimeTargets(run);
+    if (targets.length === 0) return false;
+
+    const plan = planDependencies(files);
+    const script = targets.map(item => item.script).find(name => name && typeof plan.scripts[name] === 'string')
+      || ['start', 'dev'].find(name => typeof plan.scripts[name] === 'string');
+    const capabilities = await this.execution.capabilities();
+    if (!script || !plan.supported || !capabilities.available) return false;
+
+    try {
+      const prepared = await this.prepareSession(run, build, user, files, signal);
+      if (isApprovalRequired(prepared)) {
+        this.update(run, {
+          status: 'awaiting_test_approval',
+          pendingApproval: { requestId: prepared.approvalRequired.id, purpose: 'tests' },
+          outcome: 'The patch is applied. Waiting for the owner to approve running the project in the sandbox.'
+        });
+        return true;
+      }
+
+      this.checkpoint(run, signal);
+      const started = await this.execution.startScript(build, prepared.id, script);
+      const runtime = SERVER_SCRIPTS.includes(script)
+        ? await this.observeServer(run, build, started, targets, files, signal)
+        : await this.observeExit(started, targets, files);
+      this.update(run, { verification: { ...run.verification!, runtime } });
+      await this.execution.destroySession(build.id, started.id).catch(err => console.error('Proof session cleanup failed:', err.message));
+    } catch (err: any) {
+      if (err instanceof RepairCancelled) throw err;
+      this.checkpoint(run, signal);
+      console.error(`Repair ${run.id} could not run the project:`, err.message);
+    }
+    return false;
+  }
+
+  private reproduced(session: ExecutionSession, targets: DebugDiagnostic[], files: ProjectFile[]): string[] {
+    const output = DiagnosticCollector.parseOutput(session, files).map(item => item.fingerprint);
+    return targets.filter(item => output.includes(item.fingerprint)).map(item => item.fingerprint);
+  }
+
+  private async observeExit(started: ExecutionSession, targets: DebugDiagnostic[], files: ProjectFile[]): Promise<RepairRuntimeEvidence> {
+    const finished = await this.waitForEnd(started.id);
+    const survived = finished.endReason === 'exited' && finished.exitCode === 0;
+    return {
+      script: finished.script!,
+      sessionId: finished.id,
+      survived,
+      reproduced: this.reproduced(finished, targets, files),
+      probes: [],
+      detail: `The ${finished.script} script ended with ${finished.endReason} (exit code ${finished.exitCode}).`
+    };
+  }
+
+  private async observeServer(
+    run: RepairRun,
+    build: Build,
+    started: ExecutionSession,
+    targets: DebugDiagnostic[],
+    files: ProjectFile[],
+    signal: AbortSignal
+  ): Promise<RepairRuntimeEvidence> {
+    const stillRunning = () => !db.getExecutionSession(started.id)?.endReason;
+
+    const deadline = Date.now() + SERVER_START_WAIT_MS;
+    let listening = false;
+    while (!listening && stillRunning() && Date.now() < deadline) {
+      this.checkpoint(run, signal);
+      listening = (await this.execution.backend.listeningPorts(started.processId!).catch(() => [] as number[])).length > 0;
+      if (!listening) await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    await new Promise(resolve => setTimeout(resolve, this.settleMs));
+    this.checkpoint(run, signal);
+
+    const wanted = [...targets.map(item => apiPath(item.message)).filter((path): path is string => Boolean(path)), ...detectGetRoutes(files).map(route => route.path)];
+    const probes = listening && stillRunning()
+      ? await this.execution.probeHttp(build, started.id, Array.from(new Set(wanted))).catch(() => [])
+      : [];
+
+    const survived = stillRunning();
+    if (survived) await this.execution.stop(build, started.id);
+    const finished = db.getExecutionSession(started.id)!;
+
+    const failingPaths = probes.filter(probe => probe.status === undefined || probe.status >= 500).map(probe => probe.path);
+    const stillFailing = targets.filter(item => {
+      const path = apiPath(item.message);
+      return path !== undefined && failingPaths.includes(path);
+    }).map(item => item.fingerprint);
+
+    return {
+      script: started.script!,
+      sessionId: started.id,
+      survived,
+      reproduced: Array.from(new Set([...this.reproduced(finished, targets, files), ...stillFailing])),
+      probes,
+      detail: survived
+        ? `The ${started.script} script stayed up${listening ? ' and listened on a port' : ', but never listened on a port'}. ${probes.length} route(s) called, ${failingPaths.length} failed.`
+        : `The ${started.script} script ended with ${finished.endReason} (exit code ${finished.exitCode}).`
+    };
   }
 
   private async conclude(run: RepairRun, cause: RootCause, tests: RepairTestEvidence): Promise<void> {
@@ -574,7 +764,19 @@ export class RepairCoordinator {
     }
 
     if (tests.status === 'failed') {
+      if (this.failuresAlreadyExisted(run, cause, tests)) {
+        const reason = 'The tests that failed are the ones that already failed before this repair, so it did not break them, and it cannot be verified while they fail.';
+        this.finish(run, 'applied_unverified', `The patch is applied and passed static checks, but it is not verified. ${reason}`);
+        this.recordMemoryAttempt(run, false, reason);
+        return;
+      }
       await this.failAndRollBack(run, `Tests failed after the patch: ${tests.detail}`);
+      return;
+    }
+
+    const runtime = run.verification!.runtime;
+    if (runtime && runtime.reproduced.length > 0) {
+      await this.failAndRollBack(run, `The same problem happened again when ${runtime.script} ran after the patch. ${runtime.detail}`);
       return;
     }
 
@@ -585,7 +787,7 @@ export class RepairCoordinator {
         ? tests.detail
         : unmasked.length > 0
           ? `Checks that could not run before now report: ${unmasked[0]}`
-          : 'This problem came from a run or a report, and nothing shows it is gone. Run what failed again, then check this repair again.';
+          : `This problem came from a run or a report, and nothing shows it is gone. ${runtime?.detail || 'Run what failed again, then check this repair again.'}`;
       this.finish(run, 'applied_unverified', `The patch is applied and passed static checks, but it is not verified. ${reason}`);
       this.recordMemoryAttempt(run, false, `Applied but unverified: ${reason}`);
       return;
@@ -593,6 +795,34 @@ export class RepairCoordinator {
 
     this.finish(run, 'verified', `Verified: the target is gone, nothing new is wrong, and ${tests.detail}`, 'repair_verified');
     this.recordVerified(run, cause, tests);
+    this.continueRepairAll(run);
+  }
+
+  /** Failures can be compared only with a run of the earlier version, and only by name. */
+  private failuresAlreadyExisted(run: RepairRun, cause: RootCause, tests: RepairTestEvidence): boolean {
+    const session = tests.sessionId ? db.getExecutionSession(tests.sessionId) : undefined;
+    if (!session) return false;
+
+    const failures = DiagnosticCollector.testFailures(session, db.getAllFiles(run.buildId));
+    const before = new Set(run.report!.diagnostics.filter(item => item.kind === 'test').map(item => item.fingerprint));
+    return failures.length > 0 &&
+      failures.every(item => before.has(item.fingerprint) && !cause.fingerprints.includes(item.fingerprint));
+  }
+
+  private continueRepairAll(run: RepairRun): void {
+    const depth = (run.chainDepth ?? 0) + 1;
+    if (!run.repairAll || depth >= MAX_REPAIR_CHAIN) return;
+
+    setImmediate(() => {
+      const build = db.getBuild(run.buildId);
+      const user = db.getUser(run.userId);
+      if (!build || !user) return;
+      try {
+        this.start(build, user, { repairAll: true, chainDepth: depth, modelId: run.modelId, maxAttempts: run.maxAttempts });
+      } catch (err: any) {
+        console.error('The next repair could not start:', err.message);
+      }
+    });
   }
 
   /**
@@ -605,12 +835,23 @@ export class RepairCoordinator {
 
     return run.verification!.needsRuntimeProof.filter(fingerprint => {
       const item = run.report!.diagnostics.find(diagnostic => diagnostic.fingerprint === fingerprint);
-      if (!item || item.source === 'reported') return true;
+      if (!item) return true;
+
+      // A real call to the route that failed is proof, whoever reported it
+      const runtime = run.verification!.runtime;
+      const path = item.kind === 'api' ? apiPath(item.message) : undefined;
+      const probe = path ? runtime?.probes.find(result => result.path === path) : undefined;
+      if (probe?.status !== undefined && probe.status < 500) return false;
+
+      if (item.source === 'reported') return true;
 
       if (item.kind === 'test') {
         const covered = tests.scope === 'full' || (item.filePath !== undefined && tests.affectedTests.includes(item.filePath));
         return !(tests.status === 'passed' && covered);
       }
+
+      // A server that stays up shows a crash at start is gone, and shows nothing about a later one
+      if (runtime?.survived && runtime.script === item.script && !path && !runtime.reproduced.includes(fingerprint)) return false;
 
       const rerun = item.script ? sessions.find(session => session.script === item.script && session.endReason) : undefined;
       return !(rerun?.workspaceHash === hash && rerun.endReason === 'exited' && rerun.exitCode === 0);
@@ -674,6 +915,7 @@ export class RepairCoordinator {
       const started = await this.execution.startScript(build, prepared.id, 'test', affected);
       const scope = started.script === 'test' ? 'full' : 'affected';
       this.update(run, {
+        activeSessionId: started.id,
         verification: { ...run.verification!, tests: { ...this.notRun(affected, 'Tests are running.'), sessionId: started.id, scope } }
       });
 
@@ -691,9 +933,7 @@ export class RepairCoordinator {
 
   /** Tests need a session of their own with dependencies in place. */
   private async prepareSession(run: RepairRun, build: Build, user: User, files: ProjectFile[], signal: AbortSignal) {
-    const remember = (sessionId: string) => this.update(run, {
-      verification: { ...run.verification!, tests: { ...run.verification!.tests, sessionId } }
-    });
+    const remember = (activeSessionId: string) => this.update(run, { activeSessionId });
 
     let session = await this.execution.createSession(build, user);
     if (isApprovalRequired(session)) return session;
@@ -742,19 +982,28 @@ export class RepairCoordinator {
   }
 
   /** Files changed since the repair are named and left alone. Undoing them would lose that work. */
-  private rollbackPlan(run: RepairRun): { actions: any[]; conflicts: string[] } {
+  private rollbackPlan(run: RepairRun): { actions: any[]; conflicts: string[]; kept: string[] } {
     const actions: any[] = [];
     const conflicts: string[] = [];
+    const kept: string[] = [];
 
     for (const change of run.fileChanges) {
       const file = db.getFile(run.buildId, change.path);
       const hash = file && (file.contentHash || computeContentHash(file.content));
+      const commitMessage = `Roll back repair ${run.id}`;
+
       if (!file || file.version !== change.afterVersion || hash !== change.afterHash) {
-        conflicts.push(`${change.path} changed after the repair`);
+        // Later edits to other lines stay. Anything touching the repaired lines needs a person
+        const undo = { action: 'patch_file' as const, path: change.path, edits: change.undoEdits };
+        if (!file || !change.undoEdits || RepairPatchValidator.applyToCopy([file], [undo]).error) {
+          conflicts.push(`${change.path} changed after the repair, including the repaired lines`);
+          continue;
+        }
+        kept.push(change.path);
+        actions.push({ ...undo, expectedVersion: file.version, expectedContentHash: hash, commitMessage });
         continue;
       }
 
-      const commitMessage = `Roll back repair ${run.id}`;
       if (change.created) {
         actions.push({ action: 'delete_file', path: change.path, expectedVersion: change.afterVersion, commitMessage });
         continue;
@@ -774,12 +1023,12 @@ export class RepairCoordinator {
         commitMessage
       });
     }
-    return { actions, conflicts };
+    return { actions, conflicts, kept };
   }
 
   private async performRollback(run: RepairRun, reason: string, automatic: boolean, approved?: any[]): Promise<RepairRun> {
     const at = Date.now();
-    const plan = approved ? { actions: approved, conflicts: [] } : this.rollbackPlan(run);
+    const plan = approved ? { actions: approved, conflicts: [], kept: run.rollback?.keptLaterEdits || [] } : this.rollbackPlan(run);
 
     if (plan.conflicts.length > 0) {
       this.update(run, { rollback: { state: 'conflict', reason, conflicts: plan.conflicts, automatic, at } });
@@ -799,7 +1048,7 @@ export class RepairCoordinator {
         return run;
       }
       this.update(run, {
-        rollback: { state: 'pending_approval', reason, conflicts: [], automatic, at },
+        rollback: { state: 'pending_approval', reason, conflicts: [], automatic, keptLaterEdits: plan.kept, at },
         pendingApproval: { requestId: request.request.id, purpose: 'rollback' }
       });
       return run;
@@ -811,12 +1060,13 @@ export class RepairCoordinator {
       return run;
     }
 
-    this.update(run, { rollback: { state: 'done', reason, conflicts: [], automatic, at } });
+    this.update(run, { rollback: { state: 'done', reason, conflicts: [], automatic, keptLaterEdits: plan.kept, at } });
     ProjectMemoryService.retractRepairLessons(run.buildId, run.userId, run.id);
     if (run.defectId) {
       CollaborativeDebuggingEngine.updateStatus(run.buildId, run.userId, { defectId: run.defectId, status: 'reopened' });
     }
-    this.finish(run, 'rolled_back', `Rolled back: ${reason}`, 'repair_rolled_back');
+    const keptNote = plan.kept.length ? ` Later edits to ${plan.kept.join(', ')} were kept.` : '';
+    this.finish(run, 'rolled_back', `Rolled back: ${reason}${keptNote}`, 'repair_rolled_back');
     return run;
   }
 
@@ -925,9 +1175,9 @@ export class RepairCoordinator {
     // Time passed during review, so the patch is checked again against the project as it is now
     this.update(run, { status: 'validating' });
     const files = snapshotFiles(build.id);
-    const report = hashWorkspace(files) === run.workspaceHash ? run.report! : DiagnosticCollector.collect(build.id);
+    const report = hashWorkspace(files) === run.workspaceHash ? run.report! : await DiagnosticCollector.collect(build.id, [], { signal });
     this.update(run, { report, workspaceHash: report.workspaceHash });
-    const validation = RepairPatchValidator.validate(this.validationContext(run, cause, files, []), request.proposedActions || []);
+    const validation = await RepairPatchValidator.validate(this.validationContext(run, cause, files, []), request.proposedActions || [], signal);
 
     if (!validation.passed) {
       const detail = validation.checks.filter(check => !check.passed).map(check => `${check.name}: ${check.detail}`).join('; ');
@@ -977,7 +1227,7 @@ export class RepairCoordinator {
 
     const active = this.active.get(run.id);
     active?.abort.abort(new Error('Repair cancelled'));
-    const sessionId = run.verification?.tests.sessionId;
+    const sessionId = run.activeSessionId || run.verification?.tests.sessionId;
     if (sessionId) await this.execution.stop(build, sessionId).catch(() => undefined);
     await active?.done;
     return db.getRepairRun(run.id)!;
@@ -996,6 +1246,31 @@ export class RepairCoordinator {
     }
     this.track(run, signal => this.verify(run, build, user, signal));
     return run;
+  }
+
+  /** Calls a running project's GET routes. Failures come back as diagnostics. */
+  async probe(build: Build, sessionId: string): Promise<DebugDiagnostic[]> {
+    const session = db.getExecutionSession(sessionId);
+    if (!session || session.buildId !== build.id) throw new RepairError('Execution session not found', 404);
+
+    const files = snapshotFiles(build.id);
+    if (session.workspaceHash !== hashWorkspace(files)) {
+      throw new RepairError('That session runs an older version of the project.', 409);
+    }
+    const routes = detectGetRoutes(files);
+    const results = await this.execution.probeHttp(build, session.id, routes.map(route => route.path));
+    return DiagnosticCollector.fromProbes(results, session, routes);
+  }
+
+  /** Off unless REPAIR_AUTO_START=true, because each repair spends model tokens. */
+  startAfterFailedGeneration(build: Build, user: User): RepairRun | null {
+    if (process.env.REPAIR_AUTO_START !== 'true') return null;
+    try {
+      return this.start(build, user, { repairAll: true });
+    } catch (err: any) {
+      console.error('Automatic repair did not start:', err.message);
+      return null;
+    }
   }
 
   private requireRun(build: Build, repairId: string): RepairRun {

@@ -14,6 +14,7 @@ import { ApprovalGateService } from '../swarm/approvalGateService.js';
 import { GenerationProfileRegistry } from '../swarm/generationProfiles.js';
 import { ProjectContextEngine } from '../swarm/projectContextEngine.js';
 import { PromptCompiler } from '../swarm/promptCompiler.js';
+import { isSecretFile } from './diagnosticCollector.js';
 
 const MAX_FILE_CHARS = 24000;
 const WINDOW_LINES = 60;
@@ -35,6 +36,8 @@ function fence(label: string, text: string): string {
 
 /** A large file is shown around the error, so "find" text can still be copied exactly. */
 function showFile(file: ProjectFile, line?: number): string {
+  // Provider prompts leave this server, so secret files are never sent
+  if (isSecretFile(file.path)) return `The contents of ${plainName(file.path)} are withheld because it holds secrets.`;
   if (file.content.length <= MAX_FILE_CHARS) return fence(`path="${file.path}"`, file.content);
 
   const lines = file.content.split('\n');
@@ -63,6 +66,15 @@ function showLessons(lessons: RepairLesson[]): string {
   )).join('\n'));
 }
 
+/** Anything shown outside a fence is reduced to characters a path or name really uses. */
+function plainName(value: string): string {
+  return value.replace(/[^\w./@$-]/g, '_');
+}
+
+function listPaths(paths: string[]): string {
+  return paths.map(plainName).join(', ') || 'none';
+}
+
 function text(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value.trim().slice(0, 2000) : fallback;
 }
@@ -78,7 +90,7 @@ export class DebugAgentTeam {
     return cause.leadAgent === 'qa_testing_specialist' ? 'debugging_specialist' : 'qa_testing_specialist';
   }
 
-  private static async ask(call: AgentCall, prompt: string, systemInstruction: string) {
+  private static async ask(call: AgentCall, prompt: string, systemInstruction: string, allowReportOnly = true) {
     return callUnifiedGateway({
       modelId: call.model.id,
       taskComplexity: 'standard',
@@ -87,6 +99,7 @@ export class DebugAgentTeam {
       allowFallback: true,
       // A retry must reach the model, or it gets the rejected answer back from the cache
       bypassCache: true,
+      allowReportOnly,
       buildId: call.buildId,
       userId: call.userId,
       signal: call.signal
@@ -111,7 +124,7 @@ export class DebugAgentTeam {
       fence('kind="summary"', cause.summary),
       showEvidence(cause, diagnostics),
       primary ? showFile(primary, cause.line) : 'No file could be tied to this problem.',
-      `Files that may be changed: ${scope.join(', ') || 'none'}`,
+      `Files that may be changed: ${listPaths(scope)}`,
       showLessons(lessons),
       'Reply with JSON only: {"report":{"hypothesis":"...","evidence":["<diagnostic id>"],"filesToChange":["<path>"]},"actions":[]}'
     ].join('\n\n');
@@ -162,18 +175,25 @@ ${DATA_RULE}`);
     const rejected = earlier.map(attempt => `Attempt ${attempt.attempt} (${attempt.outcome}): ${attempt.detail || ''}`);
 
     const context = ProjectContextEngine.buildProjectContext(cause.summary, files, targets, 1200);
-    context.relevantFiles = context.relevantFiles.map(file => ({
-      ...file,
-      contentSnippet: file.contentSnippet && fence('kind="context"', file.contentSnippet)
-    }));
+    context.relevantFiles = context.relevantFiles
+      .filter(file => !isSecretFile(file.path))
+      .map(file => ({ ...file, path: plainName(file.path), contentSnippet: file.contentSnippet && fence('kind="context"', file.contentSnippet) }));
+    // These names come from project source, and a repair does not need them
+    context.detectedComponents = [];
+    context.apiEndpoints = [];
 
     const compiled = PromptCompiler.compileGenerationPrompt({
       // The summary quotes project output, so it stays in the fenced evidence
       userRequirement: `Repair the ${cause.category.replace(/_/g, ' ')} shown in the diagnostics with the smallest possible change.`,
       profile: GenerationProfileRegistry.get('website_and_web_app'),
       context,
-      contracts,
-      targetFiles: targets,
+      contracts: contracts.map(contract => ({
+        ...contract,
+        name: plainName(contract.name),
+        filePath: plainName(contract.filePath),
+        signature: fence('kind="contract"', contract.signature)
+      })),
+      targetFiles: targets.map(plainName),
       passName: 'repair',
       agentRole: 'debugging_specialist',
       diagnosticEvidence: [
@@ -189,12 +209,12 @@ ${DATA_RULE}`);
 
 REPAIR RULES:
 - Use only "patch_file" with exact "find" text that appears once. Create a file only if the evidence shows it is missing.
-- Change only these files: ${scope.join(', ')}
+- Change only these files: ${listPaths(scope)}
 - Change as little as you can. Do not reformat or refactor. Do not hide errors with @ts-ignore, skipped tests, or similar.
 - Put a one-sentence reason in {"report":{"explanation":"..."}} next to "actions".
 ${DATA_RULE}`;
 
-    const response = await this.ask(call, compiled.userPrompt, compiled.systemPrompt + rules);
+    const response = await this.ask(call, compiled.userPrompt, compiled.systemPrompt + rules, false);
     const parsed = response.parsedResponse;
     if (!response.success || !parsed || parsed.actions.length === 0) {
       return { tokens: response.tokensUsed || 0, explanation: '', error: response.error || 'The model proposed no patch.' };

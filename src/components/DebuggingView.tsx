@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useSwarm } from '../context/SwarmContext.js';
-import { DiagnosticReport, RepairLesson, RepairRun, RootCause } from '../types/index.js';
+import { DiagnosticReport, ExecutionSession, RepairLesson, RepairRun, RootCause } from '../types/index.js';
 import {
   AlertTriangle,
   Bug,
@@ -114,9 +114,19 @@ export const DebuggingView: React.FC = () => {
     setCauses(result.rootCauses);
   });
 
-  const startRepair = (rootCauseId?: string) => act(async () => {
-    const result = await request<{ repair: RepairRun }>(`${base}/repairs`, 'POST', { rootCauseId });
+  const startRepair = (options: { rootCauseId?: string; repairAll?: boolean }) => act(async () => {
+    const result = await request<{ repair: RepairRun }>(`${base}/repairs`, 'POST', options);
     setSelectedId(result.repair.id);
+  });
+
+  /** Adds real calls to the running app to the analysis. */
+  const checkRunningApp = () => act(async () => {
+    const { sessions } = await request<{ sessions: ExecutionSession[] }>(`/api/builds/${activeBuild!.id}/execution/sessions`);
+    const running = sessions.find(item => item.status === 'running');
+    if (!running) throw new Error('Start the project in the Run tab first.');
+    const result = await request<{ report: DiagnosticReport; rootCauses: RootCause[] }>(`${base}/analyze`, 'POST', { probeSessionId: running.id });
+    setReport(result.report);
+    setCauses(result.rootCauses);
   });
 
   if (!activeBuild) {
@@ -134,13 +144,22 @@ export const DebuggingView: React.FC = () => {
             Repairs are checked before they are applied. Sensitive files and test runs always need your approval.
           </p>
         </div>
-        <button
-          onClick={analyze}
-          disabled={busy}
-          className="px-3 py-1.5 text-sm rounded-md bg-amber-500 text-neutral-950 font-medium disabled:opacity-50 flex items-center gap-1.5"
-        >
-          <Search className="w-4 h-4" /> {busy ? 'Working…' : 'Analyze project'}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={checkRunningApp}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 text-neutral-200 hover:bg-neutral-900 disabled:opacity-50"
+          >
+            Check running app
+          </button>
+          <button
+            onClick={analyze}
+            disabled={busy}
+            className="px-3 py-1.5 text-sm rounded-md bg-amber-500 text-neutral-950 font-medium disabled:opacity-50 flex items-center gap-1.5"
+          >
+            <Search className="w-4 h-4" /> {busy ? 'Working…' : 'Analyze project'}
+          </button>
+        </div>
       </header>
 
       {error && (
@@ -149,9 +168,20 @@ export const DebuggingView: React.FC = () => {
 
       {report && (
         <section aria-label="Analysis" className="rounded-md border border-neutral-800">
-          <h2 className="px-3 py-2 text-sm font-medium text-neutral-200 border-b border-neutral-800">
-            {report.diagnostics.length} problem(s) from {causes.length} root cause(s)
-          </h2>
+          <div className="px-3 py-2 border-b border-neutral-800 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-sm font-medium text-neutral-200">
+              {report.diagnostics.length} problem(s) from {causes.length} root cause(s)
+            </h2>
+            {causes.length > 1 && (
+              <button
+                onClick={() => startRepair({ repairAll: true })}
+                disabled={busy || hasOpenRepair}
+                className="px-2.5 py-1 text-xs rounded-md border border-neutral-700 text-neutral-200 hover:bg-neutral-900 disabled:opacity-40 flex items-center gap-1"
+              >
+                <Wrench className="w-3.5 h-3.5" /> Repair all
+              </button>
+            )}
+          </div>
           <div className="px-3 py-2 flex flex-wrap gap-2 border-b border-neutral-800">
             {report.checks.map(check => (
               <span
@@ -184,7 +214,7 @@ export const DebuggingView: React.FC = () => {
                       </p>
                     </div>
                     <button
-                      onClick={() => startRepair(cause.id)}
+                      onClick={() => startRepair({ rootCauseId: cause.id })}
                       disabled={busy || hasOpenRepair || !cause.primaryFile}
                       title={cause.primaryFile ? undefined : 'No file could be tied to this problem'}
                       className="px-2.5 py-1 text-xs rounded-md border border-neutral-700 text-neutral-200 hover:bg-neutral-900 disabled:opacity-40 flex items-center gap-1 shrink-0"
@@ -334,6 +364,17 @@ const RepairDetail: React.FC<{
           <span className="text-xs text-neutral-500 block">Tests</span>
           {tests.detail}
         </p>
+      )}
+
+      {run.verification?.runtime && (
+        <p className="text-sm text-neutral-300 break-words">
+          <span className="text-xs text-neutral-500 block">Ran again in the sandbox</span>
+          {run.verification.runtime.detail}
+        </p>
+      )}
+
+      {run.rollback?.keptLaterEdits && run.rollback.keptLaterEdits.length > 0 && (
+        <p className="text-xs text-neutral-400 break-words">Later edits were kept in {run.rollback.keptLaterEdits.join(', ')}.</p>
       )}
 
       {run.attempts.length > 0 && (

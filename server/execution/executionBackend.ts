@@ -1,3 +1,7 @@
+import http from 'node:http';
+import net from 'node:net';
+import { HttpProbeResult } from '../types.js';
+
 export interface SandboxLimits {
   memoryMb: number;
   cpus: number;
@@ -82,6 +86,34 @@ export interface ExecutionBackend {
   destroyEnvironment(sessionId: string): Promise<void>;
   removeDependencyCache(buildId: string): Promise<void>;
   listEnvironments(): Promise<EnvironmentRecord[]>;
+}
+
+const RELAY_REQUEST_TIMEOUT_MS = 3000;
+
+/** One GET through a relay. With a wait, it retries until the relay and project answer. */
+export async function relayGet(endpoint: PreviewEndpoint, path: string, waitMs: number): Promise<HttpProbeResult> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const result = await new Promise<HttpProbeResult>(resolve => {
+      const req = http.get({
+        path,
+        timeout: RELAY_REQUEST_TIMEOUT_MS,
+        headers: { Host: 'localhost', Connection: 'close' },
+        createConnection: () => {
+          const socket = net.connect(endpoint.port, endpoint.host);
+          if (endpoint.token) socket.write(`SF-RELAY ${endpoint.token}\n`);
+          return socket;
+        }
+      }, res => {
+        res.resume();
+        resolve({ path, status: res.statusCode });
+      });
+      req.on('timeout', () => req.destroy(new Error('The request timed out')));
+      req.on('error', err => resolve({ path, error: err.message }));
+    });
+    if (result.status !== undefined || Date.now() >= deadline) return result;
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
 }
 
 const IPV6_LOOPBACK = '00000000000000000000000001000000';

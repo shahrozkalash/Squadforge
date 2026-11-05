@@ -2309,6 +2309,10 @@ app.post('/api/builds/:id/codegen/run', requireAuth, async (req, res) => {
       maxRepairAttempts: typeof maxRepairAttempts === 'number' ? maxRepairAttempts : 3
     });
 
+    if (runRecord.status === 'failed') {
+      repairCoordinator.startAfterFailedGeneration(db.getBuild(build.id)!, req.user!);
+    }
+
     res.json({ success: true, run: runRecord });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Generation pipeline failed' });
