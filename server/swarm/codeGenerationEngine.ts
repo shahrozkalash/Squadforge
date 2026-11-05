@@ -26,9 +26,12 @@ import { AutomaticRepairEngine } from './automaticRepairEngine.js';
 import { ExecutionAdapter } from './executionAdapter.js';
 import { IntegrationAnalysisReport } from './integrationAgent.js';
 import { runCheckTask } from '../debugging/staticChecks.js';
+import { hashWorkspace } from '../execution/workspaceMaterializer.js';
 import { MergeManager } from './mergeManager.js';
 import { ApprovalGateService } from './approvalGateService.js';
 import { ProjectMemoryService } from './projectMemory.js';
+
+const MAX_FINAL_CHECKS = 3;
 
 export interface CodeGenerationOptions {
   buildId: string;
@@ -405,7 +408,7 @@ export class CodeGenerationEngine {
       const postGenFiles = db.getAllFiles(buildId);
       const integrationReport = await runCheckTask<IntegrationAnalysisReport>(
         'integration',
-        postGenFiles.map(({ path, content }) => ({ path, content }) as ProjectFile),
+        postGenFiles,
         [],
         signal
       );
@@ -548,8 +551,7 @@ export class CodeGenerationEngine {
       const pass6Start = Date.now();
 
       // Finalization must strictly revalidate the latest workspace state directly from storage
-      const finalWorkspaceFiles = db.getAllFiles(buildId);
-      const finalVerification = await AutomaticRepairEngine.checkDimensions(finalWorkspaceFiles, establishedContracts, signal);
+      const finalVerification = await this.checkStableWorkspace(buildId, establishedContracts, signal);
 
       runRecord.validationResults = {
         syntaxErrors: finalVerification.syntaxErrorsCount,
@@ -660,6 +662,20 @@ export class CodeGenerationEngine {
     } finally {
       this.activeRuns.delete(runId);
     }
+  }
+
+  /**
+   * The check runs in another process, so the workspace can change while it runs. A run is
+   * finalized only for files that were really checked, so a change means checking again.
+   */
+  private static async checkStableWorkspace(buildId: string, contracts: ProjectContract[], signal: AbortSignal) {
+    for (let attempt = 0; attempt < MAX_FINAL_CHECKS; attempt++) {
+      const files = db.getAllFiles(buildId);
+      const checked = hashWorkspace(files);
+      const verification = await AutomaticRepairEngine.checkDimensions(files, contracts, signal);
+      if (hashWorkspace(db.getAllFiles(buildId)) === checked) return verification;
+    }
+    throw new Error('The project kept changing during final validation, so it could not be finalized.');
   }
 
   /**

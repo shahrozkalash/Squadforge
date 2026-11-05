@@ -131,7 +131,7 @@ export class AutomaticRepairEngine {
   ): Promise<RepairValidationSnapshot> {
     return runCheckTask<RepairValidationSnapshot>(
       'dimensions',
-      files.map(({ path, content }) => ({ path, content }) as ProjectFile),
+      files,
       contracts,
       signal
     );

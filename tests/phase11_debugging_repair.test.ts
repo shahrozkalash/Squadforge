@@ -13,6 +13,7 @@ import { smartRouter } from '../server/smartRouter.js';
 import { modelRegistry } from '../server/modelRegistry.js';
 import { ApprovalGateService } from '../server/swarm/approvalGateService.js';
 import { AutomaticRepairEngine } from '../server/swarm/automaticRepairEngine.js';
+import { CodeGenerationEngine } from '../server/swarm/codeGenerationEngine.js';
 import { MergeManager } from '../server/swarm/mergeManager.js';
 import { ProjectMemoryService } from '../server/swarm/projectMemory.js';
 import { DisabledBackend } from '../server/execution/disabledBackend.js';
@@ -1681,6 +1682,143 @@ describe('Phase 11: limitation fixes', () => {
 
     assert.equal(backend.processes[0].stopped, true, 'what the repair started is stopped');
     assert.notEqual(db.getExecutionSession(mine.id)?.status, 'destroyed', 'the session stays the owner\'s');
+  });
+
+  test('a repair that pauses for a second approval still cleans up its own session', async t => {
+    const owner = makeUser('pausedowner');
+    const build = await makeBuild(owner, {
+      'package.json': JSON.stringify({ name: 'x', scripts: { test: 'vitest run' }, devDependencies: { vitest: '2.0.0' } }),
+      'src/m.ts': `export const m: number = 'x';\n`,
+      'src/m.test.ts': `import { m } from './m';\nexport const c = m;\n`
+    });
+    scriptAgents(t, { patches: [fixPatch('src/m.ts', `'x'`, '1')] });
+    const backend = new FakeBackend();
+    const { repairs } = coordinator(backend);
+
+    const held = await repair(repairs, build, owner);
+    await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+    await until(() => db.getRepairRun(held.id)?.status === 'awaiting_test_approval' && Boolean(db.getRepairRun(held.id)?.pendingApproval), 'the install approval');
+    const second = db.getRepairRun(held.id)!;
+    assert.equal(db.getApprovalRequest(second.pendingApproval!.requestId)?.operationType, 'dependency_install');
+
+    await repairs.handleApprovalDecision(decide(build, owner, second.pendingApproval!.requestId, true), owner);
+    await until(() => backend.processes.length === 1, 'the install');
+    backend.processes[0].end(0);
+    await until(() => backend.processes.length === 2, 'the test run');
+    backend.processes[1].end(0);
+
+    assert.equal((await repairs.settled(held.id))!.status, 'verified');
+    assert.equal(backend.environments.size, 0, 'a leaked session would use up the user limit');
+  });
+
+  test('a session the owner already used is left alone, and the repair says why it stopped', async t => {
+    const owner = makeUser('usedsession');
+    const build = await makeBuild(owner, {
+      'package.json': JSON.stringify({ name: 'x', scripts: { test: 'vitest run', build: 'vite build' } }),
+      'src/m.ts': `export const m: number = 'x';\n`,
+      'src/m.test.ts': `import { m } from './m';\nexport const c = m;\n`
+    });
+    scriptAgents(t, { patches: [fixPatch('src/m.ts', `'x'`, '1')] });
+    const backend = new FakeBackend();
+    const { manager, repairs } = coordinator(backend);
+
+    const held = await repair(repairs, build, owner);
+    const decided = decide(build, owner, held.pendingApproval!.requestId, true);
+    const mine = await manager.createSession(build, owner);
+    assert.ok('id' in mine);
+    await manager.startScript(build, mine.id, 'build');
+    backend.processes[0].end(0);
+    await manager.waitForProcess(mine.id);
+    await until(() => db.getExecutionSession(mine.id)?.status === 'ready', 'the owner\'s run');
+
+    await repairs.handleApprovalDecision(decided, owner);
+    const finished = (await repairs.settled(held.id))!;
+
+    assert.equal(finished.status, 'applied_unverified', finished.outcome);
+    assert.match(finished.outcome!, /Delete it in the Run tab/);
+    assert.notEqual(db.getExecutionSession(mine.id)?.status, 'destroyed');
+  });
+
+  test('a full log cannot hide a route check', async () => {
+    const owner = makeUser('fulllog');
+    const build = await makeBuild(owner, serverProject);
+    const backend = new FakeBackend();
+    const tiny = new ExecutionSessionManager(backend, { ...config, maxLogBytes: 1 });
+
+    await withRelay(backend, () => 200, async () => {
+      const first = await tiny.createSession(build, owner);
+      assert.ok('approvalRequired' in first);
+      decide(build, owner, first.approvalRequired.id, true);
+      const created = await tiny.createSession(build, owner);
+      assert.ok('id' in created);
+      await tiny.startScript(build, created.id, 'start');
+
+      await tiny.probeHttp(build, created.id, ['/ok']);
+
+      assert.equal(db.sessionWasReached(created.id), true);
+      await tiny.stop(build, created.id);
+    });
+  });
+
+  test('a change during final validation is checked before a run is finalized', async t => {
+    const owner = makeUser('finalrace');
+    const build = await makeBuild(owner, { 'src/a.ts': 'export const a = 1;\n' });
+    const original = AutomaticRepairEngine.checkDimensions.bind(AutomaticRepairEngine);
+    let calls = 0;
+    t.mock.method(AutomaticRepairEngine, 'checkDimensions', async (files: ProjectFile[], contracts: any[], signal?: AbortSignal) => {
+      calls += 1;
+      const result = await original(files, contracts, signal);
+      if (calls === 2) {
+        await MergeManager.applyBatchActions(build.id, 'user', [{ action: 'create_file', path: 'src/late.ts', content: 'export const late = {;\n' }]);
+      }
+      return result;
+    });
+
+    const run = await CodeGenerationEngine.runGenerationPipeline({
+      buildId: build.id,
+      userId: owner.id,
+      userRequest: 'Create src/clean.ts',
+      mockAiResponse: { actions: [{ action: 'create_file', path: 'src/clean.ts', content: 'export const clean = 1;\n' }] } as any
+    });
+
+    assert.equal(calls, 3, 'the changed workspace must be checked again');
+    assert.equal(run.status, 'failed', 'the late syntax error must be seen');
+  });
+
+  test('a project that never stops changing is not finalized', async t => {
+    const owner = makeUser('finalchurn');
+    const build = await makeBuild(owner, { 'src/a.ts': 'export const a = 1;\n' });
+    const original = AutomaticRepairEngine.checkDimensions.bind(AutomaticRepairEngine);
+    let calls = 0;
+    t.mock.method(AutomaticRepairEngine, 'checkDimensions', async (files: ProjectFile[], contracts: any[], signal?: AbortSignal) => {
+      calls += 1;
+      const result = await original(files, contracts, signal);
+      if (calls >= 2) {
+        await MergeManager.applyBatchActions(build.id, 'user', [{ action: 'create_file', path: `src/n${calls}.ts`, content: 'export const n = 1;\n' }]);
+      }
+      return result;
+    });
+
+    const run = await CodeGenerationEngine.runGenerationPipeline({
+      buildId: build.id,
+      userId: owner.id,
+      userRequest: 'Create src/clean.ts',
+      mockAiResponse: { actions: [{ action: 'create_file', path: 'src/clean.ts', content: 'export const clean = 1;\n' }] } as any
+    });
+
+    assert.equal(run.status, 'failed');
+    assert.match(run.error!, /kept changing/);
+  });
+
+  test('a cancelled check does not wait for its turn', async () => {
+    const files = [{ path: 'src/a.ts', content: 'export const a = 1;\n' }] as ProjectFile[];
+    const busy = runStaticChecks('first', files);
+    const abort = new AbortController();
+    const queued = runStaticChecks('second', files, [], abort.signal);
+
+    abort.abort();
+    await assert.rejects(queued, /cancelled/);
+    await busy;
   });
 
   test('a generic failure message cannot excuse a repair as an old failure', async t => {

@@ -1006,10 +1006,13 @@ export class RepairCoordinator {
 
     let session = await this.execution.createSession(build, user);
     if (isApprovalRequired(session)) return session;
-    remember(session.id, session.id !== existing);
+    // A run that paused for an approval finds its own session again, and it is still its own
+    const owned = session.id !== existing || (session.id === run.activeSessionId && Boolean(run.activeSessionOwned));
+    remember(session.id, owned);
 
     // An approved workspace can already have a used session, which cannot give trusted results
     if (session.script) {
+      if (!owned) throw new RepairError('A session that already ran a script is using this version. Delete it in the Run tab, then check this repair again.', 409);
       if (session.status !== 'ready') throw new RepairError('This workspace is busy running another script.', 409);
       await this.execution.destroySession(build.id, session.id);
       session = await this.execution.createSession(build, user);
