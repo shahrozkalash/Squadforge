@@ -40,6 +40,8 @@ class StaticCheckRunner {
     });
     worker.stdout?.resume();
     worker.stderr?.resume();
+    // An unhandled 'error' event would take the whole server down
+    worker.on('error', err => console.error('Check process error:', err.message));
     this.worker = worker;
     return worker;
   }
@@ -72,6 +74,7 @@ class StaticCheckRunner {
         clearTimeout(timer);
         worker.off('message', onMessage);
         worker.off('exit', onExit);
+        worker.off('error', onError);
         signal?.removeEventListener('abort', onAbort);
         if (keep) this.release(worker);
         else this.stop(worker);
@@ -82,13 +85,17 @@ class StaticCheckRunner {
         done(() => (message.error ? reject(new Error(message.error)) : resolve(message.result)), true);
       };
       const onExit = () => done(() => reject(new Error('The check process stopped unexpectedly')), false);
+      const onError = (err: Error) => done(() => reject(new Error(`The check process failed: ${err.message}`)), false);
       const onAbort = () => done(() => reject(new Error('Checks cancelled')), false);
       const timer = setTimeout(() => done(() => reject(new Error('Checks timed out')), false), CHECK_TIMEOUT_MS);
 
       worker.on('message', onMessage);
       worker.once('exit', onExit);
+      worker.once('error', onError);
       signal?.addEventListener('abort', onAbort, { once: true });
-      worker.send({ id, buildId, contracts, files: files.map(({ path, content }) => ({ path, content })) });
+      worker.send({ id, buildId, contracts, files: files.map(({ path, content }) => ({ path, content })) }, err => {
+        if (err) onError(err);
+      });
     });
   }
 

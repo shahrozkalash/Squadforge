@@ -2177,6 +2177,9 @@ export interface RepairRuntimeEvidence {
   sessionId: string;
   /** A server stayed up, or a script exited cleanly. */
   survived: boolean;
+  /** Whether a server opened a port, and how long it stayed up after that. */
+  listening: boolean;
+  uptimeMs: number;
   /** Target fingerprints that appeared again. */
   reproduced: string[];
   probes: HttpProbeResult[];

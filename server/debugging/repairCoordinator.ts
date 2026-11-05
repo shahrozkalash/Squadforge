@@ -48,6 +48,7 @@ const HEARTBEAT_STALE_MS = 30000;
 const MAX_REPAIR_CHAIN = 5;
 const SERVER_SCRIPTS = ['dev', 'start', 'preview'];
 const SERVER_START_WAIT_MS = 20000;
+const MAX_START_CRASH_MS = 15000;
 
 export class RepairError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -94,8 +95,28 @@ function undoEditsFor(before: string, edits: Array<{ find: string; replace: stri
   return undo;
 }
 
+/**
+ * Checks an undo against later content. Each block must be there exactly once, as whole lines.
+ * Matching inside a longer line would turn a user's "retries = 30" into "retries = 10".
+ */
+function undoesWholeLines(content: string, undo: Array<{ find: string; replace: string }>): boolean {
+  let current = content;
+  for (const edit of undo) {
+    const index = current.indexOf(edit.find);
+    if (index < 0 || current.indexOf(edit.find, index + 1) >= 0) return false;
+
+    const end = index + edit.find.length;
+    const startsLine = index === 0 || current[index - 1] === '\n';
+    const endsLine = end === current.length || current[end] === '\n' || current[end] === '\r';
+    if (!startsLine || !endsLine) return false;
+    current = current.slice(0, index) + edit.replace + current.slice(end);
+  }
+  return true;
+}
+
 function apiPath(message: string): string | undefined {
-  return message.match(/\bGET\s+(\/[\w./~-]*)/)?.[1];
+  // A path with a query is a different request from the bare path, so it cannot be proven by one
+  return message.match(/\bGET\s+(\/[\w./~-]*)(?=\s|$)/)?.[1];
 }
 
 /**
@@ -228,6 +249,7 @@ export class RepairCoordinator {
       }
 
       if (run.rollback?.state === 'pending_approval' && !WAITING.includes(run.status)) {
+        if (Date.now() - db.getRepairHeartbeat(run.id) < HEARTBEAT_STALE_MS && !run.pendingApproval) continue;
         const request = run.pendingApproval && db.getApprovalRequest(run.pendingApproval.requestId);
         if (!request || request.status !== 'pending' || ApprovalGateService.hasExpired(request)) {
           this.update(run, {
@@ -328,6 +350,7 @@ export class RepairCoordinator {
 
   private async pipeline(run: RepairRun, build: Build, user: User, options: StartRepairOptions, signal: AbortSignal): Promise<void> {
     const probes = options.probeSessionId ? await this.probe(build, options.probeSessionId) : [];
+    this.checkpoint(run, signal);
     const report = await DiagnosticCollector.collect(build.id, options.reports, { signal, probes });
     this.update(run, { status: 'analyzing', report, workspaceHash: report.workspaceHash });
     this.checkpoint(run, signal);
@@ -644,6 +667,14 @@ export class RepairCoordinator {
     await this.conclude(run, cause, tests);
   }
 
+  /** How long the failed process lived, if it died by itself soon enough to be a crash at start. */
+  private crashLifetime(item: DebugDiagnostic): number | undefined {
+    const session = item.sessionId ? db.getExecutionSession(item.sessionId) : undefined;
+    if (!session?.startedAt || !session.stoppedAt || session.endReason !== 'failed') return undefined;
+    const lifetime = session.stoppedAt - session.startedAt;
+    return lifetime <= MAX_START_CRASH_MS ? lifetime : undefined;
+  }
+
   private runtimeTargets(run: RepairRun): DebugDiagnostic[] {
     return run.verification!.needsRuntimeProof
       .map(print => run.report!.diagnostics.find(item => item.fingerprint === print))
@@ -665,6 +696,7 @@ export class RepairCoordinator {
     const capabilities = await this.execution.capabilities();
     if (!script || !plan.supported || !capabilities.available) return false;
 
+    let sessionId: string | undefined;
     try {
       const prepared = await this.prepareSession(run, build, user, files, signal);
       if (isApprovalRequired(prepared)) {
@@ -676,17 +708,19 @@ export class RepairCoordinator {
         return true;
       }
 
+      sessionId = prepared.id;
       this.checkpoint(run, signal);
       const started = await this.execution.startScript(build, prepared.id, script);
       const runtime = SERVER_SCRIPTS.includes(script)
         ? await this.observeServer(run, build, started, targets, files, signal)
         : await this.observeExit(started, targets, files);
       this.update(run, { verification: { ...run.verification!, runtime } });
-      await this.execution.destroySession(build.id, started.id).catch(err => console.error('Proof session cleanup failed:', err.message));
     } catch (err: any) {
       if (err instanceof RepairCancelled) throw err;
       this.checkpoint(run, signal);
       console.error(`Repair ${run.id} could not run the project:`, err.message);
+    } finally {
+      if (sessionId) await this.execution.destroySession(build.id, sessionId).catch(err => console.error('Proof session cleanup failed:', err.message));
     }
     return false;
   }
@@ -703,6 +737,8 @@ export class RepairCoordinator {
       script: finished.script!,
       sessionId: finished.id,
       survived,
+      listening: false,
+      uptimeMs: 0,
       reproduced: this.reproduced(finished, targets, files),
       probes: [],
       detail: `The ${finished.script} script ended with ${finished.endReason} (exit code ${finished.exitCode}).`
@@ -726,7 +762,9 @@ export class RepairCoordinator {
       listening = (await this.execution.backend.listeningPorts(started.processId!).catch(() => [] as number[])).length > 0;
       if (!listening) await new Promise(resolve => setTimeout(resolve, 250));
     }
-    await new Promise(resolve => setTimeout(resolve, this.settleMs));
+    const startedAt = Date.now();
+    const lifetimes = targets.map(item => this.crashLifetime(item) ?? 0);
+    await new Promise(resolve => setTimeout(resolve, Math.max(this.settleMs, ...lifetimes.map(lifetime => lifetime * 2))));
     this.checkpoint(run, signal);
 
     const wanted = [...targets.map(item => apiPath(item.message)).filter((path): path is string => Boolean(path)), ...detectGetRoutes(files).map(route => route.path)];
@@ -735,10 +773,12 @@ export class RepairCoordinator {
       : [];
 
     const survived = stillRunning();
+    const uptimeMs = Date.now() - startedAt;
     if (survived) await this.execution.stop(build, started.id);
     const finished = db.getExecutionSession(started.id)!;
 
-    const failingPaths = probes.filter(probe => probe.status === undefined || probe.status >= 500).map(probe => probe.path);
+    // A timeout says nothing either way, so only a real server error counts as still failing
+    const failingPaths = probes.filter(probe => probe.status !== undefined && probe.status >= 500).map(probe => probe.path);
     const stillFailing = targets.filter(item => {
       const path = apiPath(item.message);
       return path !== undefined && failingPaths.includes(path);
@@ -748,6 +788,8 @@ export class RepairCoordinator {
       script: started.script!,
       sessionId: started.id,
       survived,
+      listening,
+      uptimeMs,
       reproduced: Array.from(new Set([...this.reproduced(finished, targets, files), ...stillFailing])),
       probes,
       detail: survived
@@ -801,9 +843,11 @@ export class RepairCoordinator {
   /** Failures can be compared only with a run of the earlier version, and only by name. */
   private failuresAlreadyExisted(run: RepairRun, cause: RootCause, tests: RepairTestEvidence): boolean {
     const session = tests.sessionId ? db.getExecutionSession(tests.sessionId) : undefined;
-    if (!session) return false;
+    if (session?.endReason !== 'failed') return false;
 
-    const failures = DiagnosticCollector.testFailures(session, db.getAllFiles(run.buildId));
+    // "FAIL src/a.test.ts" names a file, so a new failure in it would look like an old one
+    const failures = DiagnosticCollector.testFailures(session, db.getAllFiles(run.buildId))
+      .filter(item => item.message !== `Test failed: ${item.filePath}`);
     const before = new Set(run.report!.diagnostics.filter(item => item.kind === 'test').map(item => item.fingerprint));
     return failures.length > 0 &&
       failures.every(item => before.has(item.fingerprint) && !cause.fingerprints.includes(item.fingerprint));
@@ -832,6 +876,7 @@ export class RepairCoordinator {
   private unprovenTargets(run: RepairRun, tests: RepairTestEvidence): string[] {
     const hash = hashWorkspace(db.getAllFiles(run.buildId));
     const sessions = db.getExecutionSessions(run.buildId, 20);
+    const routes = detectGetRoutes(db.getAllFiles(run.buildId)).map(route => route.path);
 
     return run.verification!.needsRuntimeProof.filter(fingerprint => {
       const item = run.report!.diagnostics.find(diagnostic => diagnostic.fingerprint === fingerprint);
@@ -841,7 +886,9 @@ export class RepairCoordinator {
       const runtime = run.verification!.runtime;
       const path = item.kind === 'api' ? apiPath(item.message) : undefined;
       const probe = path ? runtime?.probes.find(result => result.path === path) : undefined;
-      if (probe?.status !== undefined && probe.status < 500) return false;
+      // 401 and 404 show nothing, and a dev server answers 200 for routes that no longer exist
+      const answered = probe?.status !== undefined && probe.status >= 200 && probe.status < 300;
+      if (answered && routes.includes(path!)) return false;
 
       if (item.source === 'reported') return true;
 
@@ -850,8 +897,16 @@ export class RepairCoordinator {
         return !(tests.status === 'passed' && covered);
       }
 
-      // A server that stays up shows a crash at start is gone, and shows nothing about a later one
-      if (runtime?.survived && runtime.script === item.script && !path && !runtime.reproduced.includes(fingerprint)) return false;
+      // Staying up proves something only if the original crash came quickly on its own, and the
+      // server has now outlived it. A crash from a request would need that request to prove.
+      const lifetime = this.crashLifetime(item);
+      const outlived = lifetime !== undefined && (runtime?.uptimeMs ?? 0) >= lifetime * 2;
+      if (runtime?.survived && runtime.listening && runtime.script === item.script && !path && outlived && !runtime.reproduced.includes(fingerprint)) {
+        return false;
+      }
+
+      // A server that exits has not shown it works. A clean exit proves only a script meant to end
+      if (item.script && SERVER_SCRIPTS.includes(item.script)) return true;
 
       const rerun = item.script ? sessions.find(session => session.script === item.script && session.endReason) : undefined;
       return !(rerun?.workspaceHash === hash && rerun.endReason === 'exited' && rerun.exitCode === 0);
@@ -995,7 +1050,7 @@ export class RepairCoordinator {
       if (!file || file.version !== change.afterVersion || hash !== change.afterHash) {
         // Later edits to other lines stay. Anything touching the repaired lines needs a person
         const undo = { action: 'patch_file' as const, path: change.path, edits: change.undoEdits };
-        if (!file || !change.undoEdits || RepairPatchValidator.applyToCopy([file], [undo]).error) {
+        if (!file || !change.undoEdits || !undoesWholeLines(file.content, change.undoEdits)) {
           conflicts.push(`${change.path} changed after the repair, including the repaired lines`);
           continue;
         }

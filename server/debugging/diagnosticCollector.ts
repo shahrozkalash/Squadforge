@@ -136,7 +136,8 @@ const API_FAILURES = [
 const TEST_FAILURES = [
   /^\s*(?:✖|×|✕)\s+(.+?)(?:\s+\([\d.]+\s*m?s\))?$/,
   /^\s*not ok \d+ - (.+)$/,
-  /^\s*FAIL\s+(\S+)/
+  /^\s*FAIL\s+(.+)$/,
+  /^\s*●\s+(?!Console\b)(.+)$/
 ];
 
 /** TAP puts a failure's location in a YAML block under its "not ok" line. */
@@ -212,7 +213,7 @@ export function parseProcessOutput(
           ...base,
           kind: 'test',
           message: `Test failed: ${failure[1].trim()}`,
-          filePath: matchProjectPath(failure[1].trim(), files) || location?.filePath,
+          filePath: matchProjectPath(failure[1].trim().split(/\s/)[0], files) || location?.filePath,
           line: location?.line
         }));
         testLocation = undefined;

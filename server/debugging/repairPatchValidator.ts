@@ -228,21 +228,33 @@ export class RepairPatchValidator {
     if (cause.category !== 'syntax_error') return { comparable: after, revealed: [] };
 
     const known = new Set(baseline.map(item => item.fingerprint));
-    const ranges = new Map<string, Array<[number, number]>>();
+    const ranges = new Map<string, Array<[number, number]> | 'whole_file'>();
     for (const action of actions) {
       const content = files.find(file => file.path === action.path)?.content || '';
-      ranges.set(action.path, (action.edits || []).map(edit => {
-        const start = content.slice(0, Math.max(content.indexOf(edit.replace), 0)).split('\n').length;
-        return [start, start + edit.replace.split('\n').length - 1];
-      }));
+      const edits = action.edits || [];
+      // A deletion leaves no text to find, and a new file is all patch
+      if (action.action !== 'patch_file' || edits.some(edit => !edit.replace)) {
+        ranges.set(action.path, 'whole_file');
+        continue;
+      }
+      const lines: Array<[number, number]> = [];
+      for (const edit of edits) {
+        for (let index = content.indexOf(edit.replace); index >= 0; index = content.indexOf(edit.replace, index + 1)) {
+          const start = content.slice(0, index).split('\n').length;
+          lines.push([start, start + edit.replace.split('\n').length - 1]);
+        }
+      }
+      ranges.set(action.path, lines);
     }
 
-    const touchedByPatch = (item: DebugDiagnostic) => {
+    // Garbled code hides errors in its own file. Anything new elsewhere came from the patch
+    const couldBeHidden = (item: DebugDiagnostic) => {
       const lines = item.filePath ? ranges.get(item.filePath) : undefined;
+      if (!lines || lines === 'whole_file' || (item.kind !== 'type' && item.kind !== 'integration')) return false;
       // With no line it cannot be pinned on the patch, and being revealed still blocks verified
-      return Boolean(lines) && item.line !== undefined && lines!.some(([from, to]) => item.line! >= from && item.line! <= to);
+      return item.line === undefined || !lines.some(([from, to]) => item.line! >= from && item.line! <= to);
     };
-    const isRevealed = (item: DebugDiagnostic) => !known.has(item.fingerprint) && item.kind !== 'syntax' && !touchedByPatch(item);
+    const isRevealed = (item: DebugDiagnostic) => !known.has(item.fingerprint) && couldBeHidden(item);
     return { comparable: after.filter(item => !isRevealed(item)), revealed: after.filter(isRevealed) };
   }
 

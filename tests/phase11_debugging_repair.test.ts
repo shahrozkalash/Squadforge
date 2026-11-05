@@ -27,7 +27,7 @@ import {
   redactSecrets
 } from '../server/debugging/diagnosticCollector.js';
 import { createDebuggingRouter } from '../server/debugging/debuggingRoutes.js';
-import { buildImportGraph, isTestFile, selectAffectedTests } from '../server/debugging/importGraph.js';
+import { buildImportGraph, detectGetRoutes, isTestFile, selectAffectedTests } from '../server/debugging/importGraph.js';
 import { RepairCoordinator } from '../server/debugging/repairCoordinator.js';
 import { RepairPatchValidator, ValidationContext } from '../server/debugging/repairPatchValidator.js';
 import { RootCauseEngine } from '../server/debugging/rootCauseEngine.js';
@@ -1115,8 +1115,9 @@ describe('Phase 11: limitation fixes', () => {
     'src/app.ts': `const app = { get: (...args: unknown[]) => args };\napp.get('/api/users', () => 'ok');\nexport const value = 1;\n`
   };
 
-  async function failedStart(build: Build, owner: User, message: string) {
-    const id = session(build, owner, { script: 'start', endReason: 'failed', exitCode: 1 });
+  async function failedStart(build: Build, owner: User, message: string, lifetimeMs = 100) {
+    const now = Date.now();
+    const id = session(build, owner, { script: 'start', endReason: 'failed', exitCode: 1, startedAt: now - lifetimeMs, stoppedAt: now });
     db.appendExecutionLog(build.id, { sessionId: id, stream: 'stderr', text: `${message}\n    at run (/workspace/src/app.ts:4:1)\n`, createdAt: Date.now() });
   }
 
@@ -1367,6 +1368,217 @@ describe('Phase 11: limitation fixes', () => {
       assert.deepEqual(finished.verification?.runtime?.probes, [{ path: '/api/users', status: 200 }]);
       assert.equal(backend.processes[0].stopped, true, 'the proof run is stopped afterwards');
     });
+  });
+
+  test('staying up proves nothing about a crash that came late', async t => {
+    const owner = makeUser('latecrash');
+    const build = await makeBuild(owner, serverProject);
+    await failedStart(build, owner, 'TypeError: crashed on checkout', 60000);
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    const backend = new FakeBackend();
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 10 });
+
+    await withRelay(backend, () => 200, async () => {
+      const held = await repair(repairs, build, owner);
+      await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+      const finished = (await repairs.settled(held.id))!;
+
+      assert.equal(finished.verification?.runtime?.survived, true);
+      assert.equal(finished.status, 'applied_unverified', finished.outcome);
+      assert.equal(ProjectMemoryService.getRepairLessons(build.id, owner.id).filter(lesson => lesson.outcome === 'verified').length, 0);
+    });
+  });
+
+  test('a server that never listens proves nothing', async t => {
+    const owner = makeUser('nolisten');
+    const build = await makeBuild(owner, serverProject);
+    await failedStart(build, owner, 'Error: boot failed');
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    const backend = new FakeBackend();
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 10 });
+
+    const held = await repair(repairs, build, owner);
+    await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+    await until(() => backend.processes.length === 1, 'the proof run');
+    await until(() => Boolean(db.getExecutionSessions(build.id, 1)[0]?.processId), 'the process');
+
+    // The wait for a port is long, so the patch's verdict is checked from a process that ends
+    backend.processes[0].end(0);
+    const finished = (await repairs.settled(held.id))!;
+    assert.equal(finished.status, 'applied_unverified', finished.outcome);
+  });
+
+  for (const [label, status, route] of [
+    ['a login wall', 401, '/api/users'],
+    ['a missing route', 404, '/api/users'],
+    ['a dev server fallback for a route that is gone', 200, '/api/gone']
+  ] as const) {
+    test(`${label} is not proof that a route was fixed`, async t => {
+      const owner = makeUser('weakproof');
+      const build = await makeBuild(owner, serverProject);
+      scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+      const backend = new FakeBackend();
+      const { manager } = coordinator(backend);
+      const repairs = new RepairCoordinator(manager, { settleMs: 10 });
+
+      await withRelay(backend, () => status, async () => {
+        const held = await repair(repairs, build, owner, {
+          reports: [{ kind: 'api', message: `GET ${route} returned 500`, filePath: 'src/app.ts' }]
+        });
+        await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+        assert.equal((await repairs.settled(held.id))!.status, 'applied_unverified');
+      });
+    });
+  }
+
+  test('a route with a query is not proven by the bare path', async t => {
+    const owner = makeUser('query');
+    const build = await makeBuild(owner, serverProject);
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    const backend = new FakeBackend();
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 10 });
+
+    await withRelay(backend, () => 200, async () => {
+      const held = await repair(repairs, build, owner, {
+        reports: [{ kind: 'api', message: 'GET /api/users?id=1 returned 500', filePath: 'src/app.ts' }]
+      });
+      await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+      assert.equal((await repairs.settled(held.id))!.status, 'applied_unverified');
+    });
+  });
+
+  test('a slow route is not treated as the failure happening again', async t => {
+    const owner = makeUser('slowroute');
+    const build = await makeBuild(owner, serverProject);
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    const backend = new FakeBackend();
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 10 });
+    t.mock.method(manager, 'probeHttp', async () => [{ path: '/api/users', error: 'The request timed out' }]);
+
+    await withRelay(backend, () => 200, async () => {
+      const held = await repair(repairs, build, owner, {
+        reports: [{ kind: 'api', message: 'GET /api/users returned 500', filePath: 'src/app.ts' }]
+      });
+      await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+      assert.equal((await repairs.settled(held.id))!.status, 'applied_unverified');
+    });
+  });
+
+  test('cancelling during a proof run removes its environment', async t => {
+    const owner = makeUser('cancelproof');
+    const build = await makeBuild(owner, serverProject);
+    await failedStart(build, owner, 'Error: boot failed');
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    const backend = new FakeBackend();
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 200 });
+    backend.ports = [3000];
+
+    const held = await repair(repairs, build, owner);
+    await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+    await until(() => backend.processes.length === 1, 'the proof run');
+    await repairs.cancel(build, held.id);
+
+    assert.equal(backend.processes[0].stopped, true);
+    assert.equal(backend.environments.size, 0);
+  });
+
+  test('rollback never edits inside a longer line', async t => {
+    const owner = makeUser('substring');
+    const build = await makeBuild(owner, { 'src/total.ts': `export const total: number = 'five';\nexport const note = 'a';\n` });
+    scriptAgents(t, { patches: [fixPatch()] });
+    const { repairs } = coordinator();
+    const run = await repair(repairs, build, owner);
+
+    const edited = 'export const total: number = 5;0\nexport const note = \'a\';\n';
+    await MergeManager.applyBatchActions(build.id, 'user', [{ action: 'patch_file', path: 'src/total.ts', edits: [{ find: 'number = 5;', replace: 'number = 5;0' }] }]);
+
+    const result = await repairs.rollback(build, run.id);
+
+    assert.equal(result.rollback?.state, 'conflict');
+    assert.equal(content(build, 'src/total.ts'), edited);
+  });
+
+  test('a repaired line made longer by a user is left alone', async t => {
+    const owner = makeUser('retries');
+    const build = await makeBuild(owner, { 'src/config.ts': `export const retries: number = 'x';\n` });
+    scriptAgents(t, { patches: [fixPatch('src/config.ts', `export const retries: number = 'x';`, 'export const retries: number = 3')] });
+    const { repairs } = coordinator();
+    const run = await repair(repairs, build, owner);
+    assert.equal(run.status, 'verified', run.outcome);
+
+    await MergeManager.applyBatchActions(build.id, 'user', [{ action: 'patch_file', path: 'src/config.ts', edits: [{ find: '= 3', replace: '= 30' }] }]);
+
+    assert.equal((await repairs.rollback(build, run.id)).rollback?.state, 'conflict');
+    assert.equal(content(build, 'src/config.ts'), 'export const retries: number = 30\n');
+  });
+
+  test('old failures do not excuse a new failure in the same file, or a hang', async t => {
+    const project = {
+      'package.json': JSON.stringify({ name: 'x', scripts: { test: 'jest' } }),
+      'src/m.ts': `export const m: number = 'x';\n`,
+      'src/m.test.ts': `import { m } from './m';\nexport const c = m;\n`
+    };
+
+    for (const [output, stop] of [['FAIL src/m.test.ts\n', 'fail'], ['not ok 1 - old\n', 'hang']] as const) {
+      const owner = makeUser('oldfile');
+      const build = await makeBuild(owner, project);
+      const before = session(build, owner, { script: 'test', endReason: 'failed', exitCode: 1 });
+      db.appendExecutionLog(build.id, { sessionId: before, stream: 'stdout', text: output, createdAt: Date.now() });
+      t.mock.restoreAll();
+      scriptAgents(t, { patches: [fixPatch('src/m.ts', `'x'`, '1')] });
+      const backend = new FakeBackend();
+      const { manager } = coordinator(backend);
+      const repairs = new RepairCoordinator(manager);
+
+      const report = await DiagnosticCollector.collect(build.id);
+      const target = RootCauseEngine.analyze(db.getAllFiles(build.id), report.diagnostics).find(cause => cause.category === 'type_mismatch')!;
+      const held = await repair(repairs, build, owner, { rootCauseId: target.id });
+      await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+      await until(() => backend.processes.length === 1, 'the test run');
+      backend.processes[0].output('stdout', output);
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      if (stop === 'hang') {
+        const id = db.getExecutionSessions(build.id, 1)[0].id;
+        await (manager as any).stopProcess(id, 'timed_out');
+      } else {
+        backend.processes[0].end(1);
+      }
+      assert.equal((await repairs.settled(held.id))!.status, 'rolled_back', stop);
+    }
+  });
+
+  test('a new error in another file is not excused as revealed by a syntax fix', async t => {
+    const owner = makeUser('otherfile');
+    const source = `export const a = {;\n`;
+    const build = await makeBuild(owner, {
+      'src/a.ts': source,
+      'src/b.ts': `import { a } from './a';\nexport const b = a;\n`
+    });
+    scriptAgents(t, { patches: [fixPatch('src/a.ts', 'export const a = {;', 'export const renamed = {};')] });
+
+    const run = await repair(coordinator().repairs, build, owner, { maxAttempts: 1 });
+
+    assert.equal(run.status, 'failed', run.outcome);
+    assert.equal(content(build, 'src/a.ts'), source);
+  });
+
+  test('probes skip routes that look like they change things', () => {
+    const files = [{ path: 'src/app.ts', content: `app.get('/logout', x);\napp.get('/admin/seed', x);\napp.get('/api/users', x);\n` }] as ProjectFile[];
+    assert.deepEqual(detectGetRoutes(files).map(route => route.path), ['/api/users']);
+  });
+
+  test('template-literal imports count as computed', () => {
+    const files = [
+      { path: 'src/a.ts', content: 'export const load = (n: string) => import(`./x/${n}`);' },
+      { path: 'tests/b.test.ts', content: '' }
+    ] as ProjectFile[];
+    assert.deepEqual(selectAffectedTests(files, ['src/other.ts']), ['tests/b.test.ts']);
   });
 
   test('the same crash after the patch rolls it back', async t => {

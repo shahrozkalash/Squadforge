@@ -102,7 +102,7 @@ export function dependentsOf(graph: Map<string, Set<string>>, paths: string[]): 
   return seen;
 }
 
-const COMPUTED_IMPORT = /\b(?:import|require)\(\s*[^'"`\s)]/;
+const COMPUTED_IMPORT = /\b(?:import|require)\(\s*(?:[^'"`\s)]|`[^`]*\$\{)/;
 
 /** Test files that reach a changed file through imports, or every test if imports are computed. */
 export function selectAffectedTests(files: ProjectFile[], changedPaths: string[]): string[] {
@@ -114,6 +114,8 @@ export function selectAffectedTests(files: ProjectFile[], changedPaths: string[]
   return tests.filter(path => reached.has(path)).sort();
 }
 
+/** Some GET routes change things in spite of the method, so a probe leaves them alone. */
+const UNSAFE_ROUTE = /logout|signout|sign-out|seed|reset|delete|remove|clear|drop|purge|migrate|install|shutdown/i;
 const GET_ROUTE = /\b(?:app|router|server)\.get\(\s*['"](\/[^'":*?]*)['"]/g;
 
 /** GET routes with no parameters. These are the only routes safe to call without knowing the app. */
@@ -122,7 +124,7 @@ export function detectGetRoutes(files: ProjectFile[]): Array<{ path: string; fil
   for (const file of files) {
     if (!CODE_FILE.test(file.path) || isTestFile(file.path)) continue;
     for (const match of file.content.matchAll(GET_ROUTE)) {
-      if (!routes.has(match[1])) routes.set(match[1], file.path);
+      if (!routes.has(match[1]) && !UNSAFE_ROUTE.test(match[1])) routes.set(match[1], file.path);
     }
   }
   return Array.from(routes, ([path, filePath]) => ({ path, filePath }));
