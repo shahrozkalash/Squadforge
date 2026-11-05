@@ -130,7 +130,10 @@ export class ApprovalGateService {
   /** Text the owner reviews. Everything that an approval would apply is listed. */
   private static describeActions(actions: Array<{ [key: string]: any }>): string {
     return actions.map(action => {
-      const body = action.content ?? (action.edits || action.find ? JSON.stringify(action.edits ?? [action.find, action.replace], null, 2) : '');
+      // Show what the store will apply for this kind of action, and nothing else
+      const body = action.action === 'patch_file'
+        ? JSON.stringify(action.edits ?? [action.find, action.replace], null, 2)
+        : action.action === 'create_file' ? action.content : '';
       return `--- ${this.actionPaths(action).join(' -> ')} (${action.action})\n${body}`;
     }).join('\n\n');
   }
@@ -142,18 +145,26 @@ export class ApprovalGateService {
   static requestForActions(
     buildId: string,
     userId: string,
-    params: { agent: string; actions: Array<{ [key: string]: any }>; runId?: string }
+    params: { agent: string; actions: Array<{ [key: string]: any }>; runId?: string; taskId?: string }
   ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
     const fingerprints = this.fingerprintActions(params.actions);
     const sensitive = Object.keys(fingerprints).filter(p => this.isSensitiveFilePath(p));
     const contentHashes = Object.fromEntries(sensitive.map(p => [p, fingerprints[p]]));
 
-    const duplicate = db.getApprovalRequests(buildId, 'pending')
-      .find(r => JSON.stringify(r.contentHashes) === JSON.stringify(contentHashes));
+    const duplicate = db.getApprovalRequests(buildId, 'pending').find(r =>
+      JSON.stringify(r.contentHashes) === JSON.stringify(contentHashes) &&
+      r.patchId === params.runId &&
+      r.taskId === params.taskId &&
+      Date.now() <= r.createdAt + APPROVAL_TTL_MS
+    );
     if (duplicate) return { success: true, request: duplicate };
+
+    // Only the first patch to a file is checked, because later ones build on it
+    const versionChecked = new Set<string>();
 
     return this.requestApproval(buildId, userId, {
       patchId: params.runId,
+      taskId: params.taskId,
       requestingAgent: params.agent,
       requestingRole: 'security_specialist',
       operationType: 'security_sensitive_change',
@@ -163,33 +174,27 @@ export class ApprovalGateService {
       contentHashes,
       proposedActions: params.actions.map(action => {
         if (action.action !== 'patch_file') return action;
-        const file = db.getFile(buildId, this.normalizePath(action.path));
+        const path = this.normalizePath(action.path);
+        if (versionChecked.has(path)) return action;
+        versionChecked.add(path);
+        const file = db.getFile(buildId, path);
         return file ? { ...action, expectedVersion: file.version } : action;
       }),
       riskLevel: 'high'
     });
   }
 
-  /**
-   * Splits a batch so ordinary files can continue while sensitive ones wait for the owner.
-   * Without this a build retries forever on a write nobody has been asked to approve.
-   */
-  static holdSensitiveActions(
+  /** Splits a batch into changes that can apply now, and changes that need the owner. */
+  static splitSensitiveActions(
     buildId: string,
-    userId: string,
-    agent: string,
     actions: Array<{ [key: string]: any }>
   ): { ready: Array<{ [key: string]: any }>; held: Array<{ [key: string]: any }> } {
     const fingerprints = this.fingerprintActions(actions);
     const blocked = Object.keys(fingerprints).filter(p =>
       this.isSensitiveFilePath(p) && !this.hasApprovedRequestForFiles(buildId, [p], fingerprints)
     );
-    if (blocked.length === 0) return { ready: actions, held: [] };
-
     const isHeld = (action: { [key: string]: any }) => this.actionPaths(action).some(p => blocked.includes(p));
-    const held = actions.filter(isHeld);
-    this.requestForActions(buildId, userId, { agent, actions: held });
-    return { ready: actions.filter(action => !isHeld(action)), held };
+    return { ready: actions.filter(action => !isHeld(action)), held: actions.filter(isHeld) };
   }
 
   /** The owner's latest decision on a file is the one that counts. */
@@ -259,6 +264,15 @@ export class ApprovalGateService {
       resolvedAt: Date.now()
     });
     return { success: true, request: revoked };
+  }
+
+  /** After Stop, nothing waiting on the owner should write to the build. */
+  static cancelTaskRequests(buildId: string): void {
+    for (const request of db.getApprovalRequests(buildId, 'pending')) {
+      if (request.taskId && !request.patchId) {
+        db.saveApprovalRequest({ ...request, status: 'cancelled', resolvedAt: Date.now() });
+      }
+    }
   }
 
   /** A request left by a cancelled run must not unlock files later. */

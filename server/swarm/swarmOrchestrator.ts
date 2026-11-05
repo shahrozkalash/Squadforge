@@ -44,7 +44,8 @@ import {
   ProjectType,
   CanonicalProjectType,
   normalizeProjectType,
-  PatchProposalHunk
+  PatchProposalHunk,
+  HumanApprovalRequest
 } from '../types.js';
 
 interface ActiveSwarmControl {
@@ -55,6 +56,7 @@ interface ActiveSwarmControl {
 
 export class SwarmOrchestrator {
   private static activeSwarms: Map<string, ActiveSwarmControl> = new Map();
+  private static readonly AWAITING_APPROVAL = 'Waiting for owner approval of sensitive files';
   private static MAX_VERIFICATION_ATTEMPTS = 3;
   private static MAX_TASK_RETRIES = 3;
 
@@ -67,6 +69,7 @@ export class SwarmOrchestrator {
       control.stopRequested = true;
       control.abortController.abort(new Error('Build stopped by user'));
     }
+    ApprovalGateService.cancelTaskRequests(buildId);
 
     const build = db.getBuild(buildId);
     if (build && (build.status === 'running' || build.status === 'planning' || build.status === 'verifying' || build.status === 'in_progress')) {
@@ -85,6 +88,30 @@ export class SwarmOrchestrator {
   }
 
   /**
+   * Finishes a task that was waiting on the owner. An approval applies the reviewed change,
+   * and anything else fails the task, so the build reports what really happened.
+   */
+  static async resolveHeldTask(request: HumanApprovalRequest): Promise<void> {
+    const { buildId, taskId } = request;
+    const task = taskId ? db.getTask(buildId, taskId) : undefined;
+    if (!task || task.pausedReason !== this.AWAITING_APPROVAL) return;
+
+    const paused = { isPaused: false, pausedReason: undefined };
+    if (request.status === 'approved') {
+      const applied = await MergeManager.applyBatchActions(buildId, request.requestingAgent, request.proposedActions || []);
+      db.updateTask(buildId, task.id, applied.success
+        ? { ...paused, status: 'completed' }
+        : { ...paused, status: 'failed', error: `Approved changes could not be applied: ${applied.error}` });
+    } else {
+      db.updateTask(buildId, task.id, { ...paused, status: 'failed', error: `Sensitive change ${request.status} by the owner` });
+    }
+
+    // Workers may have finished while the task waited
+    const build = db.getBuild(buildId);
+    if (build?.status === 'running' && !this.activeSwarms.has(buildId)) await this.resumeSwarm(buildId);
+  }
+
+  /**
    * Resumes an existing or stopped build from its saved state
    */
   static async resumeSwarm(buildId: string): Promise<boolean> {
@@ -93,6 +120,14 @@ export class SwarmOrchestrator {
 
     if (this.activeSwarms.has(buildId)) {
       return true; // Already running
+    }
+
+    // Stop withdraws waiting requests, so those tasks go back on the board
+    const waiting = new Set(db.getApprovalRequests(buildId, 'pending').map(r => r.taskId));
+    for (const task of db.getTasks(buildId)) {
+      if (task.pausedReason === this.AWAITING_APPROVAL && !waiting.has(task.id)) {
+        TaskManager.resumeTask(buildId, task.id);
+      }
     }
 
     build.status = 'running';
@@ -1039,22 +1074,23 @@ Never write placeholder comments. Implement functional code.`;
       if (fileActions.length > 0) {
         // Execute all file operations atomically with complete rollback on partial failure
         // Sensitive files wait for the owner, and the rest of the work carries on
-        const { ready, held } = ApprovalGateService.holdSensitiveActions(buildId, build.userId, model.id, fileActions);
-        if (held.length > 0) {
-          db.addEvent({
-            id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-            buildId,
-            timestamp: Date.now(),
-            type: 'approval_requested',
-            modelId: model.id,
-            taskId: task.id,
-            details: `${held.length} sensitive file change(s) are waiting for owner approval and were not applied.`
-          });
-        }
+        const { ready, held } = ApprovalGateService.splitSensitiveActions(buildId, fileActions);
 
         const batchRes = ready.length > 0
           ? await MergeManager.applyBatchActions(buildId, model.id, ready, { signal })
           : { success: true, appliedCount: 0, error: undefined };
+
+        // The task is not finished until the owner decides, so it must not retry or complete
+        if (batchRes.success && held.length > 0) {
+          ApprovalGateService.requestForActions(buildId, build.userId, {
+            agent: model.id,
+            actions: held,
+            taskId: task.id
+          });
+          TaskManager.pauseTask(buildId, task.id, this.AWAITING_APPROVAL);
+          return;
+        }
+
         if (batchRes.success) {
           allActionsSucceeded = true;
           appliedCount = batchRes.appliedCount;

@@ -316,7 +316,8 @@ export class ExecutionSessionManager {
           ? record.error
           : `${record.error}. Packages that need install scripts require approval.`;
       } else if (!plan.hasLockfile) {
-        if (options.allowScripts) {
+        const scriptsRan = db.getDependencyInstalls(latest.id).some(install => !install.command.includes('--ignore-scripts'));
+        if (scriptsRan) {
           this.log(latest, 'system', 'The lockfile was not saved, because install scripts could have changed it.\n');
         } else {
           record.lockfileGenerated = await this.proposeLockfile(latest, build, files);

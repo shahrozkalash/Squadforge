@@ -43,7 +43,8 @@ export class MergeManager {
    */
   /** Sensitive files in these actions that lack an approval for this exact change. */
   private static approvalGate(buildId: string, modelId: string, actions: Array<{ [key: string]: any }>) {
-    if (modelId === 'system') return { blocked: [] as string[], consume: () => undefined };
+    // 'user' is the build owner editing through an ownership-checked route
+    if (modelId === 'system' || modelId === 'user') return { blocked: [] as string[], consume: () => undefined };
 
     const fingerprints = ApprovalGateService.fingerprintActions(actions);
     const sensitive = Object.keys(fingerprints).filter(path => ApprovalGateService.isSensitiveFilePath(path));

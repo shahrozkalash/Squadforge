@@ -330,22 +330,127 @@ describe('Approvals cover the reviewed change', () => {
     assert.equal(db.getFile(buildId, sensitivePath)?.content, 'one four');
   });
 
-  test('swarm work holds sensitive files for approval and applies the rest', async () => {
-    const buildId = makeBuild('hold');
-    const dockerfile = { action: 'create_file', path: 'Dockerfile', content: 'FROM node:22\n' };
-    const ordinary = { action: 'create_file', path: 'src/app.ts', content: 'export const app = 1;\n' };
+  test('patches to one file are version checked once', () => {
+    const buildId = makeBuild('two_patches');
+    db.setFile(buildId, { path: sensitivePath, content: 'a b', version: 3, ownerModel: 'system', history: [], createdAt: Date.now(), updatedAt: Date.now() } as any);
+    const first = { action: 'patch_file', path: sensitivePath, edits: [{ find: 'a', replace: 'c' }] };
+    const second = { action: 'patch_file', path: sensitivePath, edits: [{ find: 'b', replace: 'd' }] };
 
-    const { ready, held } = ApprovalGateService.holdSensitiveActions(buildId, userId, 'gemini', [dockerfile, ordinary]);
+    const { request } = ApprovalGateService.requestForActions(buildId, userId, { agent: 'gemini', actions: [first, second] });
 
-    assert.deepEqual(ready, [ordinary]);
-    assert.deepEqual(held, [dockerfile]);
+    assert.equal(request?.proposedActions?.[0].expectedVersion, 3);
+    assert.equal(request?.proposedActions?.[1].expectedVersion, undefined);
+  });
+
+  test('the owner edits through the user actor, which nobody else can claim', async () => {
+    const buildId = makeBuild('owner_edit');
+
+    const edited = await MergeManager.createFile(buildId, 'user', { action: 'create_file', path: sensitivePath, content: 'x' } as any);
+    assert.equal(edited.success, true);
+
+    const claimed = PatchValidationPipeline.proposePatch(buildId, userId, {
+      authorAgent: 'user',
+      authorRole: 'backend_developer',
+      targetFile: '.env',
+      baseFileVersion: 0,
+      proposedChanges: { actionType: 'create', content: 'SECRET=1' },
+      changeExplanation: 'Attempt to skip the approval gate'
+    } as any);
+    assert.equal(claimed.success, false);
+  });
+});
+
+describe('Swarm tasks with sensitive files', () => {
+  const dockerfile = { action: 'create_file', path: 'Dockerfile', content: 'FROM node:22\n' };
+  const ordinary = { action: 'create_file', path: 'src/app.ts', content: 'export const app = 1;\n' };
+
+  async function runTask(t: any, buildId: string, actions: any[]) {
+    const router = t.mock.method(smartRouter, 'executeSmartRequest', async () => ({
+      success: true,
+      rawText: '',
+      parsedResponse: { thinking: 'Write', actions },
+      tokensUsed: 1,
+      modelId: 'gemini',
+      actualModelUsed: 'gemini',
+      providerUsed: 'gemini',
+      isFallback: false,
+      latencyMs: 1
+    }) as any);
+
+    const id = `task_held_${Date.now()}_${++counter}`;
+    db.addTask(buildId, {
+      id,
+      buildId,
+      title: 'Write files',
+      description: 'Write files',
+      status: 'in_progress',
+      claimedBy: 'gemini',
+      priority: 1,
+      dependencies: [],
+      filePaths: actions.map(a => a.path),
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    } as any);
+    await (SwarmOrchestrator as any).executeTaskWork(buildId, modelRegistry.getAll()[0], db.getTask(buildId, id));
+    return { id, router };
+  }
+
+  function decide(buildId: string, approved: boolean) {
     const [request] = db.getApprovalRequests(buildId, 'pending');
-    assert.match(request.proposedChanges, /FROM node:22/);
+    const decided = ApprovalGateService.respondToApproval(buildId, userId, { requestId: request.id, approved });
+    assert.equal(decided.success, true);
+    return SwarmOrchestrator.resolveHeldTask(decided.request!);
+  }
 
-    const decided = ApprovalGateService.respondToApproval(buildId, userId, { requestId: request.id, approved: true });
-    await CodeGenerationEngine.continueApprovedRun(decided.request!, userId);
+  test('a task with only held files waits once, instead of retrying the model', async (t) => {
+    const buildId = makeBuild('only_held');
+
+    const { id, router } = await runTask(t, buildId, [dockerfile]);
+
+    assert.equal(router.mock.callCount(), 1);
+    assert.equal(db.getTask(buildId, id)?.status, 'paused');
+    assert.equal(db.getApprovalRequests(buildId, 'pending').length, 1);
+    assert.equal(db.getFile(buildId, 'Dockerfile'), undefined);
+  });
+
+  test('a mixed task applies ordinary files and does not report complete', async (t) => {
+    const buildId = makeBuild('mixed');
+
+    const { id } = await runTask(t, buildId, [dockerfile, ordinary]);
+
+    assert.ok(db.getFile(buildId, 'src/app.ts'));
+    assert.equal(db.getFile(buildId, 'Dockerfile'), undefined);
+    assert.equal(db.getTask(buildId, id)?.status, 'paused');
+    assert.equal(db.getPatchProposals(buildId).length, 0, 'a held change must not be recorded as applied');
+  });
+
+  test('approval applies the held change and completes the task', async (t) => {
+    const buildId = makeBuild('held_approved');
+    const { id } = await runTask(t, buildId, [dockerfile]);
+
+    await decide(buildId, true);
 
     assert.equal(db.getFile(buildId, 'Dockerfile')?.content, dockerfile.content);
+    assert.equal(db.getTask(buildId, id)?.status, 'completed');
+  });
+
+  test('rejection fails the task, so the build cannot finish as a success', async (t) => {
+    const buildId = makeBuild('held_rejected');
+    const { id } = await runTask(t, buildId, [dockerfile]);
+
+    await decide(buildId, false);
+
+    assert.equal(db.getFile(buildId, 'Dockerfile'), undefined);
+    assert.equal(db.getTask(buildId, id)?.status, 'failed');
+  });
+
+  test('Stop withdraws waiting requests', async (t) => {
+    const buildId = makeBuild('held_stop');
+    await runTask(t, buildId, [dockerfile]);
+
+    SwarmOrchestrator.stopSwarm(buildId);
+
+    assert.equal(db.getApprovalRequests(buildId, 'pending').length, 0);
   });
 });
 

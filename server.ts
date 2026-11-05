@@ -660,9 +660,9 @@ app.post('/api/models', requireAuth, requireModelEditor, (req, res) => {
   if (!config.id || !config.displayName || !config.providerModel) {
     return res.status(400).json({ error: 'id, displayName, and providerModel are required' });
   }
-  // MergeManager exempts 'system' from approval checks
-  if (String(config.id).trim().toLowerCase() === 'system') {
-    return res.status(400).json({ error: 'The model id "system" is reserved' });
+  // MergeManager exempts these actors from approval checks
+  if (['system', 'user'].includes(String(config.id).trim().toLowerCase())) {
+    return res.status(400).json({ error: `The model id "${config.id}" is reserved` });
   }
   modelRegistry.registerModel({
     ...config,
@@ -2105,8 +2105,12 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
 
   // A run waiting on a request that can no longer be approved must not wait forever
   const decided = db.getApprovalRequest(req.params.approvalId);
-  if (decided?.buildId === build.id && decided.patchId && (decided.status === 'expired' || decided.status === 'rejected')) {
-    CodeGenerationEngine.cancelRun(decided.patchId, `Approval ${decided.status}`);
+  if (decided?.buildId === build.id && decided.status === 'expired') {
+    if (decided.patchId) CodeGenerationEngine.cancelRun(decided.patchId, 'Approval expired');
+    else SwarmOrchestrator.resolveHeldTask(decided).catch(err => console.error('Held task failed:', err.message));
+  }
+  if (decided?.buildId === build.id && decided.patchId && decided.status === 'rejected') {
+    CodeGenerationEngine.cancelRun(decided.patchId, 'Approval rejected');
   }
 
   if (!result.success) {
@@ -2114,7 +2118,10 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
   }
 
   // Apply the reviewed changes in the background, because a run can take a while
-  if (approved && result.request) {
+  if (result.request?.taskId && !result.request.patchId) {
+    SwarmOrchestrator.resolveHeldTask(result.request)
+      .catch(err => console.error('Held task failed:', err.message));
+  } else if (approved && result.request) {
     CodeGenerationEngine.continueApprovedRun(result.request, req.user!.id)
       .catch(err => console.error('Approved run failed:', err.message));
   }

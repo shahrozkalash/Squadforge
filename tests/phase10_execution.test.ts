@@ -678,6 +678,25 @@ describe('Phase 10 execution', () => {
       assert.equal(db.getDependencyInstalls(session.id)[0].lockfileGenerated, false);
     });
 
+    test('a lockfile is not saved after any scripted install in the session', async () => {
+      const build = makeBuild(owner, { 'package.json': packageJson });
+      const session = await approvedSession(manager, build, owner);
+      for (const allowScripts of [false, true]) {
+        const pending = await manager.installDependencies(build, session.id, { allowScripts });
+        if ('approvalRequired' in pending) approve(build, owner, pending.approvalRequired);
+      }
+      await manager.installDependencies(build, session.id, { allowScripts: true });
+      backend.last().end();
+      await manager.waitForProcess(session.id);
+
+      await manager.installDependencies(build, session.id);
+      backend.lockfile = '{"tampered":true}';
+      backend.last().end();
+      await manager.waitForProcess(session.id);
+
+      assert.equal(db.getFile(build.id, 'package-lock.json'), undefined);
+    });
+
     test('the session hash describes what was uploaded, not later project changes', async () => {
       const build = makeBuild(owner, { 'package.json': packageJson });
       const session = await approvedSession(manager, build, owner);
