@@ -1,6 +1,6 @@
 # Phase 11 Acceptance Report
 
-**Status:** Accepted by the project owner on 2026-11-05 at `708e761`, with the limitations below. The owner decisions at the end of this report are still open, except the first.
+**Status:** Accepted by the project owner on 2026-11-05 at `708e761`, with the limitations below. The owner decisions at the end of this report are still open, except the first. Most limitations were fixed afterwards. See "Fixed after acceptance", which replaces the older limitations and results where they differ.
 **Recommendation:** Suitable for development and evaluation. Not for production use. Production readiness is roadmap Phase 16.
 **Assessed commit:** `708e76176d2b80638bc717f903b4307a17839f98` on `feature/phase-11-debugging`
 **Date:** 2026-11-05
@@ -98,3 +98,93 @@ The reviewer found these sound: approval gating of all writes, repeated and cros
 3. **Rollback without approval.** `requiresApproval('project_rollback')` returns true, but non-sensitive repairs roll back without a request. Automatic rollback only undoes the repair's own unverified patch, and a manual one is the owner's own action. Sensitive files always ask. Is this acceptable?
 4. **Existing rollback routes.** `/rollback-checkpoint` and `/rollback-file` write as `system` or `user`, skip conflict checks, and can overwrite later user changes. They predate this phase and were not changed. Should they use the new protections?
 5. **Automatic repair.** Should a failed build start a repair by itself? That adds model cost, so it was left to the owner.
+
+## Fixed after acceptance
+
+The owner asked for the limitations above to be fixed before merging. These changes came after acceptance at `708e761`, and were checked at `45078d4`.
+
+### Check results at `45078d4`
+
+| Check | Environment | Result |
+| :--- | :--- | :--- |
+| GitHub CI [run 42029901049](https://github.com/shahrozkalash/Squadforge/actions/runs/42029901049) | Linux, Node 22 | Passed. **759 of 759 tests**, and **26 of 26 real sandbox tests** |
+| `npm run lint`, `npm run build` | Windows | Passed |
+| `npm test` | Windows | 757 of 759 passed. The same two Phase 4 tests failed |
+| Real sandbox tests | Windows Docker | 26 of 26 passed |
+| Real model, `qwen2.5:7b` through Ollama | Windows | See below. Not part of CI |
+
+### Real AI model
+
+The largest gap is closed for a local model. Repairs ran through the real gateway with `qwen2.5:7b`, and nothing about the model was scripted.
+
+| Test | Result across all runs |
+| :--- | :--- |
+| Type error | Verified every time |
+| Missing export in another file | Verified in 5 of 6 runs. Bad patches were refused by validation, and the model used that feedback. The cause of the one failure was not captured, and it did not repeat in 3 more runs |
+| Cancelling a real request | Passed every time, in about a second |
+
+No cloud provider has been tested, because no API key is available here. A 7B model is also weaker than the models this will normally use, so this shows the pipeline works, not how good cloud repairs will be.
+
+### What changed
+
+| Limitation | Now |
+| :--- | :--- |
+| One root cause per run | **Repair all** continues after each verified repair, up to 5 runs, and stops at the first it cannot verify |
+| Nothing automatic | Optional `REPAIR_AUTO_START=true` after a failed generation. Off by default, because it spends model tokens |
+| Nothing probed a running app | The Debug tab and API can call a running project's GET routes through its relay. Routes whose names suggest a change, such as `/logout`, are skipped |
+| `dev` and `start` problems could not be proven | The failed script runs again in the sandbox after approval. A crash at start is proven if the server listens and outlives the original crash by at least double. A route failure SquadForge found itself is proven by a 2xx from that route |
+| Rollback refused any later edit | It undoes the repair's own lines and keeps later edits to other lines. Any change to the repaired lines is still a conflict |
+| An old failing test rolled back a good repair | Failures are compared by name with the run before the repair. The result is `applied_unverified`, not a rollback. A new failure, a hang, or a file-level failure still rolls back |
+| A patch revealing a hidden error was refused | An error hidden by garbled code in the broken file is reported and blocks `verified`, but no longer refuses the patch |
+| Aliases and computed imports could hide a test | `tsconfig` path aliases are followed, and a computed import selects every test |
+| Text printed by a project could choose a new file's path | The import must really be in the file |
+| Report-only model replies counted as success everywhere | Only callers that ask for a report accept one |
+| Contract and component names were not fenced | Fenced or removed in repair prompts |
+| Secret removal missed unusual formats | Values from the project's own env files are removed, more patterns are covered, and secret files are never sent to a model |
+| Checks blocked the server | Repair checks run in a separate process with no server secrets, and can be cancelled |
+| Recovery assumed one server process | A heartbeat keeps other processes from closing a live run, and a cancel reaches the process that owns it |
+
+### Real Docker proof of these changes
+
+- Real Vitest and real Jest ran only the affected tests, while an unrelated failing test never ran.
+- A real crash at start was proven fixed by the server staying up.
+- A real 500 was found by calling a route through the relay, and proven fixed by the same call.
+
+### Other bugs found by this work
+
+| Bug | Found by |
+| :--- | :--- |
+| A local model was never routed to the local provider | Real model run |
+| A root `server.js` run by Node was treated as browser code | Real Docker run |
+| Proof by surviving start-up alone, or by any status under 500 | Independent review |
+| Rollback could edit inside a longer line, turning a user's `30` into `10` | Independent review |
+| A file-level test failure could excuse a new failure in that file | Independent review |
+| A check process failure could crash the server | Independent review |
+| A 200 could prove a report that needed a login | Independent review |
+| Repair all left the run needing approval out of view | Browser check |
+
+### Review of these changes
+
+The `invariant-reviewer` agent reviewed them three more times, covering everything since `708e761`, and found 3 high and 3 medium problems, plus one blocker in a fix. All are fixed and tested. Its final answer at `45078d4` was to merge, from reading the code.
+
+Chrome at `45078d4`: analyze, Repair all, the held approval state, Cancel, and history rows all worked with no console errors. In one earlier run on an older build, the panels came back empty after clicking a waiting repair. That did not repeat, and the cause is unknown. Approving from the Collaboration tab was not clicked in a browser, but the real Docker tests use that route.
+
+### What is still limited
+
+- No cloud provider has been tested.
+- Static checks cover JavaScript and TypeScript, and the sandbox runs only Node projects.
+- A reported problem can never reach `verified`, because nothing shows the same request failed in the sandbox. The same goes for failures only a non-GET request or a logged-in user can show.
+- A crash caused by a request within 15 seconds of start could look like a crash at start.
+- A route failure found on a long-running session could pass on a fresh start, because state is lost.
+- With no earlier test run to compare, any test failure still rolls back the repair.
+- Failures sharing a generic message, such as "Test suite failed to run", can match an old failure. The result is never `verified`.
+- The unsafe-route list is by name, so a GET route with side effects can still be called, inside the sandbox only.
+- A script mentioned in `package.json` exempts that file from the browser dependency check. TypeScript's own import errors still apply.
+- Code generation's own checks still block the server. Only repair checks moved to a separate process.
+- Cancelling a repair removes a session it adopted, even one the owner created for the same workspace.
+- If a chained repair cannot start, the Debug tab keeps polling until the page is left.
+- A real worker, TLS, and gVisor are still unverified, as in Phase 10.
+
+### Decisions still open
+
+Decisions 3 and 4 above are unchanged. Decision 5 is now a setting, which stays off until the owner chooses to turn it on.

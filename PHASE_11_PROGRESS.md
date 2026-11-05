@@ -1,6 +1,6 @@
 # Phase 11 Progress: Advanced Debugging and Self-Improvement
 
-**Status:** Accepted by the owner on 2026-11-05 at `708e761`, with the limitations in `PHASE_11_ACCEPTANCE_REPORT.md`.
+**Status:** Accepted by the owner on 2026-11-05 at `708e761`, with the limitations in `PHASE_11_ACCEPTANCE_REPORT.md`. Most were fixed afterwards, at `45078d4`, and the tables below are from `708e761`. See "Fixed after acceptance" in that report.
 **Assessed commit:** `708e761` on `feature/phase-11-debugging`
 **Date:** 2026-11-05
 
@@ -106,6 +106,7 @@ All requirements were stated by the owner. Evidence is at `708e761`.
 | File | Covers |
 | :--- | :--- |
 | `tests/phase11_debugging_repair.test.ts` | 93 tests with the real type checker, bundler, and database. The model is scripted, and the sandbox is a fake backend |
-| `tests/phase11_sandbox_repair.test.ts` | 3 tests through the real routes, approval flow, and Docker. Needs `SANDBOX_INTEGRATION=1` |
+| `tests/phase11_sandbox_repair.test.ts` | Tests through the real routes, approval flow, and Docker. Needs `SANDBOX_INTEGRATION=1` |
+| `tests/phase11_real_model.test.ts` | Repairs and cancellation with a real model through the real gateway. Needs `LOCAL_MODEL_INTEGRATION=1` and an OpenAI-compatible local server such as Ollama. Not run in CI |
 
 The CI sandbox job now runs the second file.

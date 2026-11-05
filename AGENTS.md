@@ -1,6 +1,6 @@
 # SquadForge Agent Guide
 
-Last inspected commit: `708e761` on `feature/phase-11-debugging` (2026-11-05). Phases 9 and 10 are on `main` and accepted by the owner. Phase 11 is accepted by the owner, and is on its branch until PR #3 is merged. Update this with every handoff.
+Last inspected commit: `45078d4` on `feature/phase-11-debugging` (2026-11-05). Phases 9, 10, and 11 are accepted by the owner and merged to `main`. Update this with every handoff.
 
 This guide comes from the project owner's reconstructed handoff and from repository inspection. The original AI Studio prompt and chats are unavailable. Treat the handoff as stated intent, and check its claims against the code. When historical evidence is missing, document the uncertainty instead of inventing a decision.
 
@@ -33,6 +33,8 @@ npm run dev     # tsx server.ts
 
 Real sandbox tests need Docker: `docker build -t squadforge-sandbox:1 sandbox`, then `SANDBOX_INTEGRATION=1 npx tsx --test tests/phase10_sandbox_integration.test.ts tests/phase10_end_to_end.test.ts tests/phase11_sandbox_repair.test.ts`.
 
+Real model tests need an OpenAI-compatible local server such as Ollama: `LOCAL_MODEL_INTEGRATION=1 npx tsx --test tests/phase11_real_model.test.ts`. They are not run in CI.
+
 Project code must only run through an `ExecutionBackend` with real isolation. Never add a backend that runs it as a plain host process.
 
 ## Engineering invariants
@@ -58,7 +60,7 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 8 | Historically reported as accepted. Not independently re-verified. |
 | Phase 9 | Advanced Code Generation Engine. Accepted by the owner on 2026-11-05 at `e87efe8`, with the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. |
 | Phase 10 | Execution environment. Accepted by the owner on 2026-11-05 at `e87efe8`. Off by default and still not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
-| Phase 11 | Advanced Debugging and Self-Improvement. Accepted by the owner on 2026-11-05 at `708e761`, with the limitations in `PHASE_11_ACCEPTANCE_REPORT.md`. Not yet merged to `main`. |
+| Phase 11 | Advanced Debugging and Self-Improvement. Accepted by the owner on 2026-11-05 at `708e761`. Most limitations were then fixed at `45078d4`. See `PHASE_11_ACCEPTANCE_REPORT.md`. |
 | Phase 12 | Do not start until the owner asks. |
 
 Later roadmap:
@@ -84,9 +86,9 @@ The lockfile was added and deleted repeatedly on `main` before Phase 10, and the
 3. Decide on guest execution, the worker, and the preview domain.
 4. Have `invariant-reviewer` check the fixes listed under "Fixed after acceptance" in `PHASE_9_ACCEPTANCE_REPORT.md`, and the relay token.
 5. Expire approval requests the owner never answers. Repairs already close when theirs expire.
-6. Test Phase 11 repairs with a real AI provider. Every model answer so far was scripted.
-7. Have `invariant-reviewer` check the fixes in `708e761`, which came after its second pass.
-8. Decide whether the older `/rollback-checkpoint` and `/rollback-file` routes need conflict checks.
+6. Test Phase 11 repairs with a real cloud provider. Only a local model has run so far.
+7. Decide whether the older `/rollback-checkpoint` and `/rollback-file` routes need conflict checks.
+8. Decide whether non-sensitive repair rollbacks need approval, and whether to set `REPAIR_AUTO_START`.
 
 ## Fragile areas
 
