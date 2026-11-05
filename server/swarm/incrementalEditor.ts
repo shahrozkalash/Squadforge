@@ -148,7 +148,7 @@ export class IncrementalEditor {
           error: `Find snippet was not located in ${edit.filePath}`
         };
       }
-      newContent = currentContent.replace(edit.findSnippet, edit.replacementContent);
+      newContent = currentContent.replace(edit.findSnippet, () => edit.replacementContent);
     } else {
       newContent = edit.replacementContent;
     }

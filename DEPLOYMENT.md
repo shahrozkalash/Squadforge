@@ -157,13 +157,14 @@ Containers share the worker's kernel, so they are not strong isolation on their 
 2. Enable the Docker API over TLS on the worker.
 3. Set the variables below on the SquadForge server.
 4. Point a wildcard DNS record and TLS certificate for `*.PREVIEW_BASE_DOMAIN` at `PREVIEW_PORT`.
-5. Run the isolation tests against the worker: `SANDBOX_INTEGRATION=1 npx tsx --test tests/phase10_sandbox_integration.test.ts tests/phase10_end_to_end.test.ts`
+5. Run the isolation tests against the worker: `SANDBOX_INTEGRATION=1 npx tsx --test tests/phase10_sandbox_integration.test.ts tests/phase10_end_to_end.test.ts tests/phase11_sandbox_repair.test.ts`
 
 ### Variables
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `EXECUTION_BACKEND` | `disabled` | Set to `docker` to enable execution |
+| `REPAIR_AUTO_START` | Off | Set to `true` to start a repair after a failed generation. Each repair spends model tokens |
 | `DOCKER_HOST`, `DOCKER_TLS_CA`, `DOCKER_TLS_CERT`, `DOCKER_TLS_KEY` | Local daemon | Worker address and paths to TLS files |
 | `SANDBOX_IMAGE` | `squadforge-sandbox:1` | Image used for all containers |
 | `SANDBOX_RUNTIME` | `runc` | Container runtime, such as `runsc` |

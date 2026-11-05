@@ -49,6 +49,23 @@ interface ParsedFileExports {
   reExports: Array<{ specifier: string; names?: string[]; isAll: boolean }>;
 }
 
+/** Files package.json scripts run with Node. Those are server code, wherever they live. */
+function nodeEntryFiles(files: ProjectFile[]): Set<string> {
+  const entries = new Set<string>();
+  try {
+    const manifest = files.find(file => file.path === 'package.json');
+    const scripts = manifest ? Object.values<unknown>(JSON.parse(manifest.content).scripts || {}) : [];
+    for (const script of scripts) {
+      for (const match of String(script).matchAll(/\b(?:node|tsx|ts-node|nodemon)\s+(?:--?[\w-]+\s+)*\.?\/?([\w./-]+\.[cm]?[jt]s)\b/g)) {
+        entries.add(match[1]);
+      }
+    }
+  } catch {
+    // An invalid package.json is reported by the config check
+  }
+  return entries;
+}
+
 export class IntegrationAgent {
   /**
    * Performs TypeScript AST-aware analysis of contracts, relative imports, exports,
@@ -58,6 +75,7 @@ export class IntegrationAgent {
     const files = typeof buildIdOrFiles === 'string' ? db.getAllFiles(buildIdOrFiles) : buildIdOrFiles;
     const buildId = typeof buildIdOrFiles === 'string' ? buildIdOrFiles : undefined;
     const issues: IntegrationIssue[] = [];
+    const nodeEntries = nodeEntryFiles(files);
     const envVarsUsed = new Set<string>();
 
     const filesByCleanPath = new Map<string, ProjectFile>();
@@ -108,7 +126,8 @@ export class IntegrationAgent {
         file.path.includes('.test.') || 
         file.path.includes('.spec.') || 
         file.path.startsWith('server/') || 
-        file.path === 'server.ts';
+        file.path === 'server.ts' ||
+        nodeEntries.has(file.path);
 
       if (!isServerOrTestFile) {
         const scannedImports = DependencyResolverService.parseCodeImports(content, file.path);

@@ -49,6 +49,8 @@ export interface BuildValidationReport {
   passed: boolean;
   output?: string;
   errors: string[];
+  /** Where each error is, when the bundler reported a location. */
+  locations?: Array<{ message: string; filePath?: string; line?: number; column?: number }>;
 }
 
 export interface TypeDiagnostic {
@@ -714,6 +716,14 @@ export class ExecutionAdapter {
         status: 'failed',
         passed: false,
         errors,
+        locations: (err.errors || []).map((e: any) => ({
+          message: e.text,
+          filePath: e.location?.file
+            ? path.relative(tempDir, path.resolve(e.location.file)).replace(/\\/g, '/')
+            : undefined,
+          line: e.location?.line,
+          column: e.location?.column
+        })),
         output: errors.join('\n')
       };
     } finally {

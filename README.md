@@ -12,6 +12,7 @@ A user describes an idea, and SquadForge's swarm orchestrator plans it, splits i
 - **Authentication & multi-tenancy** — bcrypt password hashing, session management, rate-limited logins, and per-user project isolation
 - **OTP password reset** — 6-digit email codes (Resend or SMTP) with expiry, attempt limits, and session revocation on reset
 - **Verification** — honest verification service that checks syntax, security issues, and real evidence before calling a build "done"
+- **Debugging and repair** — find root causes, repair them with validated minimal patches, re-run affected tests, and roll back. Tested with a real local model, not yet with a cloud provider; see `PHASE_11_ACCEPTANCE_REPORT.md`
 - **Project execution (optional)** — run generated Node projects in Docker sandboxes, with dependency installs and a live preview. Off by default; see `DEPLOYMENT.md`
 - **SQLite persistence** — WAL mode with versioned migrations; no external database to run
 

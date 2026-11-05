@@ -34,6 +34,8 @@ export interface SmartExecutionParams {
   maxTokens?: number;
   temperature?: number;
   allowFallback?: boolean;
+  /** An investigator or reviewer answers with a report and no file actions. */
+  allowReportOnly?: boolean;
   bypassCache?: boolean;
   routingPreference?: 'cost' | 'latency' | 'quality';
   signal?: AbortSignal;
@@ -111,6 +113,17 @@ export class SmartModelRouter {
     const requested = modelRegistry.getById(params.requestedModelId);
     if (!requested) {
       throw new Error(`Requested model "${params.requestedModelId}" is not registered.`);
+    }
+
+    // A local model has no cloud route, whatever the fallback setting
+    if (requested.isLocal) {
+      return {
+        selectedModel: requested,
+        isAlternative: false,
+        routeReason: `Explicitly requested local model: ${requested.displayName}`,
+        useLocal: true,
+        useCache: true
+      };
     }
 
     // If fallback is explicitly disabled, strictly honor requested model
@@ -384,6 +397,17 @@ export class SmartModelRouter {
         error: result.error,
         errorCode: result.errorCode
       });
+    }
+
+    // Only callers that asked for a report accept an answer with no actions
+    if (result.success && !params.allowReportOnly && result.parsedResponse?.actions.length === 0) {
+      result = {
+        ...result,
+        success: false,
+        parsedResponse: null,
+        error: 'The model returned a report with no actions.',
+        errorCode: 'MALFORMED_OUTPUT'
+      };
     }
 
     if (result.errorCode === 'CANCELLED') {

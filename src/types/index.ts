@@ -1737,3 +1737,261 @@ export interface PreviewSession {
   createdAt: number;
   lastAccessAt: number;
 }
+
+// --- Phase 11: debugging and repair ---
+
+export type DiagnosticKind =
+  | 'syntax'
+  | 'type'
+  | 'build'
+  | 'runtime'
+  | 'api'
+  | 'dependency'
+  | 'test'
+  | 'integration'
+  | 'contract'
+  | 'config';
+
+/** Only static diagnostics can be re-checked without running the project. */
+export type DiagnosticSource = 'static' | 'sandbox' | 'reported';
+
+export interface DebugDiagnostic {
+  /** Stable across line moves, so the same problem can be followed through a repair. */
+  fingerprint: string;
+  kind: DiagnosticKind;
+  source: DiagnosticSource;
+  message: string;
+  filePath?: string;
+  /** Another file the message points at, such as the module missing an export. */
+  relatedFile?: string;
+  line?: number;
+  column?: number;
+  code?: string;
+  stack?: string[];
+  sessionId?: string;
+  /** The script that failed, which a session can later replace with another. */
+  script?: string;
+  occurrences: number;
+}
+
+export interface DiagnosticCheck {
+  name: DiagnosticKind;
+  status: 'passed' | 'failed' | 'skipped';
+  detail?: string;
+}
+
+export interface DiagnosticReport {
+  buildId: string;
+  workspaceHash: string;
+  diagnostics: DebugDiagnostic[];
+  /** From runs of an older workspace. Shown, but never a repair target. */
+  staleDiagnostics: DebugDiagnostic[];
+  checks: DiagnosticCheck[];
+  collectedAt: number;
+}
+
+export type RootCauseCategory =
+  | 'syntax_error'
+  | 'missing_dependency'
+  | 'missing_module'
+  | 'missing_export'
+  | 'undefined_symbol'
+  | 'null_access'
+  | 'type_mismatch'
+  | 'contract_violation'
+  | 'config_error'
+  | 'build_failure'
+  | 'test_failure'
+  | 'api_failure'
+  | 'runtime_crash'
+  | 'resource_limit';
+
+export interface RootCause {
+  id: string;
+  category: RootCauseCategory;
+  summary: string;
+  confidence: 'high' | 'medium' | 'low';
+  primaryFile?: string;
+  line?: number;
+  affectedFiles: string[];
+  fingerprints: string[];
+  /** Diagnostics explained by this cause rather than being separate problems. */
+  cascadedFingerprints: string[];
+  evidence: string[];
+  leadAgent: AgentRole;
+}
+
+export type RepairStatus =
+  | 'collecting'
+  | 'analyzing'
+  | 'investigating'
+  | 'proposing'
+  | 'validating'
+  | 'applying'
+  | 'verifying'
+  | 'awaiting_approval'
+  | 'awaiting_test_approval'
+  | 'verified'
+  | 'applied_unverified'
+  | 'no_action'
+  | 'failed'
+  | 'rejected'
+  | 'rolled_back'
+  | 'cancelled';
+
+export interface RepairInvestigation {
+  agent: string;
+  role: AgentRole;
+  hypothesis: string;
+  citedFingerprints: string[];
+  filesToChange: string[];
+  /** False when the agent's answer had no usable evidence, so only the static analysis stands. */
+  supported: boolean;
+}
+
+export interface PatchValidationCheck {
+  name: string;
+  passed: boolean;
+  detail?: string;
+}
+
+export interface RepairPatchValidation {
+  passed: boolean;
+  patchFingerprint: string;
+  checks: PatchValidationCheck[];
+  changedLines: number;
+  clearedFingerprints: string[];
+  remainingFingerprints: string[];
+  newDiagnostics: string[];
+  /** Targets that only a real run can confirm. */
+  needsRuntimeProof: string[];
+  /** Errors that were hidden until the patch, outside the lines it touched. */
+  revealedDiagnostics: string[];
+}
+
+export interface RepairAttempt {
+  attempt: number;
+  agent: string;
+  role: AgentRole;
+  outcome: 'model_failed' | 'validation_failed' | 'review_rejected' | 'apply_failed' | 'applied' | 'held_for_approval';
+  explanation: string;
+  actions: any[];
+  validation?: RepairPatchValidation;
+  review?: { agent: string; role: AgentRole; approved: boolean; reason: string };
+  detail?: string;
+  timestamp: number;
+}
+
+export interface RepairFileChange {
+  path: string;
+  created: boolean;
+  beforeVersion: number;
+  beforeHash: string;
+  beforeContent?: string;
+  afterVersion: number;
+  afterHash: string;
+  /** Whole lines to swap back, so a rollback can leave later edits to other lines alone. */
+  undoEdits?: Array<{ find: string; replace: string }>;
+}
+
+export interface RepairTestEvidence {
+  status: 'passed' | 'failed' | 'none_affected' | 'not_run';
+  scope?: 'affected' | 'full';
+  affectedTests: string[];
+  sessionId?: string;
+  exitCode?: number;
+  endReason?: string;
+  detail: string;
+}
+
+export interface HttpProbeResult {
+  path: string;
+  status?: number;
+  error?: string;
+}
+
+/** What happened when the failed script ran again in the sandbox. */
+export interface RepairRuntimeEvidence {
+  script: string;
+  sessionId: string;
+  /** A server stayed up, or a script exited cleanly. */
+  survived: boolean;
+  /** Whether a server opened a port, and how long it stayed up after that. */
+  listening: boolean;
+  uptimeMs: number;
+  /** Target fingerprints that appeared again. */
+  reproduced: string[];
+  probes: HttpProbeResult[];
+  detail: string;
+}
+
+export interface RepairVerification {
+  clearedFingerprints: string[];
+  remainingFingerprints: string[];
+  newDiagnostics: string[];
+  needsRuntimeProof: string[];
+  /** Problems from checks that could not run before the repair. Shown, never hidden. */
+  unmaskedDiagnostics: string[];
+  tests: RepairTestEvidence;
+  runtime?: RepairRuntimeEvidence;
+  checkedAt: number;
+}
+
+export interface RepairRollback {
+  state: 'pending_approval' | 'conflict' | 'failed' | 'done';
+  reason: string;
+  conflicts: string[];
+  automatic: boolean;
+  /** Files where later edits by someone else were kept. */
+  keptLaterEdits?: string[];
+  at: number;
+}
+
+export interface RepairRun {
+  id: string;
+  buildId: string;
+  userId: string;
+  status: RepairStatus;
+  modelId: string;
+  maxAttempts: number;
+  /** What the run ended with, in plain words. */
+  outcome?: string;
+  workspaceHash?: string;
+  report?: DiagnosticReport;
+  rootCauses: RootCause[];
+  targetRootCauseId?: string;
+  investigation?: RepairInvestigation;
+  attempts: RepairAttempt[];
+  patchFingerprint?: string;
+  fileChanges: RepairFileChange[];
+  verification?: RepairVerification;
+  rollback?: RepairRollback;
+  pendingApproval?: { requestId: string; purpose: 'apply' | 'tests' | 'rollback' };
+  /** The sandbox session in use, so a cancel can stop it. */
+  activeSessionId?: string;
+  /** Continue with the next root cause after this one is verified. */
+  repairAll?: boolean;
+  chainDepth?: number;
+  defectId?: string;
+  memoryDefectId?: string;
+  tokenUsage: number;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
+export interface RepairLesson {
+  id: string;
+  outcome: 'verified' | 'failed';
+  fingerprints: string[];
+  category: RootCauseCategory;
+  patchFingerprint?: string;
+  summary: string;
+  evidence: string;
+  files: string[];
+  repairId: string;
+  /** Every repair that reached this lesson, when there was more than one. */
+  repairIds?: string[];
+  timesSeen: number;
+  createdAt: number;
+}

@@ -6,6 +6,7 @@ import {
   ProjectFile,
   ExecutionEndReason,
   ExecutionSession,
+  HttpProbeResult,
   HumanApprovalRequest,
   User
 } from '../types.js';
@@ -13,12 +14,14 @@ import { ApprovalGateService } from '../swarm/approvalGateService.js';
 import { MergeManager } from '../swarm/mergeManager.js';
 import { ProjectMemoryService } from '../swarm/projectMemory.js';
 import {
+  AFFECTED_TEST_SCRIPT,
   RUNNABLE_SCRIPTS,
+  affectedTestArgs,
   buildInstallCommand,
   detectMissingModules,
   planDependencies
 } from './dependencyService.js';
-import { BackendCapabilities, ExecutionBackend, ProcessHandle, SandboxLimits } from './executionBackend.js';
+import { BackendCapabilities, ExecutionBackend, PreviewEndpoint, ProcessHandle, SandboxLimits, relayGet } from './executionBackend.js';
 import { hashWorkspace, materializeWorkspace } from './workspaceMaterializer.js';
 
 export class ExecutionError extends Error {
@@ -71,6 +74,8 @@ interface ActiveProcess {
   finished: Promise<void>;
 }
 
+const MAX_PROBES = 10;
+const PROBE_READY_MS = 20000;
 const LIVE_PROCESS_STATES = new Set(['creating', 'installing', 'starting', 'running', 'stopping']);
 /** Execution approvals last 24 hours, so a session cannot outlive that window by much. */
 const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000;
@@ -349,7 +354,8 @@ export class ExecutionSessionManager {
     return true;
   }
 
-  async startScript(build: Build, sessionId: string, script: string): Promise<ExecutionSession> {
+  /** With testFiles, a test run covers only those files when the test runner supports it. */
+  async startScript(build: Build, sessionId: string, script: string, testFiles?: string[]): Promise<ExecutionSession> {
     const session = this.requireSession(build.id, sessionId);
     this.requireIdleEnvironment(session);
 
@@ -358,7 +364,7 @@ export class ExecutionSessionManager {
     }
 
     // Earlier code could change the test files, and a later run would replace the result
-    if (session.script && (script === 'test' || session.script === 'test')) {
+    if (session.script && (script === 'test' || session.script === 'test' || session.script === AFFECTED_TEST_SCRIPT)) {
       throw new ExecutionError('Tests run in their own session, so their results can be trusted. Create a new session.', 409);
     }
 
@@ -383,9 +389,11 @@ export class ExecutionSessionManager {
     if (/\bvite\b/.test(definition) && (script === 'dev' || script === 'preview')) {
       argv.push('--', '--host', '0.0.0.0');
     }
+    const scope = script === 'test' && testFiles ? affectedTestArgs(definition, testFiles) : null;
+    if (scope) argv.push('--', ...scope);
 
     session.status = 'starting';
-    session.script = script;
+    session.script = scope ? AFFECTED_TEST_SCRIPT : script;
     session.exitCode = undefined;
     session.endReason = undefined;
     session.failureReason = undefined;
@@ -493,7 +501,8 @@ export class ExecutionSessionManager {
     const active = this.processes.get(sessionId);
     if (!active) {
       // A stop can arrive while the process is still being created
-      if (db.getExecutionSession(sessionId)?.status === 'starting') this.pendingStops.add(sessionId);
+      const status = db.getExecutionSession(sessionId)?.status;
+      if (status === 'starting' || status === 'installing') this.pendingStops.add(sessionId);
       return;
     }
 
@@ -584,6 +593,48 @@ export class ExecutionSessionManager {
     for (const preview of db.getActivePreviews()) {
       db.savePreviewSession({ ...preview, status: 'closed' });
     }
+  }
+
+  /**
+   * Calls GET routes of a running project through its relay. Only the owner's approved session
+   * is reached, and the paths are checked here, so this cannot be pointed anywhere else.
+   */
+  async probeHttp(build: Build, sessionId: string, paths: string[]): Promise<HttpProbeResult[]> {
+    const session = this.requireSession(build.id, sessionId);
+    if (session.status !== 'running' || !session.processId) {
+      throw new ExecutionError('The project is not running.', 409);
+    }
+    const safePaths = paths.filter(path => /^\/(?!\/)[\w./~-]*$/.test(path)).slice(0, MAX_PROBES);
+
+    const open = db.getActivePreviews(session.id)[0];
+    let endpoint: PreviewEndpoint | undefined = open && { host: open.relayHost, port: open.relayPort, token: open.relayToken };
+    if (!endpoint) {
+      const ports = await this.waitForPort(session.processId);
+      if (ports.length === 0) throw new ExecutionError('The project did not start listening on a port.', 504);
+      endpoint = await this.backend.openPreview(session.id, session.processId, ports.includes(3000) ? 3000 : ports[0]);
+    }
+
+    try {
+      await relayGet(endpoint, '/', PROBE_READY_MS);
+      const results: HttpProbeResult[] = [];
+      for (const path of safePaths) {
+        results.push(await relayGet(endpoint, path, 0));
+      }
+      return results;
+    } finally {
+      if (!open) await this.backend.closePreview(session.id).catch(() => undefined);
+    }
+  }
+
+  /** Waits for a process to listen, and gives up early if it exits. */
+  async waitForPort(processId: string, waitMs = PROBE_READY_MS): Promise<number[]> {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      const ports = await this.backend.listeningPorts(processId).catch(() => [] as number[]);
+      if (ports.length > 0) return ports;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    return [];
   }
 
   /** Test support: waits for the current process in a session to finish. */

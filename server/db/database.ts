@@ -923,6 +923,25 @@ export class DatabaseManager {
         up: (db: DatabaseSync) => {
           db.exec(`ALTER TABLE preview_sessions ADD COLUMN relay_token TEXT;`);
         }
+      },
+      {
+        id: 13,
+        name: '013_repair_runs',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            CREATE TABLE IF NOT EXISTS repair_runs (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL REFERENCES builds(id) ON DELETE CASCADE,
+              user_id TEXT NOT NULL,
+              status TEXT NOT NULL,
+              data TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_repair_runs_build ON repair_runs(build_id, created_at);
+          `);
+        }
       }
     ];
 

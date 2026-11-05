@@ -96,6 +96,7 @@ export interface GatewayCallParams {
   responseMimeType?: string;
   allowFallback?: boolean;
   bypassCache?: boolean;
+  allowReportOnly?: boolean;
   buildId?: string;
   userId?: string;
   signal?: AbortSignal;
@@ -142,12 +143,17 @@ export function extractAndParseJson(text: string): ModelActionResponse | null {
 export function validateModelActionResponse(parsed: any): ModelActionResponse | null {
   if (!parsed || typeof parsed !== 'object') return null;
 
+  // Investigators and reviewers answer with a report and may change no files
+  const report = parsed.report && typeof parsed.report === 'object' && !Array.isArray(parsed.report)
+    ? parsed.report as Record<string, unknown>
+    : undefined;
+
   let candidateActions: any[] = [];
   if (Array.isArray(parsed.actions)) {
     candidateActions = parsed.actions;
   } else if (parsed.action) {
     candidateActions = [parsed];
-  } else {
+  } else if (!report) {
     return null;
   }
 
@@ -170,8 +176,10 @@ export function validateModelActionResponse(parsed: any): ModelActionResponse | 
         }
       }
     } else if (act.action === 'patch_file') {
-      if (typeof act.path === 'string' && act.path.trim().length > 0 && Array.isArray(act.edits) && act.edits.length > 0) {
-        const validEdits = act.edits.filter((e: any) => 
+      // PromptCompiler documents a single find and replace, so that form is accepted too
+      const edits = Array.isArray(act.edits) ? act.edits : [{ find: act.find, replace: act.replace }];
+      if (typeof act.path === 'string' && act.path.trim().length > 0 && edits.length > 0) {
+        const validEdits = edits.filter((e: any) => 
           e && typeof e === 'object' && typeof e.find === 'string' && typeof e.replace === 'string'
         );
         if (validEdits.length > 0) {
@@ -217,11 +225,11 @@ export function validateModelActionResponse(parsed: any): ModelActionResponse | 
     }
   }
 
-  if (validActions.length === 0) {
+  if (validActions.length === 0 && !report) {
     return null;
   }
 
-  return { actions: validActions };
+  return report ? { actions: validActions, report } : { actions: validActions };
 }
 
 /**
@@ -297,6 +305,7 @@ export async function callUnifiedGateway(params: GatewayCallParams): Promise<Gat
     maxTokens: params.maxTokens,
     allowFallback: params.allowFallback,
     bypassCache: params.bypassCache,
+    allowReportOnly: params.allowReportOnly,
     buildId: params.buildId,
     userId: params.userId,
     signal: params.signal
