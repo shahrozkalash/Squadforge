@@ -2164,6 +2164,8 @@ export interface RepairVerification {
   remainingFingerprints: string[];
   newDiagnostics: string[];
   needsRuntimeProof: string[];
+  /** Problems from checks that could not run before the repair. Shown, never hidden. */
+  unmaskedDiagnostics: string[];
   tests: RepairTestEvidence;
   checkedAt: number;
 }
@@ -2216,6 +2218,8 @@ export interface RepairLesson {
   evidence: string;
   files: string[];
   repairId: string;
+  /** Every repair that reached this lesson, when there was more than one. */
+  repairIds?: string[];
   timesSeen: number;
   createdAt: number;
 }

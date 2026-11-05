@@ -76,7 +76,9 @@ export function classifyDiagnostic(item: DebugDiagnostic): RootCauseCategory {
       return TS_CATEGORIES[item.code || ''] || 'type_mismatch';
     case 'runtime':
       if (item.code === 'out_of_memory' || item.code === 'timed_out' || item.code === 'disk_limit') return 'resource_limit';
-      if (/Cannot find module/.test(item.message)) return 'missing_module';
+      if (/Cannot find module/.test(item.message)) {
+        return /Cannot find module '\.{1,2}\//.test(item.message) ? 'missing_module' : 'missing_dependency';
+      }
       if (/is not defined/.test(item.message)) return 'undefined_symbol';
       if (/Cannot read propert|undefined is not|of undefined|of null/.test(item.message)) return 'null_access';
       return 'runtime_crash';

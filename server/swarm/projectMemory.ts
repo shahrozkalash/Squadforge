@@ -1113,8 +1113,9 @@ export class ProjectMemoryService {
     // Agents editing these files learn from repairs this project has already tried
     const lessons = this.getRepairLessons(buildId, userId, { files: task.filePaths }).slice(0, 4);
     if (lessons.length > 0) {
+      // A summary quotes project output, which must not reach these prompts as instructions
       const lessonLines = lessons.map(lesson =>
-        `- [${lesson.outcome === 'verified' ? 'VERIFIED FIX' : 'FAILED APPROACH'}] ${lesson.summary}`
+        `- [${lesson.outcome === 'verified' ? 'VERIFIED FIX' : 'FAILED APPROACH'}] ${lesson.category.replace(/_/g, ' ')} in ${lesson.files.join(', ')} (seen ${lesson.timesSeen} time(s))`
       );
       sections.push(`REPAIR HISTORY:\n${lessonLines.join('\n')}`);
     }
@@ -1504,7 +1505,8 @@ export class ProjectMemoryService {
     if (existing) {
       const parsed = this.parseRepairLesson(existing);
       if (!parsed) return null;
-      const updated = { ...parsed, timesSeen: parsed.timesSeen + 1, evidence: lesson.evidence };
+      const repairIds = Array.from(new Set([...(parsed.repairIds || [parsed.repairId]), lesson.repairId]));
+      const updated = { ...parsed, repairIds, timesSeen: parsed.timesSeen + 1, evidence: lesson.evidence };
       db.saveKnowledgeItem({ ...existing, content: JSON.stringify(updated), updatedAt: Date.now() });
       return updated;
     }
@@ -1552,7 +1554,10 @@ export class ProjectMemoryService {
     if (!build || build.userId !== userId) return 0;
 
     const verified = db.getKnowledgeItems(buildId, { category: 'reusable_solution', status: 'active' })
-      .filter(item => this.parseRepairLesson(item)?.repairId === repairId);
+      .filter(item => {
+        const lesson = this.parseRepairLesson(item);
+        return lesson?.repairId === repairId || lesson?.repairIds?.includes(repairId);
+      });
     for (const item of verified) {
       db.saveKnowledgeItem({ ...item, status: 'superseded', supersedeReason: 'The repair was rolled back', updatedAt: Date.now() });
     }

@@ -75,6 +75,7 @@ function isApprovalRequired(value: unknown): value is { approvalRequired: HumanA
 
 export class RepairCoordinator {
   private readonly active = new Map<string, { abort: AbortController; done: Promise<void> }>();
+  private readonly rollingBack = new Set<string>();
 
   constructor(private readonly execution: ExecutionSessionManager) {}
 
@@ -87,9 +88,9 @@ export class RepairCoordinator {
     return run;
   }
 
-  private finish(run: RepairRun, status: RepairStatus, outcome: string, event: EventType = 'repair_failed'): RepairRun {
+  private finish(run: RepairRun, status: RepairStatus, outcome: string, event: EventType | null = 'repair_failed'): RepairRun {
     this.update(run, { status, outcome, completedAt: Date.now(), pendingApproval: undefined });
-    this.emit(run, event, outcome);
+    if (event) this.emit(run, event, outcome);
     return run;
   }
 
@@ -158,6 +159,17 @@ export class RepairCoordinator {
         const message = 'The server restarted during this repair.';
         if (run.fileChanges.length > 0) this.finish(run, 'applied_unverified', `${message} The patch is applied and was not fully checked.`);
         else this.finish(run, 'failed', message);
+        continue;
+      }
+
+      if (run.rollback?.state === 'pending_approval' && !WAITING.includes(run.status)) {
+        const request = run.pendingApproval && db.getApprovalRequest(run.pendingApproval.requestId);
+        if (!request || request.status !== 'pending' || ApprovalGateService.hasExpired(request)) {
+          this.update(run, {
+            pendingApproval: undefined,
+            rollback: { ...run.rollback, state: 'failed', reason: `Nobody approved this rollback in time. ${run.rollback.reason}` }
+          });
+        }
         continue;
       }
 
@@ -260,7 +272,7 @@ export class RepairCoordinator {
     if (rootCauses.length === 0) {
       const skipped = report.checks.filter(check => check.status === 'skipped').map(check => check.name);
       const note = skipped.length ? ` These checks did not run: ${skipped.join(', ')}.` : '';
-      this.finish(run, 'no_action', `No problems were found.${note}`, 'repair_verified');
+      this.finish(run, 'no_action', `No problems were found.${note}`, null);
       return;
     }
 
@@ -295,8 +307,9 @@ export class RepairCoordinator {
       assignedAgent: cause.leadAgent,
       authorRole: cause.leadAgent
     });
+    // Agents read this later with no fence around it, so it quotes no project output
     const memoryDefectId = ProjectMemoryService.recordDefect(run.buildId, run.userId, {
-      description: cause.summary,
+      description: `${cause.category.replace(/_/g, ' ')} in ${cause.primaryFile}`,
       filePaths: cause.affectedFiles,
       severity: 'high'
     });
@@ -467,6 +480,7 @@ export class RepairCoordinator {
 
   /** Writes a patch through the normal gated path and records how to undo it. */
   private async apply(run: RepairRun, actions: any[], actor: string, signal?: AbortSignal): Promise<{ error?: string }> {
+    const snapshot = snapshotFiles(run.buildId);
     const before = new Map(actions.map(action => {
       const file = db.getFile(run.buildId, action.path);
       return [action.path, file && { ...file, history: [...(file.history || [])] }] as const;
@@ -475,9 +489,13 @@ export class RepairCoordinator {
     const result = await MergeManager.applyBatchActions(run.buildId, actor, actions, { signal });
     if (!result.success) return { error: result.error || 'The patch could not be applied.' };
 
-    const fileChanges: RepairFileChange[] = actions.map(action => {
+    // A write queued behind this one may already have run, so the file cannot be read back here
+    const written = new Map<string, string>();
+    const fileChanges: RepairFileChange[] = actions.map((action, index) => {
       const previous = before.get(action.path);
-      const current = db.getFile(run.buildId, action.path)!;
+      const outcome = result.results[index];
+      const content: string = outcome.currentContent ?? action.content;
+      written.set(action.path, content);
       const inHistory = previous?.history?.some(entry => entry.version === previous.version);
       return {
         path: action.path,
@@ -485,11 +503,15 @@ export class RepairCoordinator {
         beforeVersion: previous?.version ?? 0,
         beforeHash: previous ? previous.contentHash || computeContentHash(previous.content) : '',
         beforeContent: previous && !inHistory ? previous.content : undefined,
-        afterVersion: current.version,
-        afterHash: current.contentHash || computeContentHash(current.content)
+        afterVersion: outcome.version,
+        afterHash: computeContentHash(content)
       };
     });
-    this.update(run, { fileChanges, appliedWorkspaceHash: projectStateHash(db.getAllFiles(run.buildId)) });
+    const applied = [
+      ...snapshot.filter(file => !written.has(file.path)),
+      ...Array.from(written, ([path, content]) => ({ path, content }) as ProjectFile)
+    ];
+    this.update(run, { fileChanges, appliedWorkspaceHash: projectStateHash(applied) });
     this.emit(run, 'repair_applied', `Changed ${fileChanges.map(change => change.path).join(', ')}`);
     return {};
   }
@@ -518,8 +540,18 @@ export class RepairCoordinator {
       after.diagnostics.filter(item => !skippedBefore.has(item.kind))
     );
 
+    // These are not this patch's fault, but they do mean the project is not known to be good
+    const unmaskedDiagnostics = [
+      ...after.diagnostics
+        .filter(item => skippedBefore.has(item.kind))
+        .map(item => `[${item.kind}] ${item.filePath || 'project'}: ${item.message}`),
+      ...after.checks
+        .filter(check => check.status === 'skipped' && !skippedBefore.has(check.name))
+        .map(check => `The ${check.name} check stopped running: ${check.detail || 'no reason given'}`)
+    ];
+
     const notRun: RepairTestEvidence = { status: 'not_run', affectedTests: [], detail: 'Tests have not run yet.' };
-    this.update(run, { verification: { ...comparison, tests: notRun, checkedAt: Date.now() } });
+    this.update(run, { verification: { ...comparison, unmaskedDiagnostics, tests: notRun, checkedAt: Date.now() } });
     this.checkpoint(run, signal);
 
     if (comparison.remainingFingerprints.length > 0 || comparison.newDiagnostics.length > 0) {
@@ -539,11 +571,14 @@ export class RepairCoordinator {
       return;
     }
 
-    const unproven = run.verification!.needsRuntimeProof.length > 0 && tests.status !== 'passed';
-    if (tests.status === 'not_run' || unproven) {
-      const reason = unproven && tests.status !== 'not_run'
-        ? 'This problem appeared at runtime, and no test covers the changed code, so its fix cannot be confirmed.'
-        : tests.detail;
+    const unproven = this.unprovenTargets(run, tests);
+    const unmasked = run.verification!.unmaskedDiagnostics;
+    if (tests.status === 'not_run' || unproven.length > 0 || unmasked.length > 0) {
+      const reason = tests.status === 'not_run'
+        ? tests.detail
+        : unmasked.length > 0
+          ? `Checks that could not run before now report: ${unmasked[0]}`
+          : 'This problem came from a run or a report, and nothing shows it is gone. Run what failed again, then check this repair again.';
       this.finish(run, 'applied_unverified', `The patch is applied and passed static checks, but it is not verified. ${reason}`);
       this.recordMemoryAttempt(run, false, `Applied but unverified: ${reason}`);
       return;
@@ -551,6 +586,29 @@ export class RepairCoordinator {
 
     this.finish(run, 'verified', `Verified: the target is gone, nothing new is wrong, and ${tests.detail}`, 'repair_verified');
     this.recordVerified(run, cause, tests);
+  }
+
+  /**
+   * A problem seen at runtime is gone only if the thing that failed now succeeds on this exact
+   * workspace. Any other passing test says nothing about it, and a report can never be re-run.
+   */
+  private unprovenTargets(run: RepairRun, tests: RepairTestEvidence): string[] {
+    const hash = hashWorkspace(db.getAllFiles(run.buildId));
+    const sessions = db.getExecutionSessions(run.buildId, 20);
+
+    return run.verification!.needsRuntimeProof.filter(fingerprint => {
+      const item = run.report!.diagnostics.find(diagnostic => diagnostic.fingerprint === fingerprint);
+      if (!item || item.source === 'reported') return true;
+
+      if (item.kind === 'test') {
+        const covered = tests.scope === 'full' || (item.filePath !== undefined && tests.affectedTests.includes(item.filePath));
+        return !(tests.status === 'passed' && covered);
+      }
+
+      const script = item.sessionId ? db.getExecutionSession(item.sessionId)?.script : undefined;
+      const rerun = script ? sessions.find(session => session.script === script && session.endReason) : undefined;
+      return !(rerun?.workspaceHash === hash && rerun.endReason === 'exited' && rerun.exitCode === 0);
+    });
   }
 
   private notRun(affectedTests: string[], detail: string): RepairTestEvidence {
@@ -620,14 +678,20 @@ export class RepairCoordinator {
       return evidence;
     } catch (err: any) {
       if (err instanceof RepairCancelled) throw err;
+      this.checkpoint(run, signal);
       return this.notRun(affected, `Tests could not run: ${err.message}`);
     }
   }
 
   /** Tests need a session of their own with dependencies in place. */
   private async prepareSession(run: RepairRun, build: Build, user: User, files: ProjectFile[]) {
+    const remember = (sessionId: string) => this.update(run, {
+      verification: { ...run.verification!, tests: { ...run.verification!.tests, sessionId } }
+    });
+
     let session = await this.execution.createSession(build, user);
     if (isApprovalRequired(session)) return session;
+    remember(session.id);
 
     // An approved workspace can already have a used session, which cannot give trusted results
     if (session.script) {
@@ -635,6 +699,7 @@ export class RepairCoordinator {
       await this.execution.destroySession(build.id, session.id);
       session = await this.execution.createSession(build, user);
       if (isApprovalRequired(session)) return session;
+      remember(session.id);
     }
 
     if (planDependencies(files).hasDependencies && session.dependencyStatus !== 'installed') {
@@ -768,9 +833,15 @@ export class RepairCoordinator {
     if (run.rollback?.state === 'done') throw new RepairError('This repair is already rolled back.', 409);
     if (run.rollback?.state === 'pending_approval') throw new RepairError('This rollback is waiting for approval.', 409);
     if (this.active.has(run.id) || WORKING.includes(run.status)) throw new RepairError('This repair is still running. Cancel it first.', 409);
+    if (this.rollingBack.has(run.id)) throw new RepairError('This repair is already being rolled back.', 409);
 
     const waitingOn = run.pendingApproval?.requestId;
-    await this.performRollback(run, reason?.slice(0, 300) || 'Requested by the owner', false);
+    this.rollingBack.add(run.id);
+    try {
+      await this.performRollback(run, reason?.slice(0, 300) || 'Requested by the owner', false);
+    } finally {
+      this.rollingBack.delete(run.id);
+    }
 
     // A rollback that went ahead or now waits on the owner replaces what the run was waiting for
     if (waitingOn && run.rollback?.state !== 'conflict' && run.rollback?.state !== 'failed') {
@@ -798,7 +869,13 @@ export class RepairCoordinator {
         this.recordMemoryAttempt(run, false, 'Not approved by the owner');
         return true;
       }
-      this.track(run, signal => this.applyApproved(run, request, build, user, signal));
+      this.track(run, async signal => {
+        try {
+          await this.applyApproved(run, request, build, user, signal);
+        } finally {
+          if (run.fileChanges.length === 0) ApprovalGateService.revokeApproval(build.id, user.id, request.id);
+        }
+      });
       return true;
     }
 
@@ -819,6 +896,7 @@ export class RepairCoordinator {
     }
     this.track(run, async () => {
       await this.performRollback(run, run.rollback?.reason || 'Approved by the owner', Boolean(run.rollback?.automatic), this.approvedRollback(run, request));
+      if (run.rollback?.state !== 'done') ApprovalGateService.revokeApproval(build.id, user.id, request.id);
     });
     return true;
   }
@@ -897,7 +975,7 @@ export class RepairCoordinator {
   /** Checks an applied patch again, for example after the owner ran the tests. */
   verifyAgain(build: Build, user: User, repairId: string): RepairRun {
     const run = this.requireRun(build, repairId);
-    if (run.status !== 'applied_unverified' || this.active.has(run.id)) {
+    if (run.status !== 'applied_unverified' || this.active.has(run.id) || run.rollback?.state === 'pending_approval') {
       throw new RepairError('Only an unverified repair that is not being checked can be checked again.', 409);
     }
     if (this.rollbackPlan(run).conflicts.length > 0) {

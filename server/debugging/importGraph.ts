@@ -7,20 +7,27 @@ const IMPORT_PATTERNS = [
 ];
 const RESOLVE_SUFFIXES = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '/index.ts', '/index.tsx', '/index.js', '/index.jsx'];
 
+const TEST_SUPPORT = /(?:^|\/)(?:tests?|__tests__|__mocks__|fixtures)\/|(?:^|\/)test[-_]?(?:utils?|helpers?)\.|(?:^|\/)testUtils?\./i;
+
+/** Includes helpers, because weakening one can make a failing test pass. */
 export function isTestFile(path: string): boolean {
-  return path.includes('.test.') || path.includes('.spec.') || path.startsWith('tests/');
+  return path.includes('.test.') || path.includes('.spec.') || TEST_SUPPORT.test(path);
+}
+
+export function joinRelativePath(fromPath: string, specifier: string): string {
+  const parts = fromPath.split('/').slice(0, -1);
+  for (const segment of specifier.split('/')) {
+    if (segment === '..') parts.pop();
+    else if (segment !== '.' && segment !== '') parts.push(segment);
+  }
+  return parts.join('/');
 }
 
 /** Resolves a relative specifier to a project file, including "./x.js" written for x.ts. */
 export function resolveRelativeImport(fromPath: string, specifier: string, known: Set<string>): string | undefined {
   if (!specifier.startsWith('.')) return undefined;
 
-  const parts = fromPath.split('/').slice(0, -1);
-  for (const segment of specifier.split('/')) {
-    if (segment === '..') parts.pop();
-    else if (segment !== '.' && segment !== '') parts.push(segment);
-  }
-  const base = parts.join('/');
+  const base = joinRelativePath(fromPath, specifier);
 
   for (const suffix of RESOLVE_SUFFIXES) {
     if (known.has(base + suffix)) return base + suffix;

@@ -62,14 +62,14 @@ export function fingerprintDiagnostic(kind: DiagnosticKind, filePath: string | u
 }
 
 function diagnostic(
-  fields: Omit<DebugDiagnostic, 'fingerprint' | 'occurrences'> & { fingerprintMessage?: string }
+  fields: Omit<DebugDiagnostic, 'fingerprint' | 'occurrences'>
 ): DebugDiagnostic {
-  const { fingerprintMessage, ...rest } = fields;
-  const message = rest.message.slice(0, MAX_MESSAGE_LENGTH);
+  // Compiler messages quote source, so secrets in project code reach here too
+  const message = redactSecrets(fields.message).slice(0, MAX_MESSAGE_LENGTH);
   return {
-    ...rest,
+    ...fields,
     message,
-    fingerprint: fingerprintDiagnostic(rest.kind, rest.filePath, fingerprintMessage || message),
+    fingerprint: fingerprintDiagnostic(fields.kind, fields.filePath, message),
     occurrences: 1
   };
 }
@@ -94,7 +94,7 @@ function matchProjectPath(rawPath: string, files: ProjectFile[]): string | undef
     .sort((a, b) => b.length - a.length)[0];
 }
 
-const ERROR_LINE = /^\s*(?:Uncaught\s+|Unhandled\s+)?(?:\[?[\w.-]+\]?\s+)?([A-Z][A-Za-z]*Error(?: \[[A-Z_]+\])?): (.+)$/;
+const ERROR_LINE = /^\s*(?:Uncaught\s+|Unhandled\s+)?(?:\[?[\w.-]+\]?\s+)?((?:[A-Z][A-Za-z]*)?Error(?: \[[A-Z_]+\])?): (.+)$/;
 /** Assertion errors put a multi-line message between the error and its stack. */
 const MAX_LINES_BEFORE_STACK = 20;
 const TAP_LOCATION = /^\s*location:\s*'?(.+?):(\d+):(\d+)'?\s*$/;
@@ -381,12 +381,12 @@ export class DiagnosticCollector {
     const staticResult = this.collectStatic(buildId, files, this.contractsFor(buildId));
     const sandbox = this.collectSandbox(buildId, files, workspaceHash);
 
-    const hasRun = db.getExecutionSessions(buildId, 1).length > 0;
+    const hasRun = db.getExecutionSessions(buildId, 20).some(item => item.workspaceHash === workspaceHash && item.endReason);
     const runtimeCheck: DiagnosticCheck = sandbox.current.length > 0
       ? { name: 'runtime', status: 'failed' }
       : hasRun
         ? { name: 'runtime', status: 'passed', detail: 'No failed run for this workspace.' }
-        : { name: 'runtime', status: 'skipped', detail: 'This project has not run in the sandbox.' };
+        : { name: 'runtime', status: 'skipped', detail: 'This version of the project has not run in the sandbox.' };
 
     return {
       buildId,

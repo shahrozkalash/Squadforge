@@ -11,7 +11,7 @@ import {
 } from '../types.js';
 import { ExecutionAdapter } from '../swarm/executionAdapter.js';
 import { DiagnosticCollector } from './diagnosticCollector.js';
-import { isTestFile } from './importGraph.js';
+import { isTestFile, joinRelativePath } from './importGraph.js';
 
 const MAX_CHANGED_LINES = 80;
 const MAX_FILES_CHANGED = 5;
@@ -168,11 +168,26 @@ export class RepairPatchValidator {
     return { lines };
   }
 
+  /** Where the failing imports expect a module to be, without an extension. */
+  private static missingModulePaths(context: ValidationContext): Set<string> {
+    const paths = new Set<string>();
+    if (context.cause.category !== 'missing_module') return paths;
+
+    for (const item of context.baseline) {
+      if (!context.cause.fingerprints.includes(item.fingerprint) || !item.filePath) continue;
+      for (const match of item.message.matchAll(/['"](\.{1,2}\/[^'"]+)['"]/g)) {
+        paths.add(joinRelativePath(item.filePath, match[1]).replace(/\.[cm]?[tj]sx?$/, ''));
+      }
+    }
+    return paths;
+  }
+
   private static outOfScope(actions: RepairAction[], context: ValidationContext): string[] {
-    const evidence = context.cause.evidence.join('\n');
+    const missing = this.missingModulePaths(context);
     const isMissingFile = (action: RepairAction) => {
-      const stem = action.path.split('/').pop()!.replace(/\.[^.]+$/, '');
-      return context.cause.category === 'missing_module' && action.action === 'create_file' && evidence.includes(stem);
+      const withoutExtension = action.path.replace(/\.[cm]?[tj]sx?$/, '');
+      return action.action === 'create_file' && withoutExtension !== action.path &&
+        (missing.has(withoutExtension) || missing.has(withoutExtension.replace(/\/index$/, '')));
     };
     return actions
       .filter(action => !context.scope.includes(action.path) && !isMissingFile(action))
