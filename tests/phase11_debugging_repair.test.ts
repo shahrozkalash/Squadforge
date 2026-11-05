@@ -921,8 +921,64 @@ describe('Phase 11: review regressions', () => {
     assert.equal(scopeFailed('src/helper/index.ts'), false);
   });
 
+  test('a change during verification stops the verdict', async t => {
+    const owner = makeUser('duringcheck');
+    const build = await makeBuild(owner, {
+      'package.json': JSON.stringify({ name: 'x', scripts: { test: 'vitest run' } }),
+      'src/m.ts': `export const m: number = 'x';\n`,
+      'src/m.test.ts': `import { m } from './m';\nexport const c = m;\n`
+    });
+    scriptAgents(t, { patches: [fixPatch('src/m.ts', `'x'`, '1')] });
+    const backend = new FakeBackend();
+    const { repairs } = coordinator(backend);
+
+    const held = await repair(repairs, build, owner);
+    await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+    await until(() => backend.processes.length === 1, 'the test run');
+    await MergeManager.applyBatchActions(build.id, 'user', [{ action: 'create_file', path: 'src/late.ts', content: 'export const late = 1;\n' }]);
+    backend.processes[0].end(0);
+
+    const finished = (await repairs.settled(held.id))!;
+    assert.equal(finished.status, 'applied_unverified', finished.outcome);
+    assert.equal(ProjectMemoryService.getRepairLessons(build.id, owner.id).filter(lesson => lesson.outcome === 'verified').length, 0);
+  });
+
+  test('a stop that arrives while an install is being created still stops it', async () => {
+    const owner = makeUser('earlystop');
+    const build = await makeBuild(owner, {
+      'package.json': JSON.stringify({ name: 'x', dependencies: { a: '1.0.0' } }),
+      'package-lock.json': '{}'
+    });
+    const backend = new FakeBackend();
+    const manager = new ExecutionSessionManager(backend, config);
+    const start = backend.startProcess.bind(backend);
+    let reached!: () => void;
+    let proceed!: () => void;
+    const atLaunch = new Promise<void>(resolve => { reached = resolve; });
+    const release = new Promise<void>(resolve => { proceed = resolve; });
+    backend.startProcess = async (...args: Parameters<typeof start>) => {
+      reached();
+      await release;
+      return start(...args);
+    };
+
+    const first = await manager.createSession(build, owner);
+    assert.ok('approvalRequired' in first);
+    decide(build, owner, first.approvalRequired.id, true);
+    const created = await manager.createSession(build, owner);
+    assert.ok('id' in created);
+
+    const installing = manager.installDependencies(build, created.id);
+    await atLaunch;
+    await manager.stop(build, created.id);
+    proceed();
+    await installing;
+
+    assert.equal(backend.processes[0].stopped, true);
+  });
+
   test('test helpers count as tests', () => {
-    for (const path of ['__tests__/a.ts', 'src/__tests__/b.ts', 'test/c.ts', 'src/testUtils.ts', 'src/test-helpers.ts', 'src/__mocks__/d.ts']) {
+    for (const path of ['__tests__/a.ts', 'src/__tests__/b.ts', 'test/c.ts', 'src/testUtils.ts', 'src/test-helpers.ts', 'src/__mocks__/d.ts', 'src/setupTests.ts', 'jest.setup.ts']) {
       assert.equal(isTestFile(path), true, path);
     }
     for (const path of ['src/latest.ts', 'src/contest/entry.ts', 'src/attest.ts']) {
@@ -1172,6 +1228,7 @@ describe('Phase 11: tests after repair', () => {
     assert.equal(affectedTestArgs('node --test', ['a.test.ts']), null);
     assert.equal(affectedTestArgs('vitest', ['$(rm -rf).test.ts']), null);
     assert.equal(affectedTestArgs('vitest', ['--config=evil.ts']), null);
+    assert.equal(affectedTestArgs('jest', ['a.test.ts', 'tests/helpers.ts']), null, 'a helper holds no tests');
   });
 
   test('tests wait for execution approval, then run only the affected files in the sandbox', async t => {

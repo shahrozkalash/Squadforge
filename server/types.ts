@@ -2029,6 +2029,8 @@ export interface DebugDiagnostic {
   code?: string;
   stack?: string[];
   sessionId?: string;
+  /** The script that failed, which a session can later replace with another. */
+  script?: string;
   occurrences: number;
 }
 

@@ -258,7 +258,8 @@ export class ApprovalGateService {
   static revokeApproval(
     buildId: string,
     userId: string,
-    requestId: string
+    requestId: string,
+    notes = 'Approval revoked by the owner'
   ): { success: boolean; request?: HumanApprovalRequest; error?: string } {
     const build = db.getBuild(buildId);
     if (!userId || !build || !build.userId || build.userId !== userId) {
@@ -274,7 +275,7 @@ export class ApprovalGateService {
     const revoked = db.saveApprovalRequest({
       ...request,
       status: 'rejected',
-      resolutionNotes: 'Approval revoked by the owner',
+      resolutionNotes: notes,
       resolvedAt: Date.now()
     });
     return { success: true, request: revoked };

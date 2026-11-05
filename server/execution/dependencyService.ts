@@ -109,6 +109,8 @@ export const AFFECTED_TEST_SCRIPT = 'test:affected';
 export function affectedTestArgs(definition: string, testFiles: string[]): string[] | null {
   if (testFiles.length === 0 || /[;&|]/.test(definition)) return null;
   if (!testFiles.every(file => /^[\w][\w./-]*$/.test(file))) return null;
+  // A helper holds no tests, and some runners fail on that, so the whole suite runs instead
+  if (!testFiles.every(file => /\.(?:test|spec)\./.test(file))) return null;
   if (/\bvitest\b/.test(definition)) return ['--run', ...testFiles];
   if (/\bjest\b/.test(definition)) return ['--runTestsByPath', ...testFiles];
   return null;

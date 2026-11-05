@@ -498,7 +498,8 @@ export class ExecutionSessionManager {
     const active = this.processes.get(sessionId);
     if (!active) {
       // A stop can arrive while the process is still being created
-      if (db.getExecutionSession(sessionId)?.status === 'starting') this.pendingStops.add(sessionId);
+      const status = db.getExecutionSession(sessionId)?.status;
+      if (status === 'starting' || status === 'installing') this.pendingStops.add(sessionId);
       return;
     }
 

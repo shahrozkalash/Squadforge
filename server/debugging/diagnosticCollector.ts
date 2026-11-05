@@ -130,7 +130,7 @@ export function parseProcessOutput(
   const output = redactSecrets(rawOutput);
   const lines = output.split(/\r?\n/);
   const isTestRun = Boolean(session.script?.startsWith('test'));
-  const base = { source: 'sandbox' as const, sessionId: session.id };
+  const base = { source: 'sandbox' as const, sessionId: session.id, script: session.script };
   const found: DebugDiagnostic[] = [];
 
   for (const name of detectMissingModules(output)) {
@@ -333,6 +333,7 @@ export class DiagnosticCollector {
           kind: isTestRun ? 'test' : 'runtime',
           source: 'sandbox',
           sessionId: session.id,
+          script: session.script,
           code: session.endReason,
           message: `Script "${session.script}" ended with ${session.endReason} (exit code ${session.exitCode})`
         }));

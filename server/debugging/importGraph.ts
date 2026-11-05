@@ -7,7 +7,7 @@ const IMPORT_PATTERNS = [
 ];
 const RESOLVE_SUFFIXES = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.json', '/index.ts', '/index.tsx', '/index.js', '/index.jsx'];
 
-const TEST_SUPPORT = /(?:^|\/)(?:tests?|__tests__|__mocks__|fixtures)\/|(?:^|\/)test[-_]?(?:utils?|helpers?)\.|(?:^|\/)testUtils?\./i;
+const TEST_SUPPORT = /(?:^|\/)(?:tests?|__tests__|__mocks__|fixtures)\/|(?:^|\/)test[-_]?(?:utils?|helpers?)\.|(?:^|\/)testUtils?\.|(?:^|\/)(?:setupTests|test[-_.]?setup|(?:jest|vitest)\.setup)\./i;
 
 /** Includes helpers, because weakening one can make a failing test pass. */
 export function isTestFile(path: string): boolean {

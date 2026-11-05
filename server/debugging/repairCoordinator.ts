@@ -40,6 +40,7 @@ const BUSY_BUILD_STATES = ['planning', 'running', 'verifying'];
 const BUSY_RUN_STATES = ['planning', 'generating', 'integrating', 'validating', 'repairing', 'finalizing'];
 const RUN_STALE_MS = 60 * 60 * 1000;
 const PROCESS_END_WAIT_MS = 5000;
+const UNUSED_APPROVAL = 'Closed automatically: the approved change was not applied';
 
 export class RepairError extends Error {
   constructor(message: string, readonly status = 400) {
@@ -566,6 +567,12 @@ export class RepairCoordinator {
   }
 
   private async conclude(run: RepairRun, cause: RootCause, tests: RepairTestEvidence): Promise<void> {
+    if (run.appliedWorkspaceHash !== projectStateHash(db.getAllFiles(run.buildId))) {
+      this.finish(run, 'applied_unverified', 'The project changed while this repair was being checked, so its result cannot be judged alone. The patch stays applied.');
+      this.recordMemoryAttempt(run, false, 'The project changed during verification');
+      return;
+    }
+
     if (tests.status === 'failed') {
       await this.failAndRollBack(run, `Tests failed after the patch: ${tests.detail}`);
       return;
@@ -605,8 +612,7 @@ export class RepairCoordinator {
         return !(tests.status === 'passed' && covered);
       }
 
-      const script = item.sessionId ? db.getExecutionSession(item.sessionId)?.script : undefined;
-      const rerun = script ? sessions.find(session => session.script === script && session.endReason) : undefined;
+      const rerun = item.script ? sessions.find(session => session.script === item.script && session.endReason) : undefined;
       return !(rerun?.workspaceHash === hash && rerun.endReason === 'exited' && rerun.exitCode === 0);
     });
   }
@@ -653,7 +659,7 @@ export class RepairCoordinator {
     }
 
     try {
-      const prepared = await this.prepareSession(run, build, user, files);
+      const prepared = await this.prepareSession(run, build, user, files, signal);
       if (isApprovalRequired(prepared)) {
         this.update(run, {
           status: 'awaiting_test_approval',
@@ -684,7 +690,7 @@ export class RepairCoordinator {
   }
 
   /** Tests need a session of their own with dependencies in place. */
-  private async prepareSession(run: RepairRun, build: Build, user: User, files: ProjectFile[]) {
+  private async prepareSession(run: RepairRun, build: Build, user: User, files: ProjectFile[], signal: AbortSignal) {
     const remember = (sessionId: string) => this.update(run, {
       verification: { ...run.verification!, tests: { ...run.verification!.tests, sessionId } }
     });
@@ -702,6 +708,7 @@ export class RepairCoordinator {
       remember(session.id);
     }
 
+    this.checkpoint(run, signal);
     if (planDependencies(files).hasDependencies && session.dependencyStatus !== 'installed') {
       const installing = await this.execution.installDependencies(build, session.id);
       if (isApprovalRequired(installing)) return installing;
@@ -828,6 +835,7 @@ export class RepairCoordinator {
 
   /** Undoes a repair for the owner. Sensitive files still go through approval. */
   async rollback(build: Build, repairId: string, reason?: string): Promise<RepairRun> {
+    this.reconcile(build.id);
     const run = this.requireRun(build, repairId);
     if (run.fileChanges.length === 0) throw new RepairError('This repair changed no files.', 409);
     if (run.rollback?.state === 'done') throw new RepairError('This repair is already rolled back.', 409);
@@ -873,7 +881,7 @@ export class RepairCoordinator {
         try {
           await this.applyApproved(run, request, build, user, signal);
         } finally {
-          if (run.fileChanges.length === 0) ApprovalGateService.revokeApproval(build.id, user.id, request.id);
+          if (run.fileChanges.length === 0) ApprovalGateService.revokeApproval(build.id, user.id, request.id, UNUSED_APPROVAL);
         }
       });
       return true;
@@ -895,8 +903,11 @@ export class RepairCoordinator {
       return true;
     }
     this.track(run, async () => {
-      await this.performRollback(run, run.rollback?.reason || 'Approved by the owner', Boolean(run.rollback?.automatic), this.approvedRollback(run, request));
-      if (run.rollback?.state !== 'done') ApprovalGateService.revokeApproval(build.id, user.id, request.id);
+      try {
+        await this.performRollback(run, run.rollback?.reason || 'Approved by the owner', Boolean(run.rollback?.automatic), this.approvedRollback(run, request));
+      } finally {
+        if (run.rollback?.state !== 'done') ApprovalGateService.revokeApproval(build.id, user.id, request.id, UNUSED_APPROVAL);
+      }
     });
     return true;
   }
@@ -974,8 +985,10 @@ export class RepairCoordinator {
 
   /** Checks an applied patch again, for example after the owner ran the tests. */
   verifyAgain(build: Build, user: User, repairId: string): RepairRun {
+    this.reconcile(build.id);
     const run = this.requireRun(build, repairId);
-    if (run.status !== 'applied_unverified' || this.active.has(run.id) || run.rollback?.state === 'pending_approval') {
+    const busy = this.active.has(run.id) || this.rollingBack.has(run.id) || run.rollback?.state === 'pending_approval';
+    if (run.status !== 'applied_unverified' || busy) {
       throw new RepairError('Only an unverified repair that is not being checked can be checked again.', 409);
     }
     if (this.rollbackPlan(run).conflicts.length > 0) {
