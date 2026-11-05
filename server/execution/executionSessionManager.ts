@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { db } from '../store.js';
+import { ROUTE_CHECK_LOG, db } from '../store.js';
 import {
   Build,
   DependencyInstallRecord,
@@ -605,6 +605,7 @@ export class ExecutionSessionManager {
       throw new ExecutionError('The project is not running.', 409);
     }
     const safePaths = paths.filter(path => /^\/(?!\/)[\w./~-]*$/.test(path)).slice(0, MAX_PROBES);
+    this.log(session, 'system', ROUTE_CHECK_LOG);
 
     const open = db.getActivePreviews(session.id)[0];
     let endpoint: PreviewEndpoint | undefined = open && { host: open.relayHost, port: open.relayPort, token: open.relayToken };

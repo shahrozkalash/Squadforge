@@ -1969,6 +1969,8 @@ export interface RepairRun {
   pendingApproval?: { requestId: string; purpose: 'apply' | 'tests' | 'rollback' };
   /** The sandbox session in use, so a cancel can stop it. */
   activeSessionId?: string;
+  /** False when the session already existed, so the run must not remove it. */
+  activeSessionOwned?: boolean;
   /** Continue with the next root cause after this one is verified. */
   repairAll?: boolean;
   chainDepth?: number;

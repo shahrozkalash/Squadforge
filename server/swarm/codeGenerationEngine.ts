@@ -24,7 +24,8 @@ import { PromptCompiler } from './promptCompiler.js';
 import { IncrementalEditor } from './incrementalEditor.js';
 import { AutomaticRepairEngine } from './automaticRepairEngine.js';
 import { ExecutionAdapter } from './executionAdapter.js';
-import { IntegrationAgent } from './integrationAgent.js';
+import { IntegrationAnalysisReport } from './integrationAgent.js';
+import { runCheckTask } from '../debugging/staticChecks.js';
 import { MergeManager } from './mergeManager.js';
 import { ApprovalGateService } from './approvalGateService.js';
 import { ProjectMemoryService } from './projectMemory.js';
@@ -402,7 +403,12 @@ export class CodeGenerationEngine {
       const pass3Start = Date.now();
 
       const postGenFiles = db.getAllFiles(buildId);
-      const integrationReport = IntegrationAgent.analyzeProjectContracts(postGenFiles);
+      const integrationReport = await runCheckTask<IntegrationAnalysisReport>(
+        'integration',
+        postGenFiles.map(({ path, content }) => ({ path, content }) as ProjectFile),
+        [],
+        signal
+      );
 
       if (!integrationReport.passed && integrationReport.issues.length > 0) {
         passes[2].diagnostics = integrationReport.issues.map(i => `[${i.severity.toUpperCase()}] ${i.sourceFile}: ${i.message}`);
@@ -434,7 +440,7 @@ export class CodeGenerationEngine {
       const pass4Start = Date.now();
 
       const currentFiles = db.getAllFiles(buildId);
-      const validationSnapshot = AutomaticRepairEngine.evaluateValidationDimensions(currentFiles, establishedContracts);
+      const validationSnapshot = await AutomaticRepairEngine.checkDimensions(currentFiles, establishedContracts, signal);
       const hasErrors = !validationSnapshot.clean;
 
       runRecord.validationResults = {
@@ -543,7 +549,7 @@ export class CodeGenerationEngine {
 
       // Finalization must strictly revalidate the latest workspace state directly from storage
       const finalWorkspaceFiles = db.getAllFiles(buildId);
-      const finalVerification = AutomaticRepairEngine.evaluateValidationDimensions(finalWorkspaceFiles, establishedContracts);
+      const finalVerification = await AutomaticRepairEngine.checkDimensions(finalWorkspaceFiles, establishedContracts, signal);
 
       runRecord.validationResults = {
         syntaxErrors: finalVerification.syntaxErrorsCount,

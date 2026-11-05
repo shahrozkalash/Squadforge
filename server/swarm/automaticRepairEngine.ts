@@ -17,6 +17,15 @@ import { GenerationProfileRegistry } from './generationProfiles.js';
 import { ProjectContextEngine } from './projectContextEngine.js';
 import { ApprovalGateService } from './approvalGateService.js';
 import { RepairPatchValidator } from '../debugging/repairPatchValidator.js';
+import { runCheckTask } from '../debugging/staticChecks.js';
+
+export interface RepairIssue {
+  file: string;
+  message: string;
+  line?: number;
+  kind: 'syntax' | 'type' | 'integration' | 'contract';
+  key: string;
+}
 
 export interface RepairValidationSnapshot {
   syntaxPassed: boolean;
@@ -25,6 +34,7 @@ export interface RepairValidationSnapshot {
   contractPassed: boolean;
   configPassed: boolean;
   clean: boolean;
+  issues: RepairIssue[];
   syntaxErrorsCount: number;
   typeErrorsCount: number;
   integrationErrorsCount: number;
@@ -67,6 +77,35 @@ export class AutomaticRepairEngine {
 
     const clean = diagnostics.length === 0;
 
+    const issues: RepairIssue[] = [
+      ...syntaxErrors.map(err => ({
+        file: err.filePath,
+        message: `Syntax error: ${err.message}`,
+        line: err.line,
+        kind: 'syntax' as const,
+        key: `syntax:${err.filePath}:${err.message}`
+      })),
+      ...typeCheck.errors.map(err => ({
+        file: err.filePath,
+        message: `Type error [${err.code}]: ${err.message}`,
+        line: err.line,
+        kind: 'type' as const,
+        key: `type:${err.filePath}:${err.code}:${err.message}`
+      })),
+      ...integrationErrors.map(issue => ({
+        file: issue.sourceFile,
+        message: `Integration defect: ${issue.message}`,
+        kind: 'integration' as const,
+        key: `integration:${issue.sourceFile}:${issue.message}`
+      })),
+      ...contractValidations.flatMap(result => result.errors.map(err => ({
+        file: result.contract.filePath,
+        message: `Contract defect: ${err}`,
+        kind: 'contract' as const,
+        key: `contract:${result.contract.filePath}:${err}`
+      })))
+    ];
+
     return {
       syntaxPassed: syntaxErrors.length === 0,
       typeCheckPassed: typeCheck.errors.length === 0,
@@ -74,6 +113,7 @@ export class AutomaticRepairEngine {
       contractPassed: contractErrors.length === 0,
       configPassed: configErrors.length === 0,
       clean,
+      issues,
       syntaxErrorsCount: syntaxErrors.length,
       typeErrorsCount: typeCheck.errors.length,
       integrationErrorsCount: integrationErrors.length,
@@ -81,6 +121,20 @@ export class AutomaticRepairEngine {
       configErrorsCount: configErrors.length,
       diagnostics
     };
+  }
+
+  /** The same checks in the check process, so a slow type check does not hold up the server. */
+  static checkDimensions(
+    files: ProjectFile[],
+    contracts: ProjectContract[] = [],
+    signal?: AbortSignal
+  ): Promise<RepairValidationSnapshot> {
+    return runCheckTask<RepairValidationSnapshot>(
+      'dimensions',
+      files.map(({ path, content }) => ({ path, content }) as ProjectFile),
+      contracts,
+      signal
+    );
   }
 
   /**
@@ -110,7 +164,7 @@ export class AutomaticRepairEngine {
       attemptsCount++;
 
       // 1. Gather Real Evidence across all validation dimensions
-      const snapshot = this.evaluateValidationDimensions(currentFiles, contracts);
+      const snapshot = await this.checkDimensions(currentFiles, contracts, signal);
 
       // If zero defects across all dimensions, return validated success
       if (snapshot.clean) {
@@ -124,60 +178,7 @@ export class AutomaticRepairEngine {
         };
       }
 
-      // Extract active issues for targeted repair
-      const activeIssues: Array<{
-        file: string;
-        message: string;
-        line?: number;
-        kind: 'syntax' | 'type' | 'integration' | 'contract' | 'config';
-        key: string;
-      }> = [];
-
-      const syntaxErrors = ExecutionAdapter.validateSyntax(currentFiles);
-      for (const err of syntaxErrors) {
-        activeIssues.push({
-          file: err.filePath,
-          message: `Syntax error: ${err.message}`,
-          line: err.line,
-          kind: 'syntax',
-          key: `syntax:${err.filePath}:${err.message}`
-        });
-      }
-
-      const typeCheck = ExecutionAdapter.validateTypes(currentFiles);
-      for (const err of typeCheck.errors) {
-        activeIssues.push({
-          file: err.filePath,
-          message: `Type error [${err.code}]: ${err.message}`,
-          line: err.line,
-          kind: 'type',
-          key: `type:${err.filePath}:${err.code}:${err.message}`
-        });
-      }
-
-      const integration = IntegrationAgent.analyzeProjectContracts(currentFiles);
-      for (const issue of integration.issues) {
-        if (issue.severity === 'error') {
-          activeIssues.push({
-            file: issue.sourceFile,
-            message: `Integration defect: ${issue.message}`,
-            kind: 'integration',
-            key: `integration:${issue.sourceFile}:${issue.message}`
-          });
-        }
-      }
-
-      const contractValidations = ContractFirstEngine.validateFilesAgainstContracts(currentFiles, contracts);
-      for (const cv of contractValidations) {
-        for (const err of cv.errors) {
-          activeIssues.push({
-            file: cv.contract.filePath,
-            message: `Contract defect: ${err}`,
-            kind: 'contract',
-            key: `contract:${cv.contract.filePath}:${err}`
-          });
-        }
-      }
+      const activeIssues = snapshot.issues;
 
       if (activeIssues.length === 0) {
         // Only warnings or configs left
@@ -247,7 +248,7 @@ export class AutomaticRepairEngine {
         unresolvedDefects.push(`Repair of ${targetIssue.file} refused before applying: ${dryRun.rejected[0] || candidate.error}`);
         continue;
       }
-      const candidateSnapshot = this.evaluateValidationDimensions(candidate.files, contracts);
+      const candidateSnapshot = await this.checkDimensions(candidate.files, contracts, signal);
       const withoutLine = (d: string) => d.replace(/:\d+:/, ':');
       const known = new Set(snapshot.diagnostics.map(withoutLine));
       const introduced = candidateSnapshot.diagnostics.filter(d => !known.has(withoutLine(d)));
@@ -265,7 +266,7 @@ export class AutomaticRepairEngine {
         // STRENGTHENED REPAIR VERIFICATION:
         // Do NOT mark defect resolved merely because patch was applied!
         // Verify against real compiler/integration evidence:
-        const postPatchSnapshot = this.evaluateValidationDimensions(currentFiles, contracts);
+        const postPatchSnapshot = await this.checkDimensions(currentFiles, contracts, signal);
         const defectPersists = postPatchSnapshot.diagnostics.some(d => d.includes(targetIssue.message) || (targetIssue.line && d.includes(`${targetIssue.file}:${targetIssue.line}`)));
 
         if (!defectPersists) {
@@ -290,7 +291,7 @@ export class AutomaticRepairEngine {
     }
 
     // Final verification after repair loop across ALL dimensions
-    const finalSnapshot = this.evaluateValidationDimensions(currentFiles, contracts);
+    const finalSnapshot = await this.checkDimensions(currentFiles, contracts, signal);
     const allClean = finalSnapshot.clean;
 
     const remainingDefects = allClean 

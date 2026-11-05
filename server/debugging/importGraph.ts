@@ -116,6 +116,10 @@ export function selectAffectedTests(files: ProjectFile[], changedPaths: string[]
 
 /** Some GET routes change things in spite of the method, so a probe leaves them alone. */
 const UNSAFE_ROUTE = /logout|signout|sign-out|seed|reset|delete|remove|clear|drop|purge|migrate|install|shutdown/i;
+/** Code in a handler that suggests it writes, whatever the route is called. */
+const WRITING_HANDLER = /\.(?:save|delete|destroy|remove|insert\w*|update\w*|create|upsert|drop|truncate|write\w*|append\w*|unlink|rm)\(|\b(?:INSERT\s+INTO|DELETE\s+FROM|UPDATE\s+\w+\s+SET|DROP\s+TABLE)\b/i;
+const NEXT_ROUTE = /\n\s*(?:app|router|server)\.(?:get|post|put|patch|delete|use)\(/;
+const HANDLER_CHARS = 1500;
 const GET_ROUTE = /\b(?:app|router|server)\.get\(\s*['"](\/[^'":*?]*)['"]/g;
 
 /** GET routes with no parameters. These are the only routes safe to call without knowing the app. */
@@ -124,7 +128,8 @@ export function detectGetRoutes(files: ProjectFile[]): Array<{ path: string; fil
   for (const file of files) {
     if (!CODE_FILE.test(file.path) || isTestFile(file.path)) continue;
     for (const match of file.content.matchAll(GET_ROUTE)) {
-      if (!routes.has(match[1]) && !UNSAFE_ROUTE.test(match[1])) routes.set(match[1], file.path);
+      const handler = file.content.slice(match.index).split(NEXT_ROUTE)[0].slice(0, HANDLER_CHARS);
+      if (!routes.has(match[1]) && !UNSAFE_ROUTE.test(match[1]) && !WRITING_HANDLER.test(handler)) routes.set(match[1], file.path);
     }
   }
   return Array.from(routes, ([path, filePath]) => ({ path, filePath }));

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { AddressInfo } from 'node:net';
 import express from 'express';
-import { db } from '../server/store.js';
+import { ROUTE_CHECK_LOG, db } from '../server/store.js';
 import { Build, DebugDiagnostic, ProjectFile, RepairRun, RootCause, User } from '../server/types.js';
 import { callUnifiedGateway, extractAndParseJson } from '../server/gateway.js';
 import { localLLMService } from '../server/localLLM.js';
@@ -1579,6 +1579,148 @@ describe('Phase 11: limitation fixes', () => {
       { path: 'tests/b.test.ts', content: '' }
     ] as ProjectFile[];
     assert.deepEqual(selectAffectedTests(files, ['src/other.ts']), ['tests/b.test.ts']);
+  });
+
+  test('a crash in a session someone could reach proves nothing by staying up', async t => {
+    const owner = makeUser('reached');
+    const build = await makeBuild(owner, serverProject);
+    await failedStart(build, owner, 'Error: boot failed');
+    const crashed = db.getExecutionSessions(build.id, 1)[0];
+    db.savePreviewSession({
+      id: `pv_p11_${++counter}`, sessionId: crashed.id, buildId: build.id, userId: owner.id, status: 'closed', port: 3000,
+      relayHost: '127.0.0.1', relayPort: 1, createdAt: Date.now(), lastAccessAt: Date.now()
+    } as any);
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    const backend = new FakeBackend();
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 10 });
+
+    await withRelay(backend, () => 200, async () => {
+      const held = await repair(repairs, build, owner);
+      await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+      const finished = (await repairs.settled(held.id))!;
+      assert.equal(finished.verification?.runtime?.survived, true);
+      assert.equal(finished.status, 'applied_unverified', finished.outcome);
+    });
+  });
+
+  test('a route check counts as outside contact, and project output cannot fake or hide one', async () => {
+    const owner = makeUser('marker');
+    const build = await makeBuild(owner, serverProject);
+    const id = session(build, owner, { script: 'start' });
+
+    db.appendExecutionLog(build.id, { sessionId: id, stream: 'stdout', text: ROUTE_CHECK_LOG, createdAt: Date.now() });
+    assert.equal(db.sessionWasReached(id), false);
+
+    db.appendExecutionLog(build.id, { sessionId: id, stream: 'system', text: ROUTE_CHECK_LOG, createdAt: Date.now() });
+    assert.equal(db.sessionWasReached(id), true);
+  });
+
+  test('a route failure on a session with outside traffic is not proven by a fresh start', async t => {
+    const owner = makeUser('warm');
+    const build = await makeBuild(owner, serverProject);
+    const backend = new FakeBackend();
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 10 });
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    let status = 500;
+
+    await withRelay(backend, () => status, async () => {
+      const first = await manager.createSession(build, owner);
+      assert.ok('approvalRequired' in first);
+      decide(build, owner, first.approvalRequired.id, true);
+      const created = await manager.createSession(build, owner);
+      assert.ok('id' in created);
+      await manager.startScript(build, created.id, 'start');
+      db.savePreviewSession({
+        id: `pv_p11_${++counter}`, sessionId: created.id, buildId: build.id, userId: owner.id, status: 'closed', port: 3000,
+        relayHost: '127.0.0.1', relayPort: 1, createdAt: Date.now(), lastAccessAt: Date.now()
+      } as any);
+
+      const held = await repair(repairs, build, owner, { probeSessionId: created.id });
+      assert.equal(held.report?.diagnostics[0].code, 'HTTP_PROBE_WARM');
+
+      status = 200;
+      await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+      assert.equal((await repairs.settled(held.id))!.status, 'applied_unverified');
+    });
+  });
+
+  test('probes skip handlers whose code writes, whatever the route is called', () => {
+    const files = [{
+      path: 'src/app.ts',
+      content: [
+        `app.get('/report', (req, res) => { db.save(req.query); res.end(); });`,
+        `app.get('/stats', (req, res) => { db.query('INSERT INTO hits VALUES (1)'); res.end(); });`,
+        `app.get('/api/users', (req, res) => res.json(users));`,
+        `app.post('/api/users', (req, res) => { db.save(req.body); });`
+      ].join('\n')
+    }] as ProjectFile[];
+
+    assert.deepEqual(detectGetRoutes(files).map(route => route.path), ['/api/users']);
+  });
+
+  test('a repair leaves alone a session the owner already had', async t => {
+    const owner = makeUser('adopted');
+    const build = await makeBuild(owner, serverProject);
+    await failedStart(build, owner, 'Error: boot failed');
+    scriptAgents(t, { patches: [fixPatch('src/app.ts', 'export const value = 1;', 'export const value = 2;')] });
+    const backend = new FakeBackend();
+    backend.ports = [3000];
+    const { manager } = coordinator(backend);
+    const repairs = new RepairCoordinator(manager, { settleMs: 200 });
+
+    const held = await repair(repairs, build, owner);
+    const decided = decide(build, owner, held.pendingApproval!.requestId, true);
+    const mine = await manager.createSession(build, owner);
+    assert.ok('id' in mine);
+
+    await repairs.handleApprovalDecision(decided, owner);
+    await until(() => backend.processes.length === 1, 'the proof run');
+    await repairs.cancel(build, held.id);
+
+    assert.equal(backend.processes[0].stopped, true, 'what the repair started is stopped');
+    assert.notEqual(db.getExecutionSession(mine.id)?.status, 'destroyed', 'the session stays the owner\'s');
+  });
+
+  test('a generic failure message cannot excuse a repair as an old failure', async t => {
+    const owner = makeUser('generic');
+    const line = '  ● Test suite failed to run\n';
+    const build = await makeBuild(owner, {
+      'package.json': JSON.stringify({ name: 'x', scripts: { test: 'jest' } }),
+      'src/m.ts': `export const m: number = 'x';\n`,
+      'src/m.test.ts': `import { m } from './m';\nexport const c = m;\n`
+    });
+    const before = session(build, owner, { script: 'test', endReason: 'failed', exitCode: 1 });
+    db.appendExecutionLog(build.id, { sessionId: before, stream: 'stdout', text: line, createdAt: Date.now() });
+    scriptAgents(t, { patches: [fixPatch('src/m.ts', `'x'`, '1')] });
+    const backend = new FakeBackend();
+    const { repairs } = coordinator(backend);
+
+    const report = await DiagnosticCollector.collect(build.id);
+    const target = RootCauseEngine.analyze(db.getAllFiles(build.id), report.diagnostics).find(cause => cause.category === 'type_mismatch')!;
+    const held = await repair(repairs, build, owner, { rootCauseId: target.id });
+    await repairs.handleApprovalDecision(decide(build, owner, held.pendingApproval!.requestId, true), owner);
+    await until(() => backend.processes.length === 1, 'the test run');
+    backend.processes[0].output('stdout', line);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    backend.processes[0].end(1);
+
+    assert.equal((await repairs.settled(held.id))!.status, 'rolled_back');
+  });
+
+  test('code generation checks run outside the server process and stay honest', async () => {
+    const broken = [{ path: 'src/a.ts', content: `export const a: number = 'x';\n` }] as ProjectFile[];
+
+    let ticks = 0;
+    const timer = setInterval(() => { ticks++; }, 5);
+    const snapshot = await AutomaticRepairEngine.checkDimensions(broken);
+    clearInterval(timer);
+
+    assert.ok(ticks >= 5, `the event loop must keep running, and ticked ${ticks} times`);
+    assert.equal(snapshot.clean, false);
+    assert.equal(snapshot.issues[0].kind, 'type');
+    assert.deepEqual(snapshot, AutomaticRepairEngine.evaluateValidationDimensions(broken), 'both paths must agree');
   });
 
   test('the same crash after the patch rolls it back', async t => {

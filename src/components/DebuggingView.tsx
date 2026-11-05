@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 
 const POLL_MS = 2000;
+const CHAIN_WAIT_MS = 15000;
 const WORKING = new Set(['collecting', 'analyzing', 'investigating', 'proposing', 'validating', 'applying', 'verifying']);
 const WAITING = new Set(['awaiting_approval', 'awaiting_test_approval']);
 
@@ -105,7 +106,10 @@ export const DebuggingView: React.FC = () => {
   }, [refresh]);
 
   useEffect(() => {
-    const chainContinues = repairs[0]?.repairAll && repairs[0].status === 'verified' && (repairs[0].chainDepth ?? 0) < 4;
+    // The next repair starts at once, so a longer wait means it could not start
+    const finishedAt = repairs[0]?.completedAt ?? 0;
+    const chainContinues = repairs[0]?.repairAll && repairs[0].status === 'verified' &&
+      (repairs[0].chainDepth ?? 0) < 4 && Date.now() - finishedAt < CHAIN_WAIT_MS;
     if (!repairs.some(run => WORKING.has(run.status)) && !chainContinues) return;
     const timer = setInterval(() => refresh().catch(() => undefined), POLL_MS);
     return () => clearInterval(timer);
@@ -151,6 +155,7 @@ export const DebuggingView: React.FC = () => {
           <button
             onClick={checkRunningApp}
             disabled={busy}
+            title="Calls the GET routes of the project running in the sandbox"
             className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 text-neutral-200 hover:bg-neutral-900 disabled:opacity-50"
           >
             Check running app
