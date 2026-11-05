@@ -1,6 +1,6 @@
 # SquadForge Agent Guide
 
-Last inspected commit: `e87efe8` (2026-11-05). Phases 9 and 10 are on `main` and accepted by the owner. Update this with every handoff.
+Last inspected commit: `708e761` on `feature/phase-11-debugging` (2026-11-05). Phases 9 and 10 are on `main` and accepted by the owner. Phase 11 is on its branch, waiting for the owner. Update this with every handoff.
 
 This guide comes from the project owner's reconstructed handoff and from repository inspection. The original AI Studio prompt and chats are unavailable. Treat the handoff as stated intent, and check its claims against the code. When historical evidence is missing, document the uncertainty instead of inventing a decision.
 
@@ -31,7 +31,7 @@ npm run build   # vite build
 npm run dev     # tsx server.ts
 ```
 
-Real sandbox tests need Docker: `docker build -t squadforge-sandbox:1 sandbox`, then `SANDBOX_INTEGRATION=1 npx tsx --test tests/phase10_sandbox_integration.test.ts tests/phase10_end_to_end.test.ts`.
+Real sandbox tests need Docker: `docker build -t squadforge-sandbox:1 sandbox`, then `SANDBOX_INTEGRATION=1 npx tsx --test tests/phase10_sandbox_integration.test.ts tests/phase10_end_to_end.test.ts tests/phase11_sandbox_repair.test.ts`.
 
 Project code must only run through an `ExecutionBackend` with real isolation. Never add a backend that runs it as a plain host process.
 
@@ -58,7 +58,8 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 8 | Historically reported as accepted. Not independently re-verified. |
 | Phase 9 | Advanced Code Generation Engine. Accepted by the owner on 2026-11-05 at `e87efe8`, with the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. |
 | Phase 10 | Execution environment. Accepted by the owner on 2026-11-05 at `e87efe8`. Off by default and still not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
-| Phase 11 | Do not start until the owner asks. |
+| Phase 11 | Advanced Debugging and Self-Improvement. Implemented on `feature/phase-11-debugging` at `708e761`. Waiting for the owner. See `PHASE_11_ACCEPTANCE_REPORT.md`. |
+| Phase 12 | Do not start until the owner accepts Phase 11 and asks. |
 
 Later roadmap:
 
@@ -82,7 +83,10 @@ The lockfile was added and deleted repeatedly on `main` before Phase 10, and the
 2. Run the sandbox tests on a real worker, with TLS and gVisor.
 3. Decide on guest execution, the worker, and the preview domain.
 4. Have `invariant-reviewer` check the fixes listed under "Fixed after acceptance" in `PHASE_9_ACCEPTANCE_REPORT.md`, and the relay token.
-5. Expire approval requests the owner never answers.
+5. Expire approval requests the owner never answers. Repairs already close when theirs expire.
+6. Test Phase 11 repairs with a real AI provider. Every model answer so far was scripted.
+7. Have `invariant-reviewer` check the fixes in `708e761`, which came after its second pass.
+8. Decide whether the older `/rollback-checkpoint` and `/rollback-file` routes need conflict checks.
 
 ## Fragile areas
 
@@ -94,6 +98,7 @@ The lockfile was added and deleted repeatedly on `main` before Phase 10, and the
 - Integration validation and finalization status
 - Reproducible dependency installation
 - Long-running generation and frontend progress reporting
+- `db.getFile` and `db.getAllFiles` return live objects that change in place on every write. Copy them before holding them across an `await`, or a version check compares a file with itself
 
 ## Collaboration
 
