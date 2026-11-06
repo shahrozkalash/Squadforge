@@ -3,7 +3,7 @@ import { useAuth } from '../context/AuthContext.js';
 import { useSwarm } from '../context/SwarmContext.js';
 import { Github, Play, Square, Activity, GitBranch, LogOut } from 'lucide-react';
 
-export type NavTab = 'execution' | 'debug' | 'dashboard' | 'live' | 'codegen' | 'collaboration' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
+export type NavTab = 'execution' | 'debug' | 'dashboard' | 'live' | 'codegen' | 'collaboration' | 'github' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
 
 interface NavbarProps {
   currentTab: NavTab;
@@ -97,6 +97,15 @@ export const Navbar: React.FC<NavbarProps> = ({
               {pendingApprovalsCount}
             </span>
           )}
+        </button>
+        <button
+          onClick={() => onSelectTab('github')}
+          className={`hover:text-white transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+            currentTab === 'github' ? 'text-amber-400 border-b border-amber-400 pb-0.5' : ''
+          }`}
+        >
+          <Github className="w-3.5 h-3.5" />
+          <span>GitHub</span>
         </button>
         <button
           onClick={() => onSelectTab('architecture')}

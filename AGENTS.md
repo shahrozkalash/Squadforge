@@ -63,11 +63,11 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 11 | Advanced Debugging and Self-Improvement. Accepted by the owner on 2026-11-05 at `708e761`. Most limitations were then fixed, in two rounds. See `PHASE_11_ACCEPTANCE_REPORT.md`. |
 | Phase 12 | Automated Testing and Quality Assurance. |
 | Phase 13 | Advanced Application Development. Implemented and verified on 2026-11-06. See `PHASE_13_ACCEPTANCE_REPORT.md`. |
-| Phase 14 | Do not start until the owner asks. |
+| Phase 14 | GitHub and Project Lifecycle. Implemented and verified on 2026-11-06. See `PHASE_14_ACCEPTANCE_REPORT.md`. |
+| Phase 15 | Do not start until the owner asks. |
 
 Later roadmap:
 
-- Phase 14: GitHub and Project Lifecycle
 - Phase 15: Deployment and Distribution
 - Phase 16: Production Readiness and Intelligence
 

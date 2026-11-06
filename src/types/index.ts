@@ -296,6 +296,10 @@ export interface Build {
   githubRepoUrl?: string;
   gitBranch?: string;
   pullRequestUrl?: string;
+  githubOwner?: string;
+  githubRepoName?: string;
+  githubBaseSha?: string;
+  githubSyncedAt?: number;
   totalTokens: number;
   totalCost: number;
   costLimit: number;
@@ -1382,7 +1386,8 @@ export type ApprovalOperationType =
   | 'security_sensitive_change'
   | 'large_dependency_change'
   | 'project_rollback'
-  | 'multi_file_wide_modification';
+  | 'multi_file_wide_modification'
+  | 'github_sensitive_commit';
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled';
 
@@ -2154,5 +2159,80 @@ export interface ConnectedValidationReport {
   totalConnectedFlows: number;
   unresolvedIssues: string[];
   timestamp: number;
+}
+
+export interface GitHubRepoInfo {
+  id: number;
+  name: string;
+  fullName: string;
+  owner: string;
+  private: boolean;
+  htmlUrl: string;
+  description?: string;
+  defaultBranch: string;
+  permissions?: {
+    admin: boolean;
+    push: boolean;
+    pull: boolean;
+  };
+  updatedAt: string;
+}
+
+export interface GitHubBranchInfo {
+  name: string;
+  commitSha: string;
+  protected: boolean;
+  isDefault: boolean;
+}
+
+export interface GitHubCommitInfo {
+  sha: string;
+  shortSha: string;
+  message: string;
+  authorName: string;
+  authorEmail: string;
+  authorAvatarUrl?: string;
+  date: string;
+  htmlUrl: string;
+}
+
+export interface GitHubPullRequestInfo {
+  id: number;
+  number: number;
+  title: string;
+  body: string;
+  state: 'open' | 'closed';
+  htmlUrl: string;
+  headBranch: string;
+  baseBranch: string;
+  createdAt: string;
+  mergedAt?: string;
+  mergeable?: boolean;
+  author: string;
+}
+
+export interface GitHubFileDiff {
+  path: string;
+  status: 'added' | 'modified' | 'deleted' | 'unmodified';
+  isSensitive: boolean;
+  localContent?: string;
+  remoteContent?: string;
+  diffHunks: string[];
+  additions: number;
+  deletions: number;
+}
+
+export interface GitHubConflictRecord {
+  id: string;
+  buildId: string;
+  filePath: string;
+  baseContent?: string;
+  localContent: string;
+  remoteContent: string;
+  status: 'unresolved' | 'resolved';
+  resolvedContent?: string;
+  resolutionType?: 'ours' | 'theirs' | 'manual';
+  createdAt: number;
+  resolvedAt?: number;
 }
 

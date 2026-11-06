@@ -14,6 +14,7 @@ import { ExecutionView } from './components/ExecutionView.js';
 import { DebuggingView } from './components/DebuggingView.js';
 import { SettingsView } from './components/SettingsView.js';
 import { UsageDashboardView } from './components/UsageDashboardView.js';
+import { GitHubLifecycleView } from './components/GitHubLifecycleView.js';
 import { AuthModal } from './components/AuthModal.js';
 import { ConcurrencyTestModal } from './components/ConcurrencyTestModal.js';
 import { AuthPage } from './components/AuthPage.js';
@@ -65,6 +66,10 @@ function DashboardContent() {
 
         {currentTab === 'collaboration' && (
           <CollaborationView />
+        )}
+
+        {currentTab === 'github' && (
+          <GitHubLifecycleView />
         )}
 
         {currentTab === 'architecture' && (

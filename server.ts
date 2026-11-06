@@ -54,6 +54,7 @@ import {
   ExistingProjectModifier,
   ConnectedApplicationValidator
 } from './server/application/index.js';
+import { createGitHubRouter } from './server/github/index.js';
 
 
 dotenv.config();
@@ -2582,6 +2583,9 @@ app.use('/api/builds/:id/debugging', createDebuggingRouter({
   verifyBuildOwnership,
   coordinator: repairCoordinator
 }));
+
+// GitHub Integration & Project Lifecycle (Phase 14)
+app.use(createGitHubRouter(requireAuth));
 
 // Mount Vite in dev mode or serve static bundle in production
 async function startServer() {

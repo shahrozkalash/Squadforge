@@ -33,7 +33,8 @@ import {
   CollaborativeDefect,
   HumanApprovalRequest,
   SharedKnowledgeItem,
-  CodeGenerationRun
+  CodeGenerationRun,
+  GitHubConflictRecord
 } from './types.js';
 import { ProjectMemory } from './swarm/projectMemory.js';
 import { 
@@ -344,7 +345,11 @@ export class PersistentDatabase {
         fileStructurePlan: safeJsonParse<any>(b.file_structure_plan, undefined),
         dependencyPlan: safeJsonParse<any>(b.dependency_plan, undefined),
         applicationPlan: safeJsonParse<any>(b.application_plan, undefined),
-        connectedValidation: safeJsonParse<any>(b.connected_validation, undefined)
+        connectedValidation: safeJsonParse<any>(b.connected_validation, undefined),
+        githubOwner: b.github_owner || undefined,
+        githubRepoName: b.github_repo_name || undefined,
+        githubBaseSha: b.github_base_sha || undefined,
+        githubSyncedAt: b.github_synced_at ? Number(b.github_synced_at) : undefined
       };
       this.builds.set(build.id, build);
     }
@@ -1968,8 +1973,9 @@ export class PersistentDatabase {
           project_type, architecture_decisions, requirements_checklist, revisions, live_preview_html,
           preview_mode, preview_diagnostic, preview_runtime_errors, preview_entry_point,
           architecture_blueprint, requirements_analysis, complexity_assessment, file_structure_plan, dependency_plan,
-          application_plan, connected_validation
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          application_plan, connected_validation,
+          github_owner, github_repo_name, github_base_sha, github_synced_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           user_id = excluded.user_id,
           idea = excluded.idea,
@@ -2013,7 +2019,11 @@ export class PersistentDatabase {
           file_structure_plan = excluded.file_structure_plan,
           dependency_plan = excluded.dependency_plan,
           application_plan = excluded.application_plan,
-          connected_validation = excluded.connected_validation
+          connected_validation = excluded.connected_validation,
+          github_owner = excluded.github_owner,
+          github_repo_name = excluded.github_repo_name,
+          github_base_sha = excluded.github_base_sha,
+          github_synced_at = excluded.github_synced_at
       `).run(
         build.id, build.userId, build.idea, build.status, build.createdAt, (build.updatedAt || build.createdAt || this.getTime()),
         build.completedAt || null, JSON.stringify(build.selectedModels || []),
@@ -2043,7 +2053,11 @@ export class PersistentDatabase {
         build.fileStructurePlan ? JSON.stringify(build.fileStructurePlan) : null,
         build.dependencyPlan ? JSON.stringify(build.dependencyPlan) : null,
         build.applicationPlan ? JSON.stringify(build.applicationPlan) : null,
-        build.connectedValidation ? JSON.stringify(build.connectedValidation) : null
+        build.connectedValidation ? JSON.stringify(build.connectedValidation) : null,
+        build.githubOwner || null,
+        build.githubRepoName || null,
+        build.githubBaseSha || null,
+        build.githubSyncedAt || null
       );
     } catch (err: any) {
       this.handleDatabaseWriteError('saveBuild', err);
@@ -2567,6 +2581,17 @@ export class PersistentDatabase {
     const now = this.getTime();
     const contentHash = computeContentHash(file.content);
     file.contentHash = contentHash;
+
+    if (!file.history || !Array.isArray(file.history) || file.history.length === 0) {
+      file.history = [{
+        version: file.version || 1,
+        content: file.content,
+        authorModel: file.ownerModel || 'system',
+        timestamp: now,
+        commitMessage: 'Initial version',
+        contentHash
+      }];
+    }
 
     const latestVer = file.history[file.history.length - 1];
     if (latestVer) {
@@ -4953,6 +4978,92 @@ export class PersistentDatabase {
     return rows
       .map(row => safeJsonParse<RepairRun | undefined>(row.data, undefined))
       .filter((run): run is RepairRun => Boolean(run));
+  }
+
+  // --- GitHub Lifecycle & Merge Conflicts (Phase 14) ---
+
+  public saveGitHubConflict(conflict: GitHubConflictRecord): void {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO github_conflicts (
+          id, build_id, file_path, base_content, local_content, remote_content,
+          status, resolved_content, resolution_type, created_at, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        conflict.id, conflict.buildId, conflict.filePath, conflict.baseContent ?? null,
+        conflict.localContent, conflict.remoteContent, conflict.status,
+        conflict.resolvedContent ?? null, conflict.resolutionType ?? null,
+        conflict.createdAt, conflict.resolvedAt ?? null
+      );
+      this.broadcast(conflict.buildId, 'github_conflict_updated', conflict);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveGitHubConflict', err);
+    }
+  }
+
+  public getGitHubConflict(conflictId: string): GitHubConflictRecord | null {
+    try {
+      const row = this.dbManager.db.prepare('SELECT * FROM github_conflicts WHERE id = ?').get(conflictId) as any;
+      if (!row) return null;
+      return {
+        id: row.id,
+        buildId: row.build_id,
+        filePath: row.file_path,
+        baseContent: row.base_content ?? undefined,
+        localContent: row.local_content,
+        remoteContent: row.remote_content,
+        status: row.status,
+        resolvedContent: row.resolved_content ?? undefined,
+        resolutionType: row.resolution_type ?? undefined,
+        createdAt: Number(row.created_at),
+        resolvedAt: row.resolved_at ? Number(row.resolved_at) : undefined
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  public getGitHubConflicts(buildId: string, status?: string): GitHubConflictRecord[] {
+    try {
+      const sql = status
+        ? 'SELECT * FROM github_conflicts WHERE build_id = ? AND status = ? ORDER BY created_at ASC'
+        : 'SELECT * FROM github_conflicts WHERE build_id = ? ORDER BY created_at ASC';
+      const rows = (status
+        ? this.dbManager.db.prepare(sql).all(buildId, status)
+        : this.dbManager.db.prepare(sql).all(buildId)) as any[];
+      return rows.map(row => ({
+        id: row.id,
+        buildId: row.build_id,
+        filePath: row.file_path,
+        baseContent: row.base_content ?? undefined,
+        localContent: row.local_content,
+        remoteContent: row.remote_content,
+        status: row.status,
+        resolvedContent: row.resolved_content ?? undefined,
+        resolutionType: row.resolution_type ?? undefined,
+        createdAt: Number(row.created_at),
+        resolvedAt: row.resolved_at ? Number(row.resolved_at) : undefined
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public resolveGitHubConflict(
+    conflictId: string, 
+    resolutionType: 'ours' | 'theirs' | 'manual', 
+    resolvedContent?: string
+  ): GitHubConflictRecord | null {
+    const conflict = this.getGitHubConflict(conflictId);
+    if (!conflict) return null;
+    conflict.status = 'resolved';
+    conflict.resolutionType = resolutionType;
+    conflict.resolvedContent = resolvedContent !== undefined ? resolvedContent : (
+      resolutionType === 'theirs' ? conflict.remoteContent : conflict.localContent
+    );
+    conflict.resolvedAt = this.getTime();
+    this.saveGitHubConflict(conflict);
+    return conflict;
   }
 }
 

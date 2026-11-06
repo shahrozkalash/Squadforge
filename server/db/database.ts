@@ -958,6 +958,40 @@ export class DatabaseManager {
             // column may already exist
           }
         }
+      },
+      {
+        id: 15,
+        name: '015_phase14_github_lifecycle',
+        up: (db: DatabaseSync) => {
+          try {
+            db.exec(`ALTER TABLE builds ADD COLUMN github_owner TEXT;`);
+          } catch {}
+          try {
+            db.exec(`ALTER TABLE builds ADD COLUMN github_repo_name TEXT;`);
+          } catch {}
+          try {
+            db.exec(`ALTER TABLE builds ADD COLUMN github_base_sha TEXT;`);
+          } catch {}
+          try {
+            db.exec(`ALTER TABLE builds ADD COLUMN github_synced_at INTEGER;`);
+          } catch {}
+          db.exec(`
+            CREATE TABLE IF NOT EXISTS github_conflicts (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL,
+              file_path TEXT NOT NULL,
+              base_content TEXT,
+              local_content TEXT NOT NULL,
+              remote_content TEXT NOT NULL,
+              status TEXT NOT NULL,
+              resolved_content TEXT,
+              resolution_type TEXT,
+              created_at INTEGER NOT NULL,
+              resolved_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_github_conflicts_build ON github_conflicts(build_id, status);
+          `);
+        }
       }
     ];
 

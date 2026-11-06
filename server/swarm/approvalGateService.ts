@@ -35,6 +35,7 @@ export class ApprovalGateService {
       case 'major_architecture_change':
       case 'security_sensitive_change':
       case 'project_rollback':
+      case 'github_sensitive_commit':
         return true;
       case 'multi_file_wide_modification':
         return affectedFilesCount > 5;
