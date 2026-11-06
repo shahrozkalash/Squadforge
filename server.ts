@@ -23,7 +23,7 @@ import {
   generateVerificationCode
 } from './server/crypto.js';
 import { emailService } from './server/email.js';
-import { User, SafeUser } from './server/types.js';
+import { User, SafeUser, normalizeProjectType } from './server/types.js';
 import JSZip from 'jszip';
 import { HonestVerificationService } from './server/verificationService.js';
 import { ExecutionAdapter } from './server/swarm/executionAdapter.js';
@@ -48,6 +48,13 @@ import { CodeGenerationEngine } from './server/swarm/codeGenerationEngine.js';
 import { GenerationProfileRegistry } from './server/swarm/generationProfiles.js';
 import { ProjectContextEngine } from './server/swarm/projectContextEngine.js';
 import { ContractFirstEngine } from './server/swarm/contractFirstEngine.js';
+import {
+  ConnectedApplicationPlanner,
+  ConnectedApplicationGenerator,
+  ExistingProjectModifier,
+  ConnectedApplicationValidator
+} from './server/application/index.js';
+
 
 dotenv.config();
 
@@ -2385,6 +2392,181 @@ app.post('/api/builds/:id/codegen/preview-context', requireAuth, (req, res) => {
     synthesizedContracts
   });
 });
+
+// ============================================================================
+// Phase 13: Advanced Application Development Endpoints
+// ============================================================================
+
+// POST /api/builds/:id/application/plan - Plan full-stack application topology
+app.post('/api/builds/:id/application/plan', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { userRequest, forceMode } = req.body || {};
+  const existingFiles = db.getAllFiles(build.id);
+  const plan = ConnectedApplicationPlanner.planApplication({
+    buildId: build.id,
+    userRequest: userRequest || build.idea,
+    existingFiles,
+    category: normalizeProjectType(build.projectType),
+    stack: build.techStack,
+    forceMode
+  });
+
+  build.applicationPlan = plan;
+  db.saveBuild(build);
+
+  res.json({ success: true, plan });
+});
+
+// GET /api/builds/:id/application/plan - Get current full-stack application plan
+app.get('/api/builds/:id/application/plan', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  if (!build.applicationPlan) {
+    const existingFiles = db.getAllFiles(build.id);
+    build.applicationPlan = ConnectedApplicationPlanner.planApplication({
+      buildId: build.id,
+      userRequest: build.idea,
+      existingFiles,
+      category: normalizeProjectType(build.projectType),
+      stack: build.techStack
+    });
+    db.saveBuild(build);
+  }
+
+  res.json({ plan: build.applicationPlan });
+});
+
+// POST /api/builds/:id/application/generate - Generate connected application files
+app.post('/api/builds/:id/application/generate', requireAuth, async (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const existingFiles = db.getAllFiles(build.id);
+  const plan = build.applicationPlan || ConnectedApplicationPlanner.planApplication({
+    buildId: build.id,
+    userRequest: build.idea,
+    existingFiles,
+    category: normalizeProjectType(build.projectType),
+    stack: build.techStack
+  });
+
+  build.applicationPlan = plan;
+
+  // Generate connected files across all tiers
+  const actions = ConnectedApplicationGenerator.generateConnectedFiles(plan, existingFiles);
+
+  // Split sensitive actions requiring human approval
+  const { ready, held } = ApprovalGateService.splitSensitiveActions(build.id, actions);
+
+  // Apply non-sensitive actions
+  let appliedCount = 0;
+  if (ready.length > 0) {
+    const applyRes = await MergeManager.applyBatchActions(build.id, 'software_architect', ready);
+    if (!applyRes.success) {
+      return res.status(500).json({ error: `Failed to apply generated files: ${applyRes.error}` });
+    }
+    appliedCount = ready.length;
+  }
+
+  // Request approval for any sensitive actions (e.g. package.json, server.ts)
+  let pendingApprovalId: string | undefined;
+  if (held.length > 0) {
+    const reqRecord = ApprovalGateService.requestForActions(build.id, req.user!.id, {
+      agent: 'software_architect',
+      actions: held
+    });
+    pendingApprovalId = reqRecord.request?.id;
+  }
+
+  // Validate the resulting workspace state
+  const currentFiles = db.getAllFiles(build.id);
+  const validationReport = ConnectedApplicationValidator.validate(currentFiles, plan);
+  build.connectedValidation = validationReport;
+  db.saveBuild(build);
+
+  res.json({
+    success: true,
+    plan,
+    generatedActionsCount: actions.length,
+    appliedCount,
+    heldCount: held.length,
+    pendingApprovalId,
+    validation: validationReport
+  });
+});
+
+// GET /api/builds/:id/application/validation - Validate connected application
+app.get('/api/builds/:id/application/validation', requireAuth, (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const currentFiles = db.getAllFiles(build.id);
+  const validationReport = ConnectedApplicationValidator.validate(currentFiles, build.applicationPlan);
+  build.connectedValidation = validationReport;
+  db.saveBuild(build);
+
+  res.json({ validation: validationReport });
+});
+
+// POST /api/builds/:id/application/modify - Non-destructively modify existing project
+app.post('/api/builds/:id/application/modify', requireAuth, async (req, res) => {
+  const build = verifyBuildOwnership(req, res, req.params.id);
+  if (!build) return;
+
+  const { userRequest } = req.body || {};
+  if (!userRequest || typeof userRequest !== 'string') {
+    return res.status(400).json({ error: 'Field "userRequest" is required' });
+  }
+
+  const existingFiles = db.getAllFiles(build.id);
+  const { plan, actions, inspection } = ExistingProjectModifier.planModification(
+    build.id,
+    userRequest,
+    existingFiles
+  );
+
+  build.applicationPlan = plan;
+
+  // Split sensitive actions
+  const { ready, held } = ApprovalGateService.splitSensitiveActions(build.id, actions);
+
+  let appliedCount = 0;
+  if (ready.length > 0) {
+    const applyRes = await MergeManager.applyBatchActions(build.id, 'software_architect', ready);
+    if (!applyRes.success) {
+      return res.status(500).json({ error: `Failed to apply modification: ${applyRes.error}` });
+    }
+    appliedCount = ready.length;
+  }
+
+  let pendingApprovalId: string | undefined;
+  if (held.length > 0) {
+    const reqRecord = ApprovalGateService.requestForActions(build.id, req.user!.id, {
+      agent: 'software_architect',
+      actions: held
+    });
+    pendingApprovalId = reqRecord.request?.id;
+  }
+
+  const currentFiles = db.getAllFiles(build.id);
+  const validationReport = ConnectedApplicationValidator.validate(currentFiles, plan);
+  build.connectedValidation = validationReport;
+  db.saveBuild(build);
+
+  res.json({
+    success: true,
+    plan,
+    inspection,
+    appliedCount,
+    heldCount: held.length,
+    pendingApprovalId,
+    validation: validationReport
+  });
+});
+
 
 // Project execution runs only through the sandbox backend
 app.use('/api/builds/:id/execution', createExecutionRouter({

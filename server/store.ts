@@ -342,7 +342,9 @@ export class PersistentDatabase {
         requirementsAnalysis: safeJsonParse<any>(b.requirements_analysis, undefined),
         complexityAssessment: safeJsonParse<any>(b.complexity_assessment, undefined),
         fileStructurePlan: safeJsonParse<any>(b.file_structure_plan, undefined),
-        dependencyPlan: safeJsonParse<any>(b.dependency_plan, undefined)
+        dependencyPlan: safeJsonParse<any>(b.dependency_plan, undefined),
+        applicationPlan: safeJsonParse<any>(b.application_plan, undefined),
+        connectedValidation: safeJsonParse<any>(b.connected_validation, undefined)
       };
       this.builds.set(build.id, build);
     }
@@ -1965,8 +1967,9 @@ export class PersistentDatabase {
           budget_warning_emitted, github_repo, github_branch, github_pr_url,
           project_type, architecture_decisions, requirements_checklist, revisions, live_preview_html,
           preview_mode, preview_diagnostic, preview_runtime_errors, preview_entry_point,
-          architecture_blueprint, requirements_analysis, complexity_assessment, file_structure_plan, dependency_plan
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          architecture_blueprint, requirements_analysis, complexity_assessment, file_structure_plan, dependency_plan,
+          application_plan, connected_validation
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           user_id = excluded.user_id,
           idea = excluded.idea,
@@ -2008,7 +2011,9 @@ export class PersistentDatabase {
           requirements_analysis = excluded.requirements_analysis,
           complexity_assessment = excluded.complexity_assessment,
           file_structure_plan = excluded.file_structure_plan,
-          dependency_plan = excluded.dependency_plan
+          dependency_plan = excluded.dependency_plan,
+          application_plan = excluded.application_plan,
+          connected_validation = excluded.connected_validation
       `).run(
         build.id, build.userId, build.idea, build.status, build.createdAt, (build.updatedAt || build.createdAt || this.getTime()),
         build.completedAt || null, JSON.stringify(build.selectedModels || []),
@@ -2036,7 +2041,9 @@ export class PersistentDatabase {
         build.requirementsAnalysis ? JSON.stringify(build.requirementsAnalysis) : null,
         build.complexityAssessment ? JSON.stringify(build.complexityAssessment) : null,
         build.fileStructurePlan ? JSON.stringify(build.fileStructurePlan) : null,
-        build.dependencyPlan ? JSON.stringify(build.dependencyPlan) : null
+        build.dependencyPlan ? JSON.stringify(build.dependencyPlan) : null,
+        build.applicationPlan ? JSON.stringify(build.applicationPlan) : null,
+        build.connectedValidation ? JSON.stringify(build.connectedValidation) : null
       );
     } catch (err: any) {
       this.handleDatabaseWriteError('saveBuild', err);

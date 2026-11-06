@@ -5,7 +5,9 @@ import {
   GenerationProfileType, 
   CodeGenerationRun,
   ProjectContext,
-  ProjectContract
+  ProjectContract,
+  FullStackApplicationPlan,
+  ConnectedValidationReport
 } from '../types/index.js';
 import { 
   Play, 
@@ -27,7 +29,13 @@ import {
   RefreshCw,
   XCircle,
   ShieldCheck,
-  AlertTriangle
+  AlertTriangle,
+  Database,
+  Server,
+  Workflow,
+  ArrowRight,
+  Lock,
+  Boxes
 } from 'lucide-react';
 
 export const CodeGenerationView: React.FC = () => {
@@ -44,7 +52,11 @@ export const CodeGenerationView: React.FC = () => {
     context: ProjectContext;
     synthesizedContracts: ProjectContract[];
   } | null>(null);
-  const [activeTab, setActiveTab] = useState<'passes' | 'files' | 'contracts' | 'repairs' | 'history'>('passes');
+  const [activeTab, setActiveTab] = useState<'passes' | 'files' | 'contracts' | 'repairs' | 'connected' | 'history'>('passes');
+  const [applicationPlan, setApplicationPlan] = useState<FullStackApplicationPlan | null>(null);
+  const [connectedValidation, setConnectedValidation] = useState<ConnectedValidationReport | null>(null);
+  const [isPlanningApp, setIsPlanningApp] = useState<boolean>(false);
+  const [isValidatingApp, setIsValidatingApp] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Fetch profiles on mount
@@ -108,6 +120,121 @@ export const CodeGenerationView: React.FC = () => {
 
     return () => clearInterval(interval);
   }, [activeBuild?.id, activeRun?.id, activeRun?.status, isGenerating]);
+
+  const loadAppPlanAndValidation = () => {
+    if (!activeBuild?.id) return;
+    fetch(`/api/builds/${activeBuild.id}/application/plan`)
+      .then(res => res.json())
+      .then(data => { if (data.plan) setApplicationPlan(data.plan); })
+      .catch(() => {});
+
+    fetch(`/api/builds/${activeBuild.id}/application/validation`)
+      .then(res => res.json())
+      .then(data => { if (data.validation) setConnectedValidation(data.validation); })
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    loadAppPlanAndValidation();
+  }, [activeBuild?.id]);
+
+  const handlePlanApp = async (forceMode?: 'greenfield' | 'modification') => {
+    if (!activeBuild?.id) return;
+    setIsPlanningApp(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/application/plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userRequest: userPrompt.trim() || activeBuild.idea,
+          forceMode
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.plan) {
+        setApplicationPlan(data.plan);
+        setActiveTab('connected');
+      } else {
+        setErrorMessage(data.error || 'Failed to plan application');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to plan application');
+    } finally {
+      setIsPlanningApp(false);
+    }
+  };
+
+  const handleGenerateApp = async () => {
+    if (!activeBuild?.id) return;
+    setIsGenerating(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/application/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const data = await res.json();
+      if (res.ok) {
+        if (data.plan) setApplicationPlan(data.plan);
+        if (data.validation) setConnectedValidation(data.validation);
+        setActiveTab('connected');
+        loadHistory();
+      } else {
+        setErrorMessage(data.error || 'Failed to generate connected application');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to generate connected application');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleValidateApp = async () => {
+    if (!activeBuild?.id) return;
+    setIsValidatingApp(true);
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/application/validation`);
+      const data = await res.json();
+      if (res.ok && data.validation) {
+        setConnectedValidation(data.validation);
+        setActiveTab('connected');
+      }
+    } catch (err: any) {
+      console.warn('Validation error:', err);
+    } finally {
+      setIsValidatingApp(false);
+    }
+  };
+
+  const handleModifyProject = async () => {
+    if (!activeBuild?.id || !userPrompt.trim()) {
+      setErrorMessage('Please enter the feature or extension requirement to modify the project.');
+      return;
+    }
+    setIsGenerating(true);
+    setErrorMessage(null);
+    try {
+      const res = await fetch(`/api/builds/${activeBuild.id}/application/modify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userRequest: userPrompt.trim() })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        if (data.plan) setApplicationPlan(data.plan);
+        if (data.validation) setConnectedValidation(data.validation);
+        setActiveTab('connected');
+        loadHistory();
+      } else {
+        setErrorMessage(data.error || 'Failed to modify existing project');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Failed to modify existing project');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
 
   const handlePreviewContext = async () => {
     if (!activeBuild?.id) return;
@@ -382,6 +509,59 @@ export const CodeGenerationView: React.FC = () => {
                 </button>
               )}
             </div>
+
+            {/* Phase 13: Connected Full-Stack Actions */}
+            <div className="pt-3 border-t border-neutral-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-mono font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                  <Workflow className="w-3.5 h-3.5" />
+                  Connected Full-Stack (P13)
+                </span>
+                {applicationPlan && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-amber-400/10 text-amber-300 border border-amber-400/20">
+                    {applicationPlan.mode}
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={isPlanningApp || isGenerating || !activeBuild}
+                  onClick={() => handlePlanApp()}
+                  className="py-2 px-2.5 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 text-neutral-200 text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50 transition-colors"
+                >
+                  <Layers className="w-3.5 h-3.5 text-amber-400" />
+                  {isPlanningApp ? 'Planning...' : 'Plan App'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isGenerating || !activeBuild}
+                  onClick={handleGenerateApp}
+                  className="py-2 px-2.5 rounded-lg border border-emerald-700/60 bg-emerald-950/40 hover:bg-emerald-900/50 text-emerald-300 text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50 transition-colors"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                  Generate App
+                </button>
+                <button
+                  type="button"
+                  disabled={isGenerating || !activeBuild}
+                  onClick={handleModifyProject}
+                  className="py-2 px-2.5 rounded-lg border border-cyan-700/60 bg-cyan-950/40 hover:bg-cyan-900/50 text-cyan-300 text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50 transition-colors"
+                >
+                  <Wrench className="w-3.5 h-3.5 text-cyan-400" />
+                  Extend Project
+                </button>
+                <button
+                  type="button"
+                  disabled={isValidatingApp || !activeBuild}
+                  onClick={handleValidateApp}
+                  className="py-2 px-2.5 rounded-lg border border-purple-700/60 bg-purple-950/40 hover:bg-purple-900/50 text-purple-300 text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-50 transition-colors"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-purple-400" />
+                  {isValidatingApp ? 'Checking...' : 'Validate App'}
+                </button>
+              </div>
+            </div>
           </div>
 
           {/* Context Preview Drawer if opened */}
@@ -562,6 +742,13 @@ export const CodeGenerationView: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  onClick={() => setActiveTab('connected')}
+                  className={`px-3 py-1.5 rounded transition-colors shrink-0 ${activeTab === 'connected' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
+                >
+                  Connected App (P13) {applicationPlan ? `(${applicationPlan.plannedFiles.length})` : ''}
+                </button>
+                <button
+                  type="button"
                   onClick={() => setActiveTab('files')}
                   className={`px-3 py-1.5 rounded transition-colors shrink-0 ${activeTab === 'files' ? 'bg-amber-400/20 text-amber-300 font-bold border border-amber-400/30' : 'text-neutral-400 hover:text-neutral-200'}`}
                 >
@@ -707,6 +894,7 @@ export const CodeGenerationView: React.FC = () => {
               )}
 
               {/* Tab 4: Automatic Repairs */}
+              {/* Tab 4: Automatic Repairs */}
               {activeTab === 'repairs' && (
                 <div className="space-y-3">
                   {activeRun.repairLogs.length === 0 ? (
@@ -726,14 +914,316 @@ export const CodeGenerationView: React.FC = () => {
                   )}
                 </div>
               )}
+
+              {/* Tab 5: Connected Full-Stack Application (Phase 13) */}
+              {activeTab === 'connected' && (
+                <div className="space-y-6">
+                  {applicationPlan ? (
+                    <>
+                      {/* Topology Header */}
+                      <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-neutral-800 pb-3">
+                          <div className="flex items-center gap-2">
+                            <Workflow className="w-4 h-4 text-amber-400 shrink-0" />
+                            <h4 className="font-bold text-sm text-neutral-200">
+                              Connected Architecture: {applicationPlan.appName || 'Application'}
+                            </h4>
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase bg-amber-400/10 text-amber-300 border border-amber-400/20">
+                              {applicationPlan.mode}
+                            </span>
+                          </div>
+                          <span className="text-xs font-mono text-neutral-400">
+                            {applicationPlan.plannedFiles.length} files planned across 7 tiers
+                          </span>
+                        </div>
+
+                        {/* Topologies Grid */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                          {/* Database */}
+                          <div className="p-3 bg-neutral-900/70 rounded-lg border border-neutral-800 space-y-2">
+                            <div className="flex items-center gap-2 font-mono font-bold text-emerald-400 text-[11px] uppercase">
+                              <Database className="w-3.5 h-3.5" />
+                              <span>Database Topology ({applicationPlan.topology.database.engine})</span>
+                            </div>
+                            <div className="text-[11px] text-neutral-400 space-y-1">
+                              <div><strong className="text-neutral-300">Schema:</strong> {applicationPlan.topology.database.schemaPath}</div>
+                              <div><strong className="text-neutral-300">Tables:</strong> {applicationPlan.topology.database.tables.map(t => t.name).join(', ')}</div>
+                              <div><strong className="text-neutral-300">Migrations Dir:</strong> {applicationPlan.topology.database.migrationsDir}</div>
+                            </div>
+                          </div>
+
+                          {/* Backend API */}
+                          <div className="p-3 bg-neutral-900/70 rounded-lg border border-neutral-800 space-y-2">
+                            <div className="flex items-center gap-2 font-mono font-bold text-blue-400 text-[11px] uppercase">
+                              <Server className="w-3.5 h-3.5" />
+                              <span>Backend Topology ({applicationPlan.topology.backend.framework})</span>
+                            </div>
+                            <div className="text-[11px] text-neutral-400 space-y-1">
+                              <div><strong className="text-neutral-300">Routes:</strong> {applicationPlan.topology.backend.routesPath}</div>
+                              <div><strong className="text-neutral-300">Endpoints:</strong> {applicationPlan.topology.backend.endpoints.length} routes registered</div>
+                              <div><strong className="text-neutral-300">Auth:</strong> {applicationPlan.topology.security.authMechanism}</div>
+                            </div>
+                          </div>
+
+                          {/* Frontend UI */}
+                          <div className="p-3 bg-neutral-900/70 rounded-lg border border-neutral-800 space-y-2">
+                            <div className="flex items-center gap-2 font-mono font-bold text-purple-400 text-[11px] uppercase">
+                              <Boxes className="w-3.5 h-3.5" />
+                              <span>Frontend Topology ({applicationPlan.topology.frontend.framework})</span>
+                            </div>
+                            <div className="text-[11px] text-neutral-400 space-y-1">
+                              <div><strong className="text-neutral-300">Client API:</strong> {applicationPlan.topology.frontend.clientApiPath}</div>
+                              <div><strong className="text-neutral-300">Components:</strong> {applicationPlan.topology.frontend.components.map(c => c.name).join(', ')}</div>
+                              <div><strong className="text-neutral-300">Primitives:</strong> Button, Card, FormField, Modal</div>
+                            </div>
+                          </div>
+
+                          {/* Security & Config */}
+                          <div className="p-3 bg-neutral-900/70 rounded-lg border border-neutral-800 space-y-2">
+                            <div className="flex items-center gap-2 font-mono font-bold text-amber-400 text-[11px] uppercase">
+                              <Lock className="w-3.5 h-3.5" />
+                              <span>Security & Configuration</span>
+                            </div>
+                            <div className="text-[11px] text-neutral-400 space-y-1">
+                              <div><strong className="text-neutral-300">Password Hashing:</strong> {applicationPlan.topology.security.passwordHashing}</div>
+                              <div><strong className="text-neutral-300">Config:</strong> {applicationPlan.topology.configuration.envExamplePath}</div>
+                              <div><strong className="text-neutral-300">Env Keys:</strong> {applicationPlan.topology.configuration.envKeys.map(k => k.key).join(', ')}</div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Connected End-to-End Data Flows */}
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-mono font-bold uppercase tracking-wider text-neutral-400">
+                            Connected Data Flows ({applicationPlan.connectedFlows.length})
+                          </h4>
+                          <span className="text-[11px] text-neutral-500 font-mono">UI ➔ Hook ➔ API ➔ Service ➔ Database</span>
+                        </div>
+                        <div className="space-y-2">
+                          {applicationPlan.connectedFlows.map((flow) => (
+                            <div key={flow.id} className="p-3 bg-neutral-950 border border-neutral-800 rounded-lg space-y-2 text-xs">
+                              <div className="flex items-center justify-between">
+                                <span className="font-semibold text-neutral-200">{flow.name}</span>
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-neutral-900 text-neutral-400 border border-neutral-800">
+                                  {flow.userAction}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 overflow-x-auto text-[11px] font-mono pt-1 text-neutral-300">
+                                <span className="px-2 py-0.5 rounded bg-purple-950/60 text-purple-300 border border-purple-800/40 shrink-0">
+                                  {flow.frontendHook}
+                                </span>
+                                <ArrowRight className="w-3 h-3 text-neutral-600 shrink-0" />
+                                <span className="px-2 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-800/40 shrink-0">
+                                  {flow.apiEndpoint}
+                                </span>
+                                <ArrowRight className="w-3 h-3 text-neutral-600 shrink-0" />
+                                <span className="px-2 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-800/40 shrink-0">
+                                  {flow.serviceMethod}
+                                </span>
+                                <ArrowRight className="w-3 h-3 text-neutral-600 shrink-0" />
+                                <span className="px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 shrink-0">
+                                  {flow.dbModel}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Tiered File Plan */}
+                      <div className="space-y-3">
+                        <h4 className="text-xs font-mono font-bold uppercase tracking-wider text-neutral-400">
+                          Tiered File Architecture ({applicationPlan.plannedFiles.length} files)
+                        </h4>
+                        <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+                          {applicationPlan.plannedFiles.map((file) => (
+                            <div key={file.path} className="p-2 bg-neutral-950 border border-neutral-800/80 rounded flex items-center justify-between text-xs font-mono">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold shrink-0 ${
+                                  file.tier === 0 ? 'bg-neutral-800 text-neutral-300' :
+                                  file.tier === 1 ? 'bg-amber-950/60 text-amber-300' :
+                                  file.tier === 2 ? 'bg-emerald-950/60 text-emerald-300' :
+                                  file.tier === 3 ? 'bg-blue-950/60 text-blue-300' :
+                                  file.tier === 4 ? 'bg-cyan-950/60 text-cyan-300' :
+                                  file.tier === 5 ? 'bg-purple-950/60 text-purple-300' :
+                                  'bg-rose-950/60 text-rose-300'
+                                }`}>
+                                  T{file.tier}
+                                </span>
+                                <span className="text-neutral-200 truncate">{file.path}</span>
+                              </div>
+                              <span className="text-[10px] text-neutral-500 shrink-0 ml-2">{file.purpose}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="p-8 bg-neutral-950 rounded-xl border border-neutral-800 text-center space-y-3">
+                      <Workflow className="w-8 h-8 text-neutral-600 mx-auto" />
+                      <h4 className="font-bold text-neutral-300 text-sm">No Connected Plan Generated Yet</h4>
+                      <p className="text-xs text-neutral-500 max-w-md mx-auto">
+                        Click "Plan App" in the left panel to analyze requirements and generate an end-to-end full-stack plan spanning database, backend, and responsive UI.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => handlePlanApp()}
+                        className="py-2 px-4 rounded-lg bg-amber-400 hover:bg-amber-300 text-neutral-950 text-xs font-bold inline-flex items-center gap-2"
+                      >
+                        <Layers className="w-3.5 h-3.5" />
+                        Plan Connected Application
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Connected Validation Report (Pass 6) */}
+                  {connectedValidation && (
+                    <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 space-y-4">
+                      <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+                        <div className="flex items-center gap-2">
+                          <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                          <h4 className="font-bold text-sm text-neutral-200">Connected Validation Audit</h4>
+                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold uppercase ${
+                            connectedValidation.verdict === 'verified' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40' :
+                            connectedValidation.verdict === 'passed_with_warnings' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' :
+                            'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                          }`}>
+                            {connectedValidation.verdict}
+                          </span>
+                        </div>
+                        <span className="text-xs font-mono font-bold text-amber-400">
+                          Score: {connectedValidation.score}%
+                        </span>
+                      </div>
+
+                      {/* 6 Dimension Checks */}
+                      <div className="space-y-2">
+                        {connectedValidation.checks.map((check) => (
+                          <div key={check.title} className="p-3 bg-neutral-900/60 border border-neutral-800/80 rounded-lg text-xs space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="font-mono font-bold text-neutral-300 uppercase tracking-wider text-[11px]">
+                                {check.category}: {check.title}
+                              </span>
+                              <span className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded ${
+                                check.passed ? 'bg-emerald-950 text-emerald-400' : 'bg-rose-950 text-rose-400'
+                              }`}>
+                                {check.passed ? '✓ PASS' : '✗ FAIL'}
+                              </span>
+                            </div>
+                            <p className="text-neutral-400 text-xs">{check.details}</p>
+                            {check.evidence && (
+                              <div className="text-[11px] font-mono text-emerald-400/80 truncate pt-1">
+                                • {check.evidence}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      {connectedValidation.unresolvedIssues.length > 0 && (
+                        <div className="p-3 bg-rose-950/30 border border-rose-800/50 rounded-lg space-y-1">
+                          <span className="text-xs font-mono font-bold text-rose-300 uppercase">Unresolved Issues</span>
+                          <ul className="text-xs text-rose-200/80 list-disc list-inside space-y-0.5 font-mono">
+                            {connectedValidation.unresolvedIssues.map((issue, i) => (
+                              <li key={i}>{issue}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           ) : (
-            <div className="h-full min-h-[380px] bg-neutral-900/40 border border-neutral-800 rounded-xl flex flex-col items-center justify-center p-8 text-center text-neutral-500">
-              <Cpu className="w-12 h-12 text-neutral-700 mb-3" />
-              <h3 className="text-base font-bold text-neutral-300 mb-1">Intelligent Code Generation Workbench</h3>
-              <p className="text-xs max-w-sm text-neutral-500 leading-relaxed">
-                Enter your requirement on the left and trigger the multi-pass pipeline to generate real, complete, contract-verified software files.
-              </p>
+            /* No Active Run Displayed */
+            <div className="space-y-6">
+              {/* If Connected App tab is selected or application plan exists */}
+              {activeTab === 'connected' && applicationPlan ? (
+                <div className="bg-neutral-900/70 border border-neutral-800 rounded-xl p-6 space-y-6">
+                  <div className="flex items-center justify-between border-b border-neutral-800 pb-4">
+                    <div className="flex items-center gap-2">
+                      <Workflow className="w-5 h-5 text-amber-400" />
+                      <h3 className="font-bold text-white text-base">Connected Full-Stack Application Plan</h3>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-amber-400/10 text-amber-300 border border-amber-400/20">
+                        {applicationPlan.mode}
+                      </span>
+                    </div>
+                    <span className="text-xs font-mono text-neutral-400">
+                      {applicationPlan.plannedFiles.length} files planned
+                    </span>
+                  </div>
+
+                  {/* Connected Data Flows */}
+                  <div className="space-y-3">
+                    <h4 className="text-xs font-mono font-bold uppercase tracking-wider text-neutral-400">
+                      End-to-End Connected Flows
+                    </h4>
+                    <div className="space-y-2">
+                      {applicationPlan.connectedFlows.map((flow) => (
+                        <div key={flow.id} className="p-3 bg-neutral-950 border border-neutral-800 rounded-lg space-y-2 text-xs">
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-neutral-200">{flow.name}</span>
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-neutral-900 text-neutral-400 border border-neutral-800">
+                              {flow.userAction}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 overflow-x-auto text-[11px] font-mono pt-1 text-neutral-300">
+                            <span className="px-2 py-0.5 rounded bg-purple-950/60 text-purple-300 border border-purple-800/40 shrink-0">
+                              {flow.frontendHook}
+                            </span>
+                            <ArrowRight className="w-3 h-3 text-neutral-600 shrink-0" />
+                            <span className="px-2 py-0.5 rounded bg-blue-950/60 text-blue-300 border border-blue-800/40 shrink-0">
+                              {flow.apiEndpoint}
+                            </span>
+                            <ArrowRight className="w-3 h-3 text-neutral-600 shrink-0" />
+                            <span className="px-2 py-0.5 rounded bg-amber-950/60 text-amber-300 border border-amber-800/40 shrink-0">
+                              {flow.serviceMethod}
+                            </span>
+                            <ArrowRight className="w-3 h-3 text-neutral-600 shrink-0" />
+                            <span className="px-2 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 shrink-0">
+                              {flow.dbModel}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Tiered Files */}
+                  <div className="space-y-3">
+                    <h4 className="text-xs font-mono font-bold uppercase tracking-wider text-neutral-400">
+                      Tiered File Plan ({applicationPlan.plannedFiles.length} files)
+                    </h4>
+                    <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                      {applicationPlan.plannedFiles.map((file) => (
+                        <div key={file.path} className="p-2 bg-neutral-950 border border-neutral-800/80 rounded flex items-center justify-between text-xs font-mono">
+                          <span className="text-neutral-200 truncate">{file.path}</span>
+                          <span className="text-[10px] text-neutral-500 shrink-0">{file.purpose}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="h-full min-h-[380px] bg-neutral-900/40 border border-neutral-800 rounded-xl flex flex-col items-center justify-center p-8 text-center text-neutral-500">
+                  <Cpu className="w-12 h-12 text-neutral-700 mb-3" />
+                  <h3 className="text-base font-bold text-neutral-300 mb-1">Intelligent Code Generation Workbench</h3>
+                  <p className="text-xs max-w-sm text-neutral-500 leading-relaxed mb-4">
+                    Enter your requirement on the left and trigger the multi-pass pipeline, or plan and generate a connected full-stack application.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => handlePlanApp()}
+                    className="py-2 px-3.5 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 text-neutral-200 text-xs font-semibold flex items-center gap-2"
+                  >
+                    <Layers className="w-3.5 h-3.5 text-amber-400" />
+                    Plan Full-Stack Connected App
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

@@ -30,6 +30,7 @@ import { SharedWorkspaceService } from './sharedWorkspaceService.js';
 import { CodeGenerationEngine } from './codeGenerationEngine.js';
 import { ProjectContextEngine } from './projectContextEngine.js';
 import { ContractFirstEngine } from './contractFirstEngine.js';
+import { ConnectedApplicationPlanner, ConnectedApplicationValidator } from '../application/index.js';
 import { 
   Build, 
   ModelConfig, 
@@ -424,6 +425,17 @@ export class SwarmOrchestrator {
       build.idea
     );
     build.dependencyPlan = dependencyPlan;
+
+    // Phase 13: Full-Stack Connected Application Planning
+    const existingFiles = db.getAllFiles(build.id);
+    const applicationPlan = ConnectedApplicationPlanner.planApplication({
+      buildId: build.id,
+      userRequest: build.idea,
+      existingFiles,
+      category: reqAnalysis.applicationCategory,
+      stack: techStack
+    });
+    build.applicationPlan = applicationPlan;
 
     // 7. Architecture Decision Records (ADRs)
     build.architectureDecisions = this.generateArchitectureDecisions(build.idea, build.projectType);
@@ -820,7 +832,58 @@ Output ONLY JSON matching this structure:
       return;
     }
 
-    // Default Fullstack / SaaS
+    // Fullstack / Advanced Connected Application
+    if (build.applicationPlan && build.applicationPlan.tasks && build.applicationPlan.tasks.length > 0) {
+      const createdTaskMap = new Map<number, Task>();
+      for (const plannedTask of build.applicationPlan.tasks) {
+        // Resolve dependencies on earlier tiers
+        const depTasks: string[] = [];
+        if (plannedTask.tier > 0) {
+          const parent = createdTaskMap.get(plannedTask.tier - 1);
+          if (parent) depTasks.push(parent.id);
+        }
+
+        const task = TaskManager.createNewTask(build.id, {
+          title: plannedTask.title,
+          description: plannedTask.description,
+          filePaths: plannedTask.filePaths,
+          priority: plannedTask.priority,
+          dependencies: depTasks,
+          maxRetries: this.MAX_TASK_RETRIES,
+          assignedRole: plannedTask.role,
+          milestone: plannedTask.tier <= 1 ? m1 : (plannedTask.tier <= 4 ? m2 : (plannedTask.tier === 5 ? m2 : m3))
+        });
+
+        createdTaskMap.set(plannedTask.tier, task);
+
+        if (build.milestones) {
+          if (plannedTask.tier <= 1) {
+            build.milestones[0].taskIds.push(task.id);
+          } else if (plannedTask.tier <= 5) {
+            build.milestones[1].taskIds.push(task.id);
+          } else {
+            build.milestones[2].taskIds.push(task.id);
+          }
+        }
+      }
+
+      // Add DevOps CI milestone task
+      const devopsTask = TaskManager.createNewTask(build.id, {
+        title: 'Prepare Dockerfile & GitHub Actions CI Workflow',
+        description: 'Create multi-stage Dockerfile and GitHub Actions workflow for automated testing and builds',
+        filePaths: ['Dockerfile', '.github/workflows/ci.yml'],
+        priority: 4,
+        maxRetries: this.MAX_TASK_RETRIES,
+        assignedRole: 'devops_release_specialist',
+        milestone: m4
+      });
+      if (build.milestones?.[3]) {
+        build.milestones[3].taskIds.push(devopsTask.id);
+      }
+      return;
+    }
+
+    // Default Fullstack fallback
     const task1 = TaskManager.createNewTask(build.id, {
       title: 'Architect Domain Data Types & Contracts',
       description: `Define TypeScript types and domain interfaces for: ${build.idea}`,

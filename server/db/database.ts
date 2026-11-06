@@ -942,6 +942,22 @@ export class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_repair_runs_build ON repair_runs(build_id, created_at);
           `);
         }
+      },
+      {
+        id: 14,
+        name: '014_phase13_connected_applications',
+        up: (db: DatabaseSync) => {
+          try {
+            db.exec(`ALTER TABLE builds ADD COLUMN application_plan TEXT;`);
+          } catch {
+            // column may already exist
+          }
+          try {
+            db.exec(`ALTER TABLE builds ADD COLUMN connected_validation TEXT;`);
+          } catch {
+            // column may already exist
+          }
+        }
       }
     ];
 

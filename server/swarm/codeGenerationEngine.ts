@@ -30,6 +30,8 @@ import { hashWorkspace } from '../execution/workspaceMaterializer.js';
 import { MergeManager } from './mergeManager.js';
 import { ApprovalGateService } from './approvalGateService.js';
 import { ProjectMemoryService } from './projectMemory.js';
+import { ConnectedApplicationPlanner, ConnectedApplicationValidator } from '../application/index.js';
+import { FullStackApplicationPlan } from '../types.js';
 
 const MAX_FINAL_CHECKS = 3;
 
@@ -237,8 +239,21 @@ export class CodeGenerationEngine {
       const presetActions = options.approvedActions || options.mockActionResponse?.actions || options.mockAiResponse?.actions;
       const mockPaths = (presetActions || []).map((a: any) => a.path).filter(Boolean);
       
-      // Determine target file paths from profile or requirement hints
-      const targetFiles = this.planTargetFiles(userRequest, profile, existingFiles, mockPaths);
+      // Extract or initialize fullstack application plan if requested
+      let applicationPlan = build.applicationPlan;
+      const isAppScope = profile.id === 'website_and_web_app' || profile.id === 'saas_platform' || profile.id === 'rest_api_backend' || /fullstack|application|database|api|backend/i.test(userRequest);
+      if (!applicationPlan && isAppScope) {
+        applicationPlan = ConnectedApplicationPlanner.planApplication({
+          buildId,
+          userRequest,
+          existingFiles
+        });
+        build.applicationPlan = applicationPlan;
+        db.saveBuild(build);
+      }
+
+      // Determine target file paths from application plan, profile or requirement hints
+      const targetFiles = this.planTargetFiles(userRequest, profile, existingFiles, mockPaths, applicationPlan);
 
       // Establish contracts first
       const establishedContracts = ContractFirstEngine.synthesizeInitialContracts(
@@ -444,6 +459,18 @@ export class CodeGenerationEngine {
 
       const currentFiles = db.getAllFiles(buildId);
       const validationSnapshot = await AutomaticRepairEngine.checkDimensions(currentFiles, establishedContracts, signal);
+
+      // Connected Application Validation
+      if (applicationPlan) {
+        const connectedVal = ConnectedApplicationValidator.validate(currentFiles, applicationPlan);
+        build.connectedValidation = connectedVal;
+        db.saveBuild(build);
+        if (connectedVal.verdict === 'rejected') {
+          validationSnapshot.diagnostics.push(`Connected Application Validation rejected: ${connectedVal.unresolvedIssues.join('; ')}`);
+          validationSnapshot.clean = false;
+        }
+      }
+
       const hasErrors = !validationSnapshot.clean;
 
       runRecord.validationResults = {
@@ -578,7 +605,19 @@ export class CodeGenerationEngine {
         finalVerification.contractPassed &&
         finalVerification.configPassed;
 
-      if (repairFailed || !finalVerification.clean || !allFivePassed) {
+      // Connected Application Validation Check
+      let connectedValidationPassed = true;
+      if (build.applicationPlan) {
+        const finalConnectedVal = ConnectedApplicationValidator.validate(db.getAllFiles(buildId), build.applicationPlan);
+        build.connectedValidation = finalConnectedVal;
+        db.saveBuild(build);
+        if (finalConnectedVal.verdict === 'rejected') {
+          connectedValidationPassed = false;
+          finalVerification.diagnostics.push(`Final connected application validation rejected (${finalConnectedVal.score}%): ${finalConnectedVal.unresolvedIssues.join('; ')}`);
+        }
+      }
+
+      if (repairFailed || !finalVerification.clean || !allFivePassed || !connectedValidationPassed) {
         passes[5].status = 'failed';
         passes[5].durationMs = Date.now() - pass6Start;
         passes[5].summary = `Finalization rejected: Workspace contains ${finalVerification.diagnostics.length} unresolved defects.`;
@@ -726,7 +765,8 @@ export class CodeGenerationEngine {
     userRequirement: string,
     profile: GenerationProfile,
     existingFiles: ProjectFile[],
-    mockPaths?: string[]
+    mockPaths?: string[],
+    applicationPlan?: FullStackApplicationPlan
   ): string[] {
     if (mockPaths && mockPaths.length > 0) {
       return [...mockPaths];
@@ -742,12 +782,18 @@ export class CodeGenerationEngine {
       return Array.from(planned);
     }
 
-    // 2. Add profile default file organization if workspace is empty
+    // 2. If full-stack application plan exists, use top planned tiered files
+    if (applicationPlan && applicationPlan.plannedFiles && applicationPlan.plannedFiles.length > 0) {
+      applicationPlan.plannedFiles.slice(0, 6).forEach(f => planned.add(f.path));
+      return Array.from(planned);
+    }
+
+    // 3. Add profile default file organization if workspace is empty
     if (existingFiles.length === 0) {
       profile.defaultFileOrganization.slice(0, 4).forEach(f => planned.add(f));
     }
 
-    // 3. Fallback to a modular component and types file if nothing planned
+    // 4. Fallback to a modular component and types file if nothing planned
     if (planned.size === 0) {
       const words = reqLower.replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 2);
       const name = words[0] ? words[0].charAt(0).toUpperCase() + words[0].slice(1) : 'Feature';

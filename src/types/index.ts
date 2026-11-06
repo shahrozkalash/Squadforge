@@ -1997,3 +1997,162 @@ export interface RepairLesson {
   timesSeen: number;
   createdAt: number;
 }
+
+// ============================================================================
+// Phase 13: Advanced Application Development Interfaces
+// ============================================================================
+
+export type ApplicationProjectMode = 'greenfield' | 'modification';
+
+export interface DatabaseColumnDefinition {
+  name: string;
+  type: string;
+  primaryKey?: boolean;
+  notNull?: boolean;
+  defaultValue?: string | number;
+  references?: string;
+}
+
+export interface DatabaseTableDefinition {
+  name: string;
+  description: string;
+  columns: DatabaseColumnDefinition[];
+  indices?: string[];
+}
+
+export interface DatabaseTopology {
+  engine: 'sqlite' | 'in_memory';
+  schemaPath: string;
+  migrationsDir: string;
+  storePath: string;
+  migrationRunnerPath: string;
+  tables: DatabaseTableDefinition[];
+}
+
+export interface ApiEndpointDefinition {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  path: string;
+  summary: string;
+  authRequired: boolean;
+  roles?: string[];
+  requestSchema?: string;
+  responseSchema: string;
+  rateLimited?: boolean;
+}
+
+export interface BackendTopology {
+  framework: 'express';
+  serverPath: string;
+  routesPath: string;
+  servicesPath: string;
+  middlewarePath: string;
+  endpoints: ApiEndpointDefinition[];
+}
+
+export interface FrontendComponentDefinition {
+  name: string;
+  path: string;
+  role: 'ui_primitive' | 'domain_widget' | 'layout' | 'view';
+  responsibilities: string[];
+  responsiveBreakpoints?: string[];
+}
+
+export interface FrontendTopology {
+  framework: 'react';
+  clientApiPath: string;
+  hooksPath: string;
+  componentsDir: string;
+  viewsDir: string;
+  entryPath: string;
+  components: FrontendComponentDefinition[];
+}
+
+export interface SecurityTopology {
+  authMechanism: 'session_cookie' | 'bearer_token';
+  passwordHashing: 'bcryptjs';
+  roles: string[];
+  protectedRoutes: string[];
+  csrfProtection?: boolean;
+}
+
+export interface ConfigurationVariableDefinition {
+  key: string;
+  description: string;
+  required: boolean;
+  defaultValue?: string;
+  isSecret?: boolean;
+}
+
+export interface ConfigurationTopology {
+  envExamplePath: string;
+  envKeys: ConfigurationVariableDefinition[];
+}
+
+export interface ApplicationTopology {
+  database: DatabaseTopology;
+  backend: BackendTopology;
+  frontend: FrontendTopology;
+  security: SecurityTopology;
+  configuration: ConfigurationTopology;
+}
+
+export interface ConnectedDataFlow {
+  id: string;
+  name: string;
+  userAction: string;
+  frontendHook: string;
+  apiEndpoint: string;
+  serviceMethod: string;
+  dbModel: string;
+  migrationVersion: string;
+}
+
+export interface PlannedTieredFile {
+  path: string;
+  tier: number;
+  purpose: string;
+  role: AgentRole;
+  isSensitive?: boolean;
+  dependsOnFiles?: string[];
+}
+
+export interface FullStackApplicationPlan {
+  id: string;
+  buildId: string;
+  mode: ApplicationProjectMode;
+  appName: string;
+  description: string;
+  category: CanonicalProjectType;
+  topology: ApplicationTopology;
+  connectedFlows: ConnectedDataFlow[];
+  plannedFiles: PlannedTieredFile[];
+  tasks: Array<{
+    title: string;
+    description: string;
+    filePaths: string[];
+    role: AgentRole;
+    priority: TaskPriority;
+    dependencies: string[];
+    tier: number;
+  }>;
+  createdAt: number;
+}
+
+export interface ConnectedValidationCheck {
+  category: 'database' | 'api' | 'frontend' | 'security' | 'integration' | 'tests';
+  title: string;
+  passed: boolean;
+  details: string;
+  evidence?: string;
+}
+
+export interface ConnectedValidationReport {
+  verdict: 'verified' | 'passed_with_warnings' | 'rejected';
+  score: number;
+  checks: ConnectedValidationCheck[];
+  connectedFlowsVerified: number;
+  totalConnectedFlows: number;
+  unresolvedIssues: string[];
+  timestamp: number;
+}
+

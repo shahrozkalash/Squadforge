@@ -61,14 +61,12 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 9 | Advanced Code Generation Engine. Accepted by the owner on 2026-11-05 at `e87efe8`, with the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. |
 | Phase 10 | Execution environment. Accepted by the owner on 2026-11-05 at `e87efe8`. Off by default and still not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
 | Phase 11 | Advanced Debugging and Self-Improvement. Accepted by the owner on 2026-11-05 at `708e761`. Most limitations were then fixed, in two rounds. See `PHASE_11_ACCEPTANCE_REPORT.md`. |
-| Phase 12 | Do not start until the owner asks. |
+| Phase 12 | Automated Testing and Quality Assurance. |
+| Phase 13 | Advanced Application Development. Implemented and verified on 2026-11-06. See `PHASE_13_ACCEPTANCE_REPORT.md`. |
+| Phase 14 | Do not start until the owner asks. |
 
 Later roadmap:
 
-- Phase 10: Execution and Development Environment
-- Phase 11: Advanced Debugging and Self-Improvement
-- Phase 12: Automated Testing and Quality Assurance
-- Phase 13: Advanced Application Capabilities
 - Phase 14: GitHub and Project Lifecycle
 - Phase 15: Deployment and Distribution
 - Phase 16: Production Readiness and Intelligence
