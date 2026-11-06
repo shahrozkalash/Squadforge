@@ -2584,7 +2584,7 @@ export class PersistentDatabase {
     const contentHash = computeContentHash(file.content);
     file.contentHash = contentHash;
 
-    if (!file.history || !Array.isArray(file.history) || file.history.length === 0) {
+    if (!file.history || !Array.isArray(file.history)) {
       file.history = [{
         version: file.version || 1,
         content: file.content,
@@ -4338,9 +4338,9 @@ export class PersistentDatabase {
         req.explanation,
         req.riskLevel || 'medium',
         JSON.stringify(req.affectedFiles || []),
-        req.proposedChanges,
-        req.reviewResults || null,
-        req.testResults || null,
+        req.proposedChanges || null,
+        typeof req.reviewResults === 'object' && req.reviewResults !== null ? JSON.stringify(req.reviewResults) : (req.reviewResults || null),
+        typeof req.testResults === 'object' && req.testResults !== null ? JSON.stringify(req.testResults) : (req.testResults || null),
         req.status || 'pending',
         req.approvedBy || null,
         req.resolutionNotes || null,

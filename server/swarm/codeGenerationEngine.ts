@@ -48,6 +48,7 @@ export interface CodeGenerationOptions {
   approvalGranted?: boolean;
   /** Changes the owner reviewed and approved. The model is not asked again. */
   approvedActions?: any[];
+  planApplication?: boolean;
 }
 
 export class CodeGenerationEngine {
@@ -241,7 +242,7 @@ export class CodeGenerationEngine {
       
       // Extract or initialize fullstack application plan if requested
       let applicationPlan = build.applicationPlan;
-      const isAppScope = profile.id === 'website_and_web_app' || profile.id === 'saas_platform' || profile.id === 'rest_api_backend' || /fullstack|application|database|api|backend/i.test(userRequest);
+      const isAppScope = Boolean(options.planApplication) || /fullstack|connected application|saas platform/i.test(userRequest);
       if (!applicationPlan && isAppScope) {
         applicationPlan = ConnectedApplicationPlanner.planApplication({
           buildId,

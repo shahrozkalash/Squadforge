@@ -1038,6 +1038,19 @@ export class DatabaseManager {
             CREATE UNIQUE INDEX IF NOT EXISTS idx_deployment_secrets_unique ON deployment_secrets(build_id, key, environment);
           `);
         }
+      },
+      {
+        id: 17,
+        name: '017_phase16_production_indexes',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            -- Phase 16 High-Throughput Production Scalability & Composite Indexes
+            CREATE INDEX IF NOT EXISTS idx_approval_requests_build_status ON approval_requests(build_id, status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_codegen_runs_build_created ON code_generation_runs(build_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_repair_runs_build_created ON repair_runs(build_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_project_files_build_path ON project_files(build_id, path);
+          `);
+        }
       }
     ];
 

@@ -296,6 +296,23 @@ export class ApprovalGateService {
     return Date.now() > request.createdAt + APPROVAL_TTL_MS;
   }
 
+  /** Automatically transitions unanswered pending requests past their TTL to expired. */
+  static expireStaleRequests(buildId: string): number {
+    const now = Date.now();
+    let count = 0;
+    const pending = db.getApprovalRequests(buildId, 'pending');
+    for (const req of pending) {
+      if (now > req.createdAt + APPROVAL_TTL_MS) {
+        req.status = 'expired';
+        req.resolvedAt = now;
+        req.resolutionNotes = req.resolutionNotes || 'Approval request expired automatically after validity window closed';
+        db.saveApprovalRequest(req);
+        count++;
+      }
+    }
+    return count;
+  }
+
   /** Withdraws one unanswered request. */
   static cancelRequest(buildId: string, requestId: string): void {
     const request = db.getApprovalRequest(requestId);

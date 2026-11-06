@@ -589,6 +589,15 @@ export class MergeManager {
       if (!target) return false;
 
       const now = Date.now();
+      // Invariant: Reject rollback if any affected file is actively leased by another model
+      for (const filePath of Object.keys(target.filesSnapshot)) {
+        const lease = db.getFileLease(buildId, filePath);
+        if (lease && lease.modelId !== modelId) {
+          console.warn(`[ROLLBACK] Cannot revert checkpoint: file "${filePath}" is actively leased by "${lease.modelId}"`);
+          return false;
+        }
+      }
+
       for (const [filePath, content] of Object.entries(target.filesSnapshot)) {
         let file = db.getFile(buildId, filePath);
         if (file) {
@@ -645,6 +654,13 @@ export class MergeManager {
     return this.enqueuePatch(buildId, async () => {
       const file = db.getFile(buildId, filePath);
       if (!file) return false;
+
+      // Invariant: Reject rollback if file is actively leased by another model
+      const lease = db.getFileLease(buildId, filePath);
+      if (lease && lease.modelId !== modelId) {
+        console.warn(`[ROLLBACK] Cannot revert file: "${filePath}" is actively leased by "${lease.modelId}"`);
+        return false;
+      }
 
       const historyItem = file.history.find(h => h.version === targetVersion);
       if (!historyItem) return false;

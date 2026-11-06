@@ -2086,6 +2086,7 @@ app.get('/api/builds/:id/collaboration/approvals', requireAuth, (req, res) => {
   const build = verifyBuildOwnership(req, res, req.params.id);
   if (!build) return;
 
+  ApprovalGateService.expireStaleRequests(build.id);
   const status = req.query.status as string;
   const approvals = db.getApprovalRequests(build.id, status);
   res.json({ approvals });
