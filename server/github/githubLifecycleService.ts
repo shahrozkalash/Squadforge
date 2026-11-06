@@ -612,7 +612,8 @@ export class GitHubLifecycleService {
 
       if (!isAuthorized) {
         const filePaths = targetFiles.map(f => f.path);
-        const hasApproval = ApprovalGateService.hasApprovedRequestForFiles(buildId, filePaths, fingerprints);
+        // Only existing per-file approvals can authorize if not a sensitive branch commit
+        const hasApproval = !isSensitiveBranch && touchesSensitiveFiles && ApprovalGateService.hasApprovedRequestForFiles(buildId, filePaths, fingerprints);
         if (hasApproval) {
           isAuthorized = true;
         }

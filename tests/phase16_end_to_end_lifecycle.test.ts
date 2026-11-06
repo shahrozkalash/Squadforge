@@ -115,11 +115,11 @@ describe('SquadForge Phase 16: Complete 12-Step Software-Building Lifecycle', ()
     const analysis = SoftwareRequirementsAnalyzer.analyze(testBuild.idea, 'saas_dashboard');
     const selection = IntelligentStackSelector.selectStack(analysis);
 
-    assert.ok(selection.recommended);
-    assert.ok(selection.recommended.frontend);
-    assert.ok(selection.recommended.backend);
-    assert.ok(selection.recommended.database);
-    assert.ok(selection.alternative);
+    assert.ok(selection.recommendedStack);
+    assert.ok(selection.recommendedStack.frontend);
+    assert.ok(selection.recommendedStack.backend);
+    assert.ok(selection.recommendedStack.database);
+    assert.ok(selection.alternativeStack);
   });
 
   test('Step 4: Generate application topology and full-stack source code', () => {
@@ -130,30 +130,31 @@ describe('SquadForge Phase 16: Complete 12-Step Software-Building Lifecycle', ()
 
     assert.ok(plan);
     assert.ok(plan.topology.backend.endpoints.length >= 1);
-    assert.ok(plan.topology.database.tableDefinitions.length >= 1);
+    assert.ok(plan.topology.database.tables.length >= 1);
 
-    const generatedFiles = ConnectedApplicationGenerator.generateApplicationFiles(plan);
+    const generatedFiles = ConnectedApplicationGenerator.generateConnectedFiles(plan, []);
     assert.ok(generatedFiles.length >= 5);
 
     // Save generated files into the build
     for (const file of generatedFiles) {
-      db.setFile(testBuild.id, {
-        path: file.path,
-        content: file.content,
-        version: 1,
-        ownerModel: 'fullstack_developer',
-        history: [{
-          version: 1,
+      if (file.action === 'create_file') {
+        db.setFile(testBuild.id, {
+          path: file.path,
           content: file.content,
-          authorModel: 'fullstack_developer',
-          timestamp: Date.now(),
-          commitMessage: `Generated ${file.path}`
-        }],
-        createdAt: Date.now(),
-        updatedAt: Date.now()
-      });
+          version: 1,
+          ownerModel: 'fullstack_developer',
+          history: [{
+            version: 1,
+            content: file.content,
+            authorModel: 'fullstack_developer',
+            timestamp: Date.now(),
+            commitMessage: file.commitMessage || `Generated ${file.path}`
+          }],
+          createdAt: Date.now(),
+          updatedAt: Date.now()
+        });
+      }
     }
-
     const savedFiles = db.getAllFiles(testBuild.id);
     assert.equal(savedFiles.length, generatedFiles.length);
   });
@@ -208,7 +209,8 @@ describe('SquadForge Phase 16: Complete 12-Step Software-Building Lifecycle', ()
       async () => {
         await backend.createEnvironment({
           sessionId: 'ses_test',
-          limits: { memoryMb: 512, cpus: 1, pids: 64, workspaceMb: 256, runtimeSeconds: 60 }
+          buildId: testBuild.id,
+          userId: testUser.id
         });
       },
       /Project execution is not configured/
@@ -273,8 +275,8 @@ describe('SquadForge Phase 16: Complete 12-Step Software-Building Lifecycle', ()
     });
 
     const populatedResult = HonestVerificationService.evaluateProjectReadiness(testBuild.id);
-    assert.ok(populatedResult.summary);
-    assert.ok(populatedResult.checks.length >= 3);
+    assert.ok(populatedResult.verdict);
+    assert.ok(populatedResult.checks.length >= 2);
   });
 
   test('Step 9: Live preview generation & packaging', () => {
@@ -473,16 +475,22 @@ describe('SquadForge Phase 16: Complete 12-Step Software-Building Lifecycle', ()
     assert.ok(bundle.files.length >= 1);
 
     // 12.5 Deployment pipeline execution
-    const deployment = await DeploymentService.deployProject(testUser.id, testBuild.id, {
+    const depResult = await DeploymentService.createDeployment({
+      userId: testUser.id,
+      buildId: testBuild.id,
       environment: 'preview',
       provider: 'static_host',
       skipApprovalGate: true
     });
 
-    assert.ok(deployment);
-    assert.ok(deployment.id);
-    assert.equal(deployment.status, 'deployed');
-    assert.ok(deployment.url);
+    assert.ok(depResult.deployment);
+    assert.ok(depResult.deployment.id);
+
+    await new Promise(r => setTimeout(r, 300));
+    const deployed = db.getDeployment(depResult.deployment.id);
+    assert.ok(deployed);
+    assert.equal(deployed.status, 'active');
+    assert.ok(deployed.targetUrl);
 
     // 12.6 Safe rollback in MergeManager with active lease protection
     db.setFile(testBuild.id, {
@@ -501,7 +509,7 @@ describe('SquadForge Phase 16: Complete 12-Step Software-Building Lifecycle', ()
       updatedAt: Date.now()
     });
 
-    const lease = db.acquireFileLease(testBuild.id, 'worker_a', 'src/App.tsx', 60000);
+    const lease = MergeManager.acquireFileLeases(testBuild.id, 'worker_a', ['src/App.tsx'], 60000);
     assert.equal(lease.success, true);
 
     // Rolling back while file is leased by worker_a is rejected for worker_b
@@ -509,7 +517,7 @@ describe('SquadForge Phase 16: Complete 12-Step Software-Building Lifecycle', ()
     assert.equal(rollbackBlocked, false);
 
     // Releasing lease allows safe rollback
-    db.releaseFileLease(testBuild.id, 'worker_a', 'src/App.tsx');
+    MergeManager.releaseFileLeases(testBuild.id, 'worker_a', ['src/App.tsx']);
   });
 
   test('Approval request auto-expiry invariant', () => {

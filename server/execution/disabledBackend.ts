@@ -1,4 +1,10 @@
-import { BackendCapabilities, ExecutionBackend } from './executionBackend.js';
+import {
+  BackendCapabilities,
+  EnvironmentSpec,
+  ExecutionBackend,
+  OutputListener,
+  ProcessSpec
+} from './executionBackend.js';
 
 const UNAVAILABLE = 'Project execution is not configured on this server.';
 
@@ -14,15 +20,15 @@ export class DisabledBackend implements ExecutionBackend {
     return { available: false, backend: this.name, reason: UNAVAILABLE };
   }
 
-  createEnvironment = async () => refuse();
-  uploadWorkspace = async () => refuse();
-  readWorkspaceFile = async () => refuse();
-  startProcess = async () => refuse();
-  listeningPorts = async () => refuse();
-  usage = async () => refuse();
-  openPreview = async () => refuse();
-  closePreview = async () => undefined;
-  destroyEnvironment = async () => undefined;
-  removeDependencyCache = async () => undefined;
+  createEnvironment = async (_spec?: EnvironmentSpec) => refuse();
+  uploadWorkspace = async (_sessionId?: string, _tar?: Buffer) => refuse();
+  readWorkspaceFile = async (_sessionId?: string, _relativePath?: string) => refuse();
+  startProcess = async (_sessionId?: string, _spec?: ProcessSpec, _onOutput?: OutputListener) => refuse();
+  listeningPorts = async (_processId?: string) => refuse();
+  usage = async (_processId?: string) => refuse();
+  openPreview = async (_sessionId?: string, _processId?: string, _port?: number) => refuse();
+  closePreview = async (_sessionId?: string) => undefined;
+  destroyEnvironment = async (_sessionId?: string) => undefined;
+  removeDependencyCache = async (_buildId?: string) => undefined;
   listEnvironments = async () => [];
 }

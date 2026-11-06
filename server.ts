@@ -1696,6 +1696,7 @@ app.get('/api/builds/:id/collaboration/overview', requireAuth, (req, res) => {
   const openDefectsCount = defects.filter(d => d.status !== 'resolved').length;
   const conflicts = db.getFileConflicts(build.id);
   const activeConflictsCount = conflicts.filter(c => c.resolutionStatus !== 'resolved').length;
+  ApprovalGateService.expireStaleRequests(build.id);
   const approvals = db.getApprovalRequests(build.id);
   const pendingApprovalsCount = approvals.filter(a => a.status === 'pending').length;
   const knowledge = db.getKnowledgeItems(build.id);
