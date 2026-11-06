@@ -51,6 +51,14 @@ export const Navbar: React.FC<NavbarProps> = ({
           Idea Forge
         </button>
         <button
+          onClick={() => onSelectTab('test')}
+          className={`hover:text-white transition-colors whitespace-nowrap shrink-0 ${
+            currentTab === 'test' ? 'text-amber-400 border-b border-amber-400 pb-0.5' : ''
+          }`}
+        >
+          QA Dashboard
+        </button>
+        <button
           onClick={() => onSelectTab('live')}
           className={`hover:text-white transition-colors whitespace-nowrap shrink-0 relative ${
             currentTab === 'live' ? 'text-amber-400 border-b border-amber-400 pb-0.5' : ''

@@ -522,17 +522,25 @@ export class ExecutionAdapter {
       // Parse test results from stdout/stderr
       const testDetails = this.parseTestOutput(stdout, stderr, testFiles);
 
-      const passed = testDetails.filter(t => t.passed).length;
-      const failed = testDetails.filter(t => !t.passed && t.status !== 'skipped').length;
-      const skipped = testDetails.filter(t => t.status === 'skipped').length;
+      const summarySkippedMatch = (stdout + '\n' + stderr).match(/\b(?:ℹ|\s+)?skipped\s+(\d+)/i);
+      const summaryPassedMatch = (stdout + '\n' + stderr).match(/\b(?:ℹ|\s+)?pass\s+(\d+)/i);
+      const summaryFailedMatch = (stdout + '\n' + stderr).match(/\b(?:ℹ|\s+)?fail\s+(\d+)/i);
+      const parsedSkippedCount = summarySkippedMatch ? Number(summarySkippedMatch[1]) : 0;
+      const parsedPassedCount = summaryPassedMatch ? Number(summaryPassedMatch[1]) : 0;
+      const parsedFailedCount = summaryFailedMatch ? Number(summaryFailedMatch[1]) : 0;
+
+      const passed = testDetails.filter(t => t.passed).length || (parsedPassedCount > 0 ? parsedPassedCount : 0);
+      const failed = testDetails.filter(t => !t.passed && t.status !== 'skipped').length || (parsedFailedCount > 0 ? parsedFailedCount : 0);
+      const skipped = testDetails.filter(t => t.status === 'skipped').length || (parsedSkippedCount > 0 ? parsedSkippedCount : 0);
 
       let overallStatus: 'passed' | 'failed' | 'skipped';
-      if (failed > 0 || runResult.status !== 0) {
+      const hasAnySkippedOnlyResults = skipped > 0 && passed === 0 && failed === 0;
+      if (failed > 0 || (runResult.status !== 0 && !hasAnySkippedOnlyResults)) {
         overallStatus = 'failed';
       } else if (passed > 0) {
         overallStatus = 'passed';
-      } else if (skipped > 0 || testDetails.length === 0) {
-        // Skipped tests are NEVER treated as passed
+      } else if (hasAnySkippedOnlyResults || skipped > 0 || testDetails.length === 0) {
+        // Skipped tests are NEVER treated as passed, even if the runner exits cleanly.
         overallStatus = 'skipped';
       } else {
         overallStatus = 'failed';
@@ -592,19 +600,52 @@ export class ExecutionAdapter {
       };
     }
 
-    const passed = run.endReason === 'exited' && run.exitCode === 0;
+    const logText = db.getExecutionLogs(run.id, 0, 2000)
+      .filter(entry => entry.stream !== 'system')
+      .map(entry => entry.text)
+      .join('\n');
+    const testFiles = files.filter(f =>
+      f.path.includes('.test.') ||
+      f.path.includes('.spec.') ||
+      f.path.startsWith('tests/')
+    );
+    const testDetails = this.parseTestOutput(logText, '', testFiles);
+    const summarySkippedMatch = logText.match(/\b(?:ℹ|\s+)?skipped\s+(\d+)/i);
+    const summaryPassedMatch = logText.match(/\b(?:ℹ|\s+)?pass\s+(\d+)/i);
+    const summaryFailedMatch = logText.match(/\b(?:ℹ|\s+)?fail\s+(\d+)/i);
+    const parsedSkippedCount = summarySkippedMatch ? Number(summarySkippedMatch[1]) : 0;
+    const parsedPassedCount = summaryPassedMatch ? Number(summaryPassedMatch[1]) : 0;
+    const parsedFailedCount = summaryFailedMatch ? Number(summaryFailedMatch[1]) : 0;
+
+    const passed = testDetails.filter(t => t.passed).length || (parsedPassedCount > 0 ? parsedPassedCount : 0);
+    const failed = testDetails.filter(t => !t.passed && t.status !== 'skipped').length || (parsedFailedCount > 0 ? parsedFailedCount : 0);
+    const skipped = testDetails.filter(t => t.status === 'skipped').length || (parsedSkippedCount > 0 ? parsedSkippedCount : 0);
+
+    let status: 'passed' | 'failed' | 'skipped';
+    if (failed > 0 || (run.endReason !== 'exited' && run.endReason !== undefined) || (run.exitCode !== undefined && run.exitCode !== 0)) {
+      status = 'failed';
+    } else if (passed > 0) {
+      status = 'passed';
+    } else if (skipped > 0 || testDetails.length === 0) {
+      status = 'skipped';
+    } else {
+      status = 'failed';
+    }
+
     return {
-      status: passed ? 'passed' : 'failed',
-      total: 1,
-      passed: passed ? 1 : 0,
-      failed: passed ? 0 : 1,
-      skipped: 0,
-      details: [{
+      status,
+      total: Math.max(1, passed + failed + skipped),
+      passed,
+      failed,
+      skipped,
+      details: testDetails.length > 0 ? testDetails : [{
         name: 'npm test in sandbox',
-        passed,
-        status: passed ? 'passed' : 'failed',
-        message: `The project's test script ended with ${run.endReason} (exit code ${run.exitCode}). This proves the script's exit code, not how many tests ran.`
-      }]
+        passed: false,
+        status: status === 'passed' ? 'passed' : status === 'skipped' ? 'skipped' : 'failed',
+        message: `The project's test script ended with ${run.endReason ?? 'unknown'} (exit code ${run.exitCode ?? 'unknown'}). This proves the script's exit code, not how many tests ran.`
+      }],
+      stdout: logText.slice(0, 4000),
+      executionTimeMs: run.stoppedAt && run.startedAt ? run.stoppedAt - run.startedAt : undefined
     };
   }
 
@@ -625,6 +666,17 @@ export class ExecutionAdapter {
           passed: isOk && !isSkipped,
           status: isSkipped ? 'skipped' : (isOk ? 'passed' : 'failed'),
           message: isOk ? undefined : 'Test assertion failed'
+        });
+      }
+
+      // Node 22 output: '- skipped test scenario (0.67ms) # SKIP'
+      const skippedMatch = line.match(/^\s*[-﹣]\s+(.+?)\s*\(.*\)\s*#\s*SKIP/i);
+      if (skippedMatch) {
+        results.push({
+          name: skippedMatch[1].trim(),
+          passed: false,
+          status: 'skipped',
+          message: 'Test marked as skipped'
         });
       }
     }
@@ -876,14 +928,16 @@ export class ExecutionAdapter {
 
       const tsConfigDiskPath = path.join(tempDir, 'tsconfig.json');
       if (hasTsConfigFile && fs.existsSync(tsConfigDiskPath)) {
-        const configFile = ts.readConfigFile(tsConfigDiskPath, ts.sys.readFile);
-        if (configFile.error) {
+        let rawTsConfig: any;
+        try {
+          rawTsConfig = JSON.parse(fs.readFileSync(tsConfigDiskPath, 'utf-8'));
+        } catch (jsonErr: any) {
           const cfgErr: TypeDiagnostic = {
             filePath: 'tsconfig.json',
             line: 1,
             column: 1,
-            code: `TS${configFile.error.code}`,
-            message: ts.flattenDiagnosticMessageText(configFile.error.messageText, '\n'),
+            code: 'TS_PARSE_ERROR',
+            message: `Invalid tsconfig.json: ${jsonErr.message || 'Malformed JSON'}`,
             category: 'error'
           };
           return {
@@ -903,64 +957,89 @@ export class ExecutionAdapter {
           };
         }
 
-        // Prevent recursive scanning into node_modules during tsconfig parsing
-        const rawConfig = configFile.config || {};
-        const existingExclude = Array.isArray(rawConfig.exclude) ? rawConfig.exclude : [];
-        const safeExclude = Array.from(new Set([...existingExclude, 'node_modules', 'dist', 'build', '.git']));
+        const safeExclude = Array.from(new Set([
+          ...(Array.isArray(rawTsConfig.exclude) ? rawTsConfig.exclude : []),
+          'node_modules', 'dist', 'build', '.git'
+        ]));
         const safeConfig = {
-          ...rawConfig,
+          ...rawTsConfig,
           exclude: safeExclude
         };
 
-        const parsedConfig = ts.parseJsonConfigFileContent(safeConfig, ts.sys, tempDir);
-        if (parsedConfig.errors.length > 0) {
-          for (const err of parsedConfig.errors) {
-            const isErr = err.category === ts.DiagnosticCategory.Error;
-            configErrors.push({
-              filePath: err.file ? path.relative(tempDir, err.file.fileName).replace(/\\/g, '/') : 'tsconfig.json',
-              line: err.file && err.start !== undefined ? err.file.getLineAndCharacterOfPosition(err.start).line + 1 : 1,
-              column: err.file && err.start !== undefined ? err.file.getLineAndCharacterOfPosition(err.start).character + 1 : 1,
-              code: `TS${err.code}`,
-              message: ts.flattenDiagnosticMessageText(err.messageText, '\n'),
-              category: isErr ? 'error' : 'warning'
-            });
+        try {
+          const parsedConfig = ts.parseJsonConfigFileContent(safeConfig, ts.sys, tempDir);
+          if (parsedConfig.errors.length > 0) {
+            for (const err of parsedConfig.errors) {
+              const isErr = err.category === ts.DiagnosticCategory.Error;
+              configErrors.push({
+                filePath: err.file ? path.relative(tempDir, err.file.fileName).replace(/\\/g, '/') : 'tsconfig.json',
+                line: err.file && err.start !== undefined ? err.file.getLineAndCharacterOfPosition(err.start).line + 1 : 1,
+                column: err.file && err.start !== undefined ? err.file.getLineAndCharacterOfPosition(err.start).character + 1 : 1,
+                code: `TS${err.code}`,
+                message: ts.flattenDiagnosticMessageText(err.messageText, '\n'),
+                category: isErr ? 'error' : 'warning'
+              });
+            }
+
+            const fatalConfigErrors = configErrors.filter(e => e.category === 'error');
+            if (fatalConfigErrors.length > 0) {
+              return {
+                status: 'failed',
+                passed: false,
+                diagnostics: configErrors,
+                errors: fatalConfigErrors,
+                warnings: configErrors.filter(e => e.category === 'warning'),
+                syntaxErrors: [],
+                configErrors: fatalConfigErrors,
+                typeErrors: [],
+                missingDependencies: [],
+                totalChecked: 0,
+                durationMs: Date.now() - startTime,
+                command: 'tsc --noEmit',
+                exitCode: 1
+              };
+            }
           }
 
-          const fatalConfigErrors = configErrors.filter(e => e.category === 'error');
-          if (fatalConfigErrors.length > 0) {
-            return {
-              status: 'failed',
-              passed: false,
-              diagnostics: configErrors,
-              errors: fatalConfigErrors,
-              warnings: configErrors.filter(e => e.category === 'warning'),
-              syntaxErrors: [],
-              configErrors: fatalConfigErrors,
-              typeErrors: [],
-              missingDependencies: [],
-              totalChecked: 0,
-              durationMs: Date.now() - startTime,
-              command: 'tsc --noEmit',
-              exitCode: 1
-            };
+          compilerOptions = {
+            skipLibCheck: parsedConfig.options.skipLibCheck !== undefined ? parsedConfig.options.skipLibCheck : true,
+            ...parsedConfig.options,
+            noEmit: true
+          };
+
+          if (compilerOptions.paths && !compilerOptions.baseUrl) {
+            compilerOptions.baseUrl = tempDir;
+          } else if (compilerOptions.baseUrl) {
+            compilerOptions.baseUrl = path.resolve(tempDir, compilerOptions.baseUrl);
           }
-        }
 
-        compilerOptions = {
-          skipLibCheck: parsedConfig.options.skipLibCheck !== undefined ? parsedConfig.options.skipLibCheck : true,
-          ...parsedConfig.options,
-          noEmit: true
-        };
-
-        // Ensure baseUrl is resolved relative to tempDir
-        if (compilerOptions.paths && !compilerOptions.baseUrl) {
-          compilerOptions.baseUrl = tempDir;
-        } else if (compilerOptions.baseUrl) {
-          compilerOptions.baseUrl = path.resolve(tempDir, compilerOptions.baseUrl);
-        }
-
-        if (parsedConfig.fileNames && parsedConfig.fileNames.length > 0) {
-          rootFileNames = parsedConfig.fileNames.filter(p => fs.existsSync(p));
+          if (parsedConfig.fileNames && parsedConfig.fileNames.length > 0) {
+            rootFileNames = parsedConfig.fileNames.filter(p => fs.existsSync(p));
+          }
+        } catch (tsConfigErr: any) {
+          const cfgErr: TypeDiagnostic = {
+            filePath: 'tsconfig.json',
+            line: 1,
+            column: 1,
+            code: 'TS_CONFIG_PARSE_ERROR',
+            message: `Invalid tsconfig.json: ${tsConfigErr.message || 'TypeScript config could not be parsed.'}`,
+            category: 'error'
+          };
+          return {
+            status: 'failed',
+            passed: false,
+            diagnostics: [cfgErr],
+            errors: [cfgErr],
+            warnings: [],
+            syntaxErrors: [],
+            configErrors: [cfgErr],
+            typeErrors: [],
+            missingDependencies: [],
+            totalChecked: 0,
+            durationMs: Date.now() - startTime,
+            command: 'tsc --noEmit',
+            exitCode: 1
+          };
         }
       } else {
         // Standard baseline compiler options when tsconfig.json is omitted

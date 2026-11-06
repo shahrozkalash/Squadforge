@@ -14,6 +14,7 @@ import { ExecutionView } from './components/ExecutionView.js';
 import { DebuggingView } from './components/DebuggingView.js';
 import { SettingsView } from './components/SettingsView.js';
 import { UsageDashboardView } from './components/UsageDashboardView.js';
+import { TestDashboardView } from './components/TestDashboardView.js';
 import { AuthModal } from './components/AuthModal.js';
 import { ConcurrencyTestModal } from './components/ConcurrencyTestModal.js';
 import { AuthPage } from './components/AuthPage.js';
@@ -85,6 +86,10 @@ function DashboardContent() {
 
         {currentTab === 'usage' && (
           <UsageDashboardView />
+        )}
+
+        {currentTab === 'test' && (
+          <TestDashboardView />
         )}
 
         {currentTab === 'settings' && (

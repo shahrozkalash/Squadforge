@@ -61,7 +61,7 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 9 | Advanced Code Generation Engine. Accepted by the owner on 2026-11-05 at `e87efe8`, with the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. |
 | Phase 10 | Execution environment. Accepted by the owner on 2026-11-05 at `e87efe8`. Off by default and still not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
 | Phase 11 | Advanced Debugging and Self-Improvement. Accepted by the owner on 2026-11-05 at `708e761`. Most limitations were then fixed, in two rounds. See `PHASE_11_ACCEPTANCE_REPORT.md`. |
-| Phase 12 | Do not start until the owner asks. |
+| Phase 12 | Automated Testing and Quality Assurance. Implemented and verified for the QA engine itself; repo-wide acceptance remains blocked by two existing Phase 4 reliability failures. |
 
 Later roadmap:
 
