@@ -2236,3 +2236,106 @@ export interface GitHubConflictRecord {
   resolvedAt?: number;
 }
 
+// --- Phase 15: Deployment & Distribution ---
+
+export type DeploymentProviderType =
+  | 'static_host'
+  | 'cloudflare_pages'
+  | 'vercel'
+  | 'netlify'
+  | 'docker_container'
+  | 'custom_webhook';
+
+export type DeploymentEnvironment = 'production' | 'staging' | 'preview';
+
+export type DeploymentStatus =
+  | 'pending_approval'
+  | 'validating'
+  | 'building'
+  | 'deploying'
+  | 'active'
+  | 'failed'
+  | 'rolled_back'
+  | 'cancelled';
+
+export interface DeploymentLogEntry {
+  timestamp: number;
+  level: 'info' | 'warn' | 'error' | 'success';
+  message: string;
+  phase?: 'validation' | 'build' | 'deploy' | 'domain' | 'rollback';
+}
+
+export interface DeploymentRecord {
+  id: string;
+  buildId: string;
+  userId: string;
+  provider: DeploymentProviderType;
+  status: DeploymentStatus;
+  environment: DeploymentEnvironment;
+  targetUrl?: string;
+  customDomain?: string;
+  customDomainStatus?: 'none' | 'pending_verification' | 'active' | 'failed';
+  customDomainDnsRecords?: Array<{ type: string; name: string; value: string; ttl?: number }>;
+  buildArtifactPath?: string;
+  buildArtifactSize?: number;
+  buildArtifactHash?: string;
+  buildLogs: DeploymentLogEntry[];
+  config: {
+    buildCommand?: string;
+    outputDirectory?: string;
+    installCommand?: string;
+    rootDirectory?: string;
+    nodeVersion?: string;
+    providerSettings?: Record<string, any>;
+  };
+  commitSha?: string;
+  rollbackFromId?: string;
+  approvalId?: string;
+  errorMessage?: string;
+  deployedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SafeDeploymentSecret {
+  id: string;
+  buildId: string;
+  key: string;
+  maskedValue: string;
+  environment: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PreDeploymentValidationCheck {
+  category: 'files' | 'syntax' | 'security' | 'config' | 'secrets';
+  name: string;
+  status: 'passed' | 'warning' | 'failed';
+  passed: boolean;
+  message: string;
+}
+
+export interface PreDeploymentValidationResult {
+  passed: boolean;
+  readinessScore: number;
+  checks: PreDeploymentValidationCheck[];
+  defects: string[];
+  missingSecrets: string[];
+  recommendedActions: string[];
+}
+
+export interface CustomDomainDnsRecord {
+  type: string;
+  name: string;
+  value: string;
+  ttl?: number;
+}
+
+export interface CustomDomainResult {
+  domain: string;
+  status: 'none' | 'pending_verification' | 'active' | 'failed';
+  dnsRecords: CustomDomainDnsRecord[];
+  sslStatus?: 'pending' | 'active' | 'failed';
+  error?: string;
+}
+

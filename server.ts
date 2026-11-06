@@ -55,6 +55,7 @@ import {
   ConnectedApplicationValidator
 } from './server/application/index.js';
 import { createGitHubRouter } from './server/github/index.js';
+import { createDeploymentRouter, serveStaticDeployment } from './server/deployment/index.js';
 
 
 dotenv.config();
@@ -2586,6 +2587,12 @@ app.use('/api/builds/:id/debugging', createDebuggingRouter({
 
 // GitHub Integration & Project Lifecycle (Phase 14)
 app.use(createGitHubRouter(requireAuth));
+
+// Public serving of static hosted deployed webapps (Phase 15)
+app.use(serveStaticDeployment);
+
+// Deployment & Distribution Engine (Phase 15)
+app.use(createDeploymentRouter(requireAuth));
 
 // Mount Vite in dev mode or serve static bundle in production
 async function startServer() {

@@ -1,9 +1,9 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext.js';
 import { useSwarm } from '../context/SwarmContext.js';
-import { Github, Play, Square, Activity, GitBranch, LogOut } from 'lucide-react';
+import { Github, Play, Square, Activity, GitBranch, LogOut, Rocket } from 'lucide-react';
 
-export type NavTab = 'execution' | 'debug' | 'dashboard' | 'live' | 'codegen' | 'collaboration' | 'github' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
+export type NavTab = 'execution' | 'debug' | 'dashboard' | 'live' | 'codegen' | 'collaboration' | 'github' | 'deploy' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
 
 interface NavbarProps {
   currentTab: NavTab;
@@ -106,6 +106,15 @@ export const Navbar: React.FC<NavbarProps> = ({
         >
           <Github className="w-3.5 h-3.5" />
           <span>GitHub</span>
+        </button>
+        <button
+          onClick={() => onSelectTab('deploy')}
+          className={`hover:text-white transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 ${
+            currentTab === 'deploy' ? 'text-amber-400 border-b border-amber-400 pb-0.5' : ''
+          }`}
+        >
+          <Rocket className="w-3.5 h-3.5" />
+          <span>Deploy</span>
         </button>
         <button
           onClick={() => onSelectTab('architecture')}

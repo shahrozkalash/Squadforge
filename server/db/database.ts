@@ -992,6 +992,52 @@ export class DatabaseManager {
             CREATE INDEX IF NOT EXISTS idx_github_conflicts_build ON github_conflicts(build_id, status);
           `);
         }
+      },
+      {
+        id: 16,
+        name: '016_phase15_deployment_and_distribution',
+        up: (db: DatabaseSync) => {
+          db.exec(`
+            CREATE TABLE IF NOT EXISTS deployments (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL,
+              user_id TEXT NOT NULL,
+              provider TEXT NOT NULL,
+              status TEXT NOT NULL,
+              environment TEXT NOT NULL,
+              target_url TEXT,
+              custom_domain TEXT,
+              custom_domain_status TEXT,
+              custom_domain_dns_records TEXT,
+              build_artifact_path TEXT,
+              build_artifact_size INTEGER,
+              build_artifact_hash TEXT,
+              build_logs TEXT,
+              config TEXT,
+              commit_sha TEXT,
+              rollback_from_id TEXT,
+              approval_id TEXT,
+              error_message TEXT,
+              deployed_at INTEGER,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_deployments_build ON deployments(build_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_deployments_user ON deployments(user_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS deployment_secrets (
+              id TEXT PRIMARY KEY,
+              build_id TEXT NOT NULL,
+              user_id TEXT NOT NULL,
+              key TEXT NOT NULL,
+              encrypted_value TEXT NOT NULL,
+              environment TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_deployment_secrets_unique ON deployment_secrets(build_id, key, environment);
+          `);
+        }
       }
     ];
 

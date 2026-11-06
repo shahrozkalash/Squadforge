@@ -34,7 +34,9 @@ import {
   HumanApprovalRequest,
   SharedKnowledgeItem,
   CodeGenerationRun,
-  GitHubConflictRecord
+  GitHubConflictRecord,
+  DeploymentRecord,
+  DeploymentSecretRecord
 } from './types.js';
 import { ProjectMemory } from './swarm/projectMemory.js';
 import { 
@@ -5065,7 +5067,188 @@ export class PersistentDatabase {
     this.saveGitHubConflict(conflict);
     return conflict;
   }
+
+  // --- Phase 15: Deployment & Distribution ---
+
+  private mapDeploymentRow(row: any): DeploymentRecord {
+    return {
+      id: row.id,
+      buildId: row.build_id,
+      userId: row.user_id,
+      provider: row.provider,
+      status: row.status,
+      environment: row.environment,
+      targetUrl: row.target_url ?? undefined,
+      customDomain: row.custom_domain ?? undefined,
+      customDomainStatus: row.custom_domain_status ?? undefined,
+      customDomainDnsRecords: safeJsonParse(row.custom_domain_dns_records, undefined),
+      buildArtifactPath: row.build_artifact_path ?? undefined,
+      buildArtifactSize: row.build_artifact_size !== null ? Number(row.build_artifact_size) : undefined,
+      buildArtifactHash: row.build_artifact_hash ?? undefined,
+      buildLogs: safeJsonParse(row.build_logs, []),
+      config: safeJsonParse(row.config, {}),
+      commitSha: row.commit_sha ?? undefined,
+      rollbackFromId: row.rollback_from_id ?? undefined,
+      approvalId: row.approval_id ?? undefined,
+      errorMessage: row.error_message ?? undefined,
+      deployedAt: row.deployed_at ? Number(row.deployed_at) : undefined,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at)
+    };
+  }
+
+  public saveDeployment(deployment: DeploymentRecord): void {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO deployments (
+          id, build_id, user_id, provider, status, environment,
+          target_url, custom_domain, custom_domain_status, custom_domain_dns_records,
+          build_artifact_path, build_artifact_size, build_artifact_hash,
+          build_logs, config, commit_sha, rollback_from_id, approval_id,
+          error_message, deployed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        deployment.id,
+        deployment.buildId,
+        deployment.userId,
+        deployment.provider,
+        deployment.status,
+        deployment.environment,
+        deployment.targetUrl ?? null,
+        deployment.customDomain ?? null,
+        deployment.customDomainStatus ?? null,
+        deployment.customDomainDnsRecords ? JSON.stringify(deployment.customDomainDnsRecords) : null,
+        deployment.buildArtifactPath ?? null,
+        deployment.buildArtifactSize ?? null,
+        deployment.buildArtifactHash ?? null,
+        JSON.stringify(deployment.buildLogs || []),
+        JSON.stringify(deployment.config || {}),
+        deployment.commitSha ?? null,
+        deployment.rollbackFromId ?? null,
+        deployment.approvalId ?? null,
+        deployment.errorMessage ?? null,
+        deployment.deployedAt ?? null,
+        deployment.createdAt,
+        deployment.updatedAt
+      );
+      this.broadcast(deployment.buildId, 'deployment_updated', deployment);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveDeployment', err);
+    }
+  }
+
+  public getDeployment(deploymentId: string): DeploymentRecord | null {
+    try {
+      const row = this.dbManager.db.prepare('SELECT * FROM deployments WHERE id = ?').get(deploymentId) as any;
+      if (!row) return null;
+      return this.mapDeploymentRow(row);
+    } catch {
+      return null;
+    }
+  }
+
+  public getDeployments(buildId: string): DeploymentRecord[] {
+    try {
+      const rows = this.dbManager.db.prepare(
+        'SELECT * FROM deployments WHERE build_id = ? ORDER BY created_at DESC'
+      ).all(buildId) as any[];
+      return rows.map(r => this.mapDeploymentRow(r));
+    } catch {
+      return [];
+    }
+  }
+
+  public getDeploymentsByUser(userId: string): DeploymentRecord[] {
+    try {
+      const rows = this.dbManager.db.prepare(
+        'SELECT * FROM deployments WHERE user_id = ? ORDER BY created_at DESC'
+      ).all(userId) as any[];
+      return rows.map(r => this.mapDeploymentRow(r));
+    } catch {
+      return [];
+    }
+  }
+
+  public deleteDeployment(deploymentId: string): void {
+    try {
+      this.dbManager.db.prepare('DELETE FROM deployments WHERE id = ?').run(deploymentId);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('deleteDeployment', err);
+    }
+  }
+
+  public saveDeploymentSecret(secret: DeploymentSecretRecord): void {
+    try {
+      this.dbManager.db.prepare(`
+        INSERT OR REPLACE INTO deployment_secrets (
+          id, build_id, user_id, key, encrypted_value, environment, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        secret.id,
+        secret.buildId,
+        secret.userId,
+        secret.key,
+        secret.encryptedValue,
+        secret.environment,
+        secret.createdAt,
+        secret.updatedAt
+      );
+    } catch (err: any) {
+      this.handleDatabaseWriteError('saveDeploymentSecret', err);
+    }
+  }
+
+  public getDeploymentSecrets(buildId: string, environment?: string): DeploymentSecretRecord[] {
+    try {
+      const sql = environment
+        ? 'SELECT * FROM deployment_secrets WHERE build_id = ? AND (environment = ? OR environment = "all") ORDER BY key ASC'
+        : 'SELECT * FROM deployment_secrets WHERE build_id = ? ORDER BY key ASC';
+      const rows = (environment
+        ? this.dbManager.db.prepare(sql).all(buildId, environment)
+        : this.dbManager.db.prepare(sql).all(buildId)) as any[];
+      return rows.map(row => ({
+        id: row.id,
+        buildId: row.build_id,
+        userId: row.user_id,
+        key: row.key,
+        encryptedValue: row.encrypted_value,
+        environment: row.environment,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at)
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  public getDeploymentSecret(secretId: string): DeploymentSecretRecord | null {
+    try {
+      const row = this.dbManager.db.prepare('SELECT * FROM deployment_secrets WHERE id = ?').get(secretId) as any;
+      if (!row) return null;
+      return {
+        id: row.id,
+        buildId: row.build_id,
+        userId: row.user_id,
+        key: row.key,
+        encryptedValue: row.encrypted_value,
+        environment: row.environment,
+        createdAt: Number(row.created_at),
+        updatedAt: Number(row.updated_at)
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  public deleteDeploymentSecret(secretId: string): void {
+    try {
+      this.dbManager.db.prepare('DELETE FROM deployment_secrets WHERE id = ?').run(secretId);
+    } catch (err: any) {
+      this.handleDatabaseWriteError('deleteDeploymentSecret', err);
+    }
+  }
 }
 
 export const db = new PersistentDatabase();
 export const store = db;
+

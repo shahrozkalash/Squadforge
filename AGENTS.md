@@ -64,11 +64,11 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 12 | Automated Testing and Quality Assurance. |
 | Phase 13 | Advanced Application Development. Implemented and verified on 2026-11-06. See `PHASE_13_ACCEPTANCE_REPORT.md`. |
 | Phase 14 | GitHub and Project Lifecycle. Implemented and verified on 2026-11-06. See `PHASE_14_ACCEPTANCE_REPORT.md`. |
-| Phase 15 | Do not start until the owner asks. |
+| Phase 15 | Deployment and Distribution. Implemented and verified on 2026-11-06. See `PHASE_15_ACCEPTANCE_REPORT.md`. |
+| Phase 16 | Do not start until the owner asks. |
 
 Later roadmap:
 
-- Phase 15: Deployment and Distribution
 - Phase 16: Production Readiness and Intelligence
 
 Do not present GitHub integration or deployment as complete until they are implemented and tested, even where the README lists them. The "production ready" wording in the Phase 8 report does not describe the whole product.

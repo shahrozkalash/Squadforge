@@ -1640,7 +1640,88 @@ export type ApprovalOperationType =
   | 'code_execution'
   | 'dependency_install'
   | 'install_scripts'
-  | 'github_sensitive_commit';
+  | 'github_sensitive_commit'
+  | 'production_deployment';
+
+export type DeploymentProviderType =
+  | 'static_host'
+  | 'cloudflare_pages'
+  | 'vercel'
+  | 'netlify'
+  | 'docker_container'
+  | 'custom_webhook';
+
+export type DeploymentEnvironment = 'production' | 'staging' | 'preview';
+
+export type DeploymentStatus =
+  | 'pending_approval'
+  | 'validating'
+  | 'building'
+  | 'deploying'
+  | 'active'
+  | 'failed'
+  | 'rolled_back'
+  | 'cancelled';
+
+export interface DeploymentLogEntry {
+  timestamp: number;
+  level: 'info' | 'warn' | 'error' | 'success';
+  message: string;
+  phase?: 'validation' | 'build' | 'deploy' | 'domain' | 'rollback';
+}
+
+export interface DeploymentRecord {
+  id: string;
+  buildId: string;
+  userId: string;
+  provider: DeploymentProviderType;
+  status: DeploymentStatus;
+  environment: DeploymentEnvironment;
+  targetUrl?: string;
+  customDomain?: string;
+  customDomainStatus?: 'none' | 'pending_verification' | 'active' | 'failed';
+  customDomainDnsRecords?: Array<{ type: string; name: string; value: string; ttl?: number }>;
+  buildArtifactPath?: string;
+  buildArtifactSize?: number;
+  buildArtifactHash?: string;
+  buildLogs: DeploymentLogEntry[];
+  config: {
+    buildCommand?: string;
+    outputDirectory?: string;
+    installCommand?: string;
+    rootDirectory?: string;
+    nodeVersion?: string;
+    providerSettings?: Record<string, any>;
+  };
+  commitSha?: string;
+  rollbackFromId?: string;
+  approvalId?: string;
+  errorMessage?: string;
+  deployedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface DeploymentSecretRecord {
+  id: string;
+  buildId: string;
+  userId: string;
+  key: string;
+  encryptedValue: string;
+  environment: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SafeDeploymentSecret {
+  id: string;
+  buildId: string;
+  key: string;
+  maskedValue: string;
+  environment: string;
+  createdAt: number;
+  updatedAt: number;
+}
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'cancelled';
 
