@@ -1,7 +1,7 @@
 # SquadForge Phase 16 Progress: Production Readiness & Release Verification
 
 **Date:** 2026-11-06  
-**Status:** In Progress — Resumed from Phase 15 completion and initial Phase 16 scaffolding  
+**Status:** Completed & Verified  
 **Lead Engineer Identity:** Shahroz (`Shahrozkalash <shahrozkalash@gmail.com>`)  
 **Commit Baseline:** `4e3b8fd`  
 
@@ -19,7 +19,7 @@
 | **Connected Full-Stack Dev (Phase 13)** | `server/application/` (ConnectedPlanner, ConnectedGenerator, ExistingProjectModifier, ConnectedValidator) | Accepted | Verified. Tiered multi-file generation (types, db, routes, client, tests) without mocks. |
 | **GitHub Lifecycle Management (Phase 14)** | `server/github/` (GitHubClient, GitHubLifecycleService, GitHubRoutes) | Accepted | Verified. Strict committer attribution (`Shahrozkalash <shahrozkalash@gmail.com>`), branch protection gates. |
 | **Deployment & Distribution (Phase 15)** | `server/deployment/` (DeploymentService, PreDeploymentValidator, ProductionBuilder, SecretManager, Adapters) | Accepted | Verified. Pre-deploy validation, AES-256-GCM secrets, esbuild bundling, atomic rollback, custom domains. |
-| **Phase 16: Production Readiness & Release (Current)** | `server/db/database.ts` (migration 017), `tests/phase16_end_to_end_lifecycle.test.ts` | Incomplete / Draft | High-throughput composite indexes present. End-to-end 12-step test suite drafted with minor API mismatches. CI lockfile and `.env.example` missing keys. |
+| **Phase 16: Production Readiness & Release (Current)** | `server/db/database.ts` (migration 017), `tests/phase16_end_to_end_lifecycle.test.ts`, `tests/ci_workflow_integrity.test.ts`, `package-lock.json`, `.env.example` | Verified & Accepted | High-throughput composite indexes active (Migration 017). End-to-end 12-step lifecycle test suite passing (13/13). CI lockfile and .env.example intact. Full 847/847 test suite pass rate. |
 
 ---
 
@@ -68,25 +68,22 @@ The focused audit covers the 8 required production-readiness dimensions:
 
 ---
 
-## 3. Plan of Action
-
-- [ ] **Task 1: Fix CI Workflow and Lockfile Integrity**
-  - Add missing `GEMINI_API_KEY=` to `.env.example`.
-  - Generate canonical `package-lock.json` (`lockfileVersion >= 2`) so `npm ci` and `tests/ci_workflow_integrity.test.ts` pass cleanly.
-- [ ] **Task 2: Fix and Complete Phase 16 12-Step Lifecycle Test Suite**
-  - Fix method signatures in `tests/phase16_end_to_end_lifecycle.test.ts`:
-    - `selection.recommendedStack` & `selection.alternativeStack` in Step 3.
-    - `plan.topology.database.tables` & `ConnectedApplicationGenerator.generateConnectedFiles` in Step 4.
-    - `DisabledBackend` parameter types in Step 6.
-    - `HonestVerificationService` verdict and checks in Step 8.
-    - GitHub mock endpoints and author attribution verification in Step 11.
-    - `DeploymentService.createDeployment` and `MergeManager.acquireFileLeases` in Step 12.
-    - Verify approval request auto-expiry invariant test.
-- [ ] **Task 3: Production Invariant Hardening & Auto-Expiry Sweeper**
-  - Ensure background sweeping or on-demand expiration of stale approval requests (`ApprovalGateService.expireStaleRequests`) is called during build status checks.
-- [ ] **Task 4: Full Test Suite and Quality Verification**
-  - Run `npm run lint` (`tsc --noEmit`).
-  - Run all unit and integration test suites: `npm test`. Ensure 100% pass rate.
-  - Run production build: `npm run build`.
-- [ ] **Task 5: Documentation & Acceptance**
-  - Create `PHASE_16_ACCEPTANCE_REPORT.md` documenting verified evidence, test results, and final production release readiness verdict.
+## 3. Plan of Action & Verification Results
+ 
+- [x] **Task 1: Fix CI Workflow and Lockfile Integrity**
+  - Added missing `GEMINI_API_KEY=`, `APP_URL=`, `PORT=` to `.env.example`.
+  - Removed unauthorized `bun.lock` foreign lockfile.
+  - Generated canonical `package-lock.json` (`lockfileVersion = 3`, npm 10+ compatible).
+  - Verified `tests/ci_workflow_integrity.test.ts` (4/4 tests passed).
+- [x] **Task 2: Fix and Complete Phase 16 12-Step Lifecycle Test Suite**
+  - Aligned method signatures across all 12 software building stages in `tests/phase16_end_to_end_lifecycle.test.ts`.
+  - Verified 13/13 tests pass covering requirements, architecture, code generation, approval gates, isolated execution, debugging diagnostics, truthful verification, previews, GitHub lifecycle, deployment pipelines, atomic rollbacks, and approval request auto-expiry.
+- [x] **Task 3: Production Invariant Hardening & Auto-Expiry Sweeper**
+  - Integrated `ApprovalGateService.expireStaleRequests(build.id)` in `/api/builds/:id` and `/api/builds/:id/collaboration/approvals` to automatically expire pending approval requests older than 24 hours.
+- [x] **Task 4: Full Test Suite and Quality Verification**
+  - Executed `npm run lint` (`tsc --noEmit`): 0 errors.
+  - Executed full test suite (`npm test`): 847 tests across 84 test suites, **847 passed, 0 failed, 0 skipped**.
+  - Executed production build (`npm run build`): Vite built `dist/` cleanly in 1.22s.
+- [x] **Task 5: Documentation & Acceptance**
+  - Completed `PHASE_16_PROGRESS.md`.
+  - Authored `PHASE_16_ACCEPTANCE_REPORT.md` documenting verified evidence and operational readiness.

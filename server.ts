@@ -943,6 +943,8 @@ app.get('/api/builds/:id', requireAuth, (req, res) => {
     return res.status(403).json({ error: 'Forbidden: You do not have permission to view this project.' });
   }
 
+  ApprovalGateService.expireStaleRequests(build.id);
+
   const tasks = db.getTasks(build.id);
   const files = db.getAllFiles(build.id);
   const events = db.getEvents(build.id);
