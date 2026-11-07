@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext.js';
 import { useSwarm } from '../context/SwarmContext.js';
-import { Github, Play, Square, Activity, GitBranch, LogOut, Rocket, Menu, X } from 'lucide-react';
+import { Github, Play, Square, Activity, GitBranch, LogOut, Rocket, Menu, X, Smartphone } from 'lucide-react';
 
-export type NavTab = 'execution' | 'debug' | 'dashboard' | 'live' | 'codegen' | 'collaboration' | 'github' | 'deploy' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
+export type NavTab = 'execution' | 'debug' | 'dashboard' | 'live' | 'codegen' | 'collaboration' | 'github' | 'deploy' | 'android' | 'architecture' | 'code' | 'merge' | 'builds' | 'usage' | 'settings' | 'test';
 
 interface NavbarProps {
   currentTab: NavTab;
@@ -31,6 +31,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'codegen', label: 'Code Gen' },
     { id: 'execution', label: 'Run' },
     { id: 'debug', label: 'Debug' },
+    { id: 'android', label: 'Android Studio', icon: Smartphone },
     { id: 'collaboration', label: 'Collaboration', badge: pendingApprovalsCount },
     { id: 'github', label: 'GitHub', icon: Github },
     { id: 'deploy', label: 'Deploy', icon: Rocket },

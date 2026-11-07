@@ -56,6 +56,7 @@ import {
 } from './server/application/index.js';
 import { createGitHubRouter } from './server/github/index.js';
 import { createDeploymentRouter, serveStaticDeployment } from './server/deployment/index.js';
+import { createAndroidRouter } from './server/android/index.js';
 
 
 dotenv.config();
@@ -2597,6 +2598,12 @@ app.use(serveStaticDeployment);
 
 // Deployment & Distribution Engine (Phase 15)
 app.use(createDeploymentRouter(requireAuth));
+
+// Native Android Development Engine (Phase 17)
+app.use('/api/builds/:id/android', createAndroidRouter({
+  requireAuth,
+  verifyBuildOwnership
+}));
 
 // Mount Vite in dev mode or serve static bundle in production
 async function startServer() {

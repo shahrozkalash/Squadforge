@@ -16,6 +16,7 @@ import { SettingsView } from './components/SettingsView.js';
 import { UsageDashboardView } from './components/UsageDashboardView.js';
 import { GitHubLifecycleView } from './components/GitHubLifecycleView.js';
 import { DeploymentView } from './components/DeploymentView.js';
+import { AndroidStudioView } from './components/AndroidStudioView.js';
 import { AuthModal } from './components/AuthModal.js';
 import { ConcurrencyTestModal } from './components/ConcurrencyTestModal.js';
 import { AuthPage } from './components/AuthPage.js';
@@ -75,6 +76,10 @@ function DashboardContent() {
 
         {currentTab === 'deploy' && (
           <DeploymentView />
+        )}
+
+        {currentTab === 'android' && (
+          <AndroidStudioView />
         )}
 
         {currentTab === 'architecture' && (

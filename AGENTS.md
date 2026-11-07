@@ -65,11 +65,12 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 13 | Advanced Application Development. Implemented and verified on 2026-11-06. See `PHASE_13_ACCEPTANCE_REPORT.md`. |
 | Phase 14 | GitHub and Project Lifecycle. Implemented and verified on 2026-11-06. See `PHASE_14_ACCEPTANCE_REPORT.md`. |
 | Phase 15 | Deployment and Distribution. Implemented and verified on 2026-11-06. See `PHASE_15_ACCEPTANCE_REPORT.md`. |
-| Phase 16 | Do not start until the owner asks. |
+| Phase 16 | Production Readiness and Intelligence. Implemented and verified on 2026-11-06. See `PHASE_16_ACCEPTANCE_REPORT.md`. |
+| Phase 17 | Native Android Development Engine. Implemented and verified on 2026-11-06. See `PHASE_17_ACCEPTANCE_REPORT.md`. |
 
 Later roadmap:
 
-- Phase 16: Production Readiness and Intelligence
+- Phase 18: Multi-Platform Native Extensions (iOS / Desktop)
 
 Do not present GitHub integration or deployment as complete until they are implemented and tested, even where the README lists them. The "production ready" wording in the Phase 8 report does not describe the whole product.
 

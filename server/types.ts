@@ -454,6 +454,8 @@ export interface Build {
   dependencyPlan?: ArchitectureDependencyPlan;
   applicationPlan?: FullStackApplicationPlan;
   connectedValidation?: ConnectedValidationReport;
+  androidConfig?: any;
+  androidBuilds?: any[];
 }
 
 export type CanonicalProjectType = 
