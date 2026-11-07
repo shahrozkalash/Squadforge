@@ -12,59 +12,14 @@ import {
 import { ApkInspector } from './apkInspector.js';
 import { AndroidProjectGenerator } from './androidProjectGenerator.js';
 
-/**
- * Validates and safely resolves a file path within the assigned workspace,
- * strictly rejecting absolute paths, path traversal, null bytes, Windows drive letters,
- * and symbolic links escaping the workspace boundary.
- */
-export function assertSafeWorkspacePath(workspaceRoot: string, targetPath: string): string {
-  if (typeof targetPath !== 'string' || !targetPath.trim()) {
-    throw new Error('Security Violation: Target path cannot be empty');
-  }
-  if (targetPath.includes('\0')) {
-    throw new Error(`Security Violation: Null bytes forbidden in path: ${targetPath}`);
-  }
-  if (path.isAbsolute(targetPath)) {
-    throw new Error(`Security Violation: Absolute paths forbidden in workspace: ${targetPath}`);
-  }
-  if (/^[a-zA-Z]:/.test(targetPath)) {
-    throw new Error(`Security Violation: Windows drive letters forbidden in workspace: ${targetPath}`);
-  }
+import {
+  assertSafeWorkspacePath,
+  sanitizeWorkspacePath,
+  assertScopedArtifactPath,
+  validateArtifactScope
+} from '../pathSecurity.js';
 
-  const normalized = path.normalize(targetPath);
-  const resolved = path.resolve(workspaceRoot, normalized);
-  const rel = path.relative(workspaceRoot, resolved);
-
-  if (rel.startsWith('..') || path.isAbsolute(rel) || rel === '..') {
-    throw new Error(`Security Violation: Path traversal escapes workspace: ${targetPath}`);
-  }
-
-  // Symlink verification on target if it exists
-  if (fs.existsSync(resolved)) {
-    const lstat = fs.lstatSync(resolved);
-    if (lstat.isSymbolicLink()) {
-      throw new Error(`Security Violation: Symbolic links are forbidden in workspace: ${targetPath}`);
-    }
-    const real = fs.realpathSync(resolved);
-    const realRel = path.relative(workspaceRoot, real);
-    if (realRel.startsWith('..') || path.isAbsolute(realRel)) {
-      throw new Error(`Security Violation: Symlink target escapes workspace: ${targetPath}`);
-    }
-  }
-
-  // Check parent directories for symlinks
-  let currentDir = path.dirname(resolved);
-  while (currentDir.length >= workspaceRoot.length && fs.existsSync(currentDir)) {
-    const dirLstat = fs.lstatSync(currentDir);
-    if (dirLstat.isSymbolicLink()) {
-      throw new Error(`Security Violation: Parent directory symlink in path is forbidden: ${targetPath}`);
-    }
-    if (currentDir === workspaceRoot) break;
-    currentDir = path.dirname(currentDir);
-  }
-
-  return resolved;
-}
+export { assertSafeWorkspacePath, sanitizeWorkspacePath };
 
 export class AndroidBuildPipeline {
   private static buildCounter = 1;
@@ -471,7 +426,8 @@ export class AndroidBuildPipeline {
     const apkFilename = `${config.appName.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${options.mode}.apk`;
     const aabFilename = `${config.appName.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${options.mode}.aab`;
 
-    const artifactsDir = path.resolve(process.cwd(), '.android_artifacts', buildId);
+    const baseArtifactsDir = path.resolve(process.cwd(), '.android_artifacts');
+    const artifactsDir = path.resolve(baseArtifactsDir, buildId);
     if (!fs.existsSync(artifactsDir)) {
       fs.mkdirSync(artifactsDir, { recursive: true });
     }
@@ -486,7 +442,8 @@ export class AndroidBuildPipeline {
         if (fs.existsSync(cand)) {
           apkBuffer = fs.readFileSync(cand);
           addLog('INFO', 'HARVEST', `Harvested genuine APK (${apkBuffer.length} bytes) from Gradle output`);
-          fs.writeFileSync(path.join(artifactsDir, apkFilename), apkBuffer);
+          const targetApkPath = assertScopedArtifactPath(baseArtifactsDir, buildId, apkFilename);
+          fs.writeFileSync(targetApkPath, apkBuffer);
           break;
         }
       }
@@ -502,7 +459,8 @@ export class AndroidBuildPipeline {
         if (fs.existsSync(cand)) {
           aabBuffer = fs.readFileSync(cand);
           addLog('INFO', 'HARVEST', `Harvested genuine AAB (${aabBuffer.length} bytes) from Gradle output`);
-          fs.writeFileSync(path.join(artifactsDir, aabFilename), aabBuffer);
+          const targetAabPath = assertScopedArtifactPath(baseArtifactsDir, buildId, aabFilename);
+          fs.writeFileSync(targetAabPath, aabBuffer);
           break;
         }
       }

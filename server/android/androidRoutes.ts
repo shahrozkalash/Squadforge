@@ -17,22 +17,18 @@ import { AndroidBuildPipeline } from './androidBuildPipeline.js';
 import { ApkInspector } from './apkInspector.js';
 import { AndroidEmulatorService } from './androidEmulatorService.js';
 import { ApprovalGateService } from '../swarm/approvalGateService.js';
+import { 
+  assertScopedArtifactPath, 
+  validateArtifactScope,
+  validateArtifactFilename,
+  validateBuildId 
+} from '../pathSecurity.js';
+
+export { validateArtifactFilename, validateBuildId };
 
 // In-memory cache for generated artifact buffers (buildId -> filename -> Buffer)
 const artifactBufferCache: Map<string, Map<string, Buffer>> = new Map();
 const ARTIFACTS_BASE_DIR = path.resolve(process.cwd(), '.android_artifacts');
-
-export function validateArtifactFilename(filename: string): boolean {
-  if (typeof filename !== 'string' || !filename.trim()) return false;
-  if (filename.includes('..') || filename.includes('/') || filename.includes('\\') || filename.includes('\0')) return false;
-  return /^[a-zA-Z0-9_.-]+\.(apk|aab)$/i.test(filename);
-}
-
-export function validateBuildId(buildId: string): boolean {
-  if (typeof buildId !== 'string' || !buildId.trim()) return false;
-  if (buildId.includes('..') || buildId.includes('/') || buildId.includes('\\') || buildId.includes('\0')) return false;
-  return /^[a-zA-Z0-9_-]+$/.test(buildId);
-}
 
 export function storeArtifactBuffer(buildId: string, filename: string, buffer: Buffer) {
   if (!validateBuildId(buildId) || !validateArtifactFilename(filename)) {
@@ -46,16 +42,12 @@ export function storeArtifactBuffer(buildId: string, filename: string, buffer: B
   }
   buildMap.set(filename, buffer);
 
-  // Also persist to workspace filesystem
+  // Also persist to workspace filesystem using strict path scoping
   try {
-    const dir = path.join(ARTIFACTS_BASE_DIR, buildId);
+    const fullPath = assertScopedArtifactPath(ARTIFACTS_BASE_DIR, buildId, filename);
+    const dir = path.dirname(fullPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
-    }
-    const fullPath = path.resolve(dir, filename);
-    const rel = path.relative(dir, fullPath);
-    if (rel.startsWith('..') || path.isAbsolute(rel) || rel !== filename) {
-      throw new Error(`Security Violation: Path traversal in artifact storage: ${filename}`);
     }
     fs.writeFileSync(fullPath, buffer);
   } catch (err: any) {
@@ -72,12 +64,11 @@ export function getArtifactBuffer(buildId: string, filename: string): Buffer | u
   if (inMemory) return inMemory;
 
   try {
-    const dir = path.join(ARTIFACTS_BASE_DIR, buildId);
-    const diskPath = path.resolve(dir, filename);
-    const rel = path.relative(dir, diskPath);
-    if (rel.startsWith('..') || path.isAbsolute(rel) || rel !== filename) {
+    const scopeCheck = validateArtifactScope(ARTIFACTS_BASE_DIR, buildId, filename);
+    if (!scopeCheck.valid || !scopeCheck.resolvedPath) {
       return undefined;
     }
+    const diskPath = scopeCheck.resolvedPath;
 
     if (fs.existsSync(diskPath)) {
       const buf = fs.readFileSync(diskPath);
@@ -94,6 +85,7 @@ export function getArtifactBuffer(buildId: string, filename: string): Buffer | u
   }
   return undefined;
 }
+
 
 export interface AndroidRouteDependencies {
   requireAuth: express.RequestHandler;
@@ -361,12 +353,12 @@ export function createAndroidRouter(deps: AndroidRouteDependencies): Router {
     }
 
     const buffer = getArtifactBuffer(build.id, filename);
-    const artifactsDir = path.join(ARTIFACTS_BASE_DIR, build.id);
-    const fullPath = path.resolve(artifactsDir, filename);
-    const rel = path.relative(artifactsDir, fullPath);
-    if (rel.startsWith('..') || path.isAbsolute(rel) || rel !== filename) {
+    const scopeCheck = validateArtifactScope(ARTIFACTS_BASE_DIR, build.id, filename);
+    if (!scopeCheck.valid || !scopeCheck.resolvedPath) {
       return res.status(400).json({ exists: false, error: 'Security Violation: Path traversal detected.' });
     }
+    const fullPath = scopeCheck.resolvedPath;
+
 
     const foundOnDisk = fs.existsSync(fullPath);
     if (!buffer && !foundOnDisk) {

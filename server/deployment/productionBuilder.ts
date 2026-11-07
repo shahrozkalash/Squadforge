@@ -9,6 +9,7 @@ import path from 'node:path';
 import JSZip from 'jszip';
 import * as esbuild from 'esbuild';
 import { ProjectFile } from '../types.js';
+import { isPathScopedWithin, scopeArtifactPath } from '../pathValidator.js';
 import {
   ProductionBuildResult,
   ProductionBuildFile,
@@ -252,7 +253,11 @@ export class ProductionBuilder {
 
       const artifactHash = crypto.createHash('sha256').update(zipBuffer).digest('hex');
       const artifactFileName = `${deploymentId}-${artifactHash.slice(0, 8)}.zip`;
-      const artifactFilePath = path.join(ARTIFACTS_DIR, artifactFileName);
+      const scoped = scopeArtifactPath(ARTIFACTS_DIR, artifactFileName);
+      if (!scoped.valid || !scoped.resolvedPath) {
+        throw new Error(`Security Violation: Cannot scope build artifact: ${scoped.error}`);
+      }
+      const artifactFilePath = scoped.resolvedPath;
 
       await fs.promises.writeFile(artifactFilePath, zipBuffer);
       artifactMemoryCache.set(deploymentId, zipBuffer);
@@ -292,10 +297,15 @@ export class ProductionBuilder {
       return artifactMemoryCache.get(deploymentId)!;
     }
 
-    if (artifactPath && fs.existsSync(artifactPath)) {
-      const buffer = await fs.promises.readFile(artifactPath);
-      artifactMemoryCache.set(deploymentId, buffer);
-      return buffer;
+    if (artifactPath) {
+      if (!isPathScopedWithin(ARTIFACTS_DIR, artifactPath)) {
+        throw new Error(`Security Violation: Artifact path escapes deployments artifact directory: ${artifactPath}`);
+      }
+      if (fs.existsSync(artifactPath)) {
+        const buffer = await fs.promises.readFile(artifactPath);
+        artifactMemoryCache.set(deploymentId, buffer);
+        return buffer;
+      }
     }
 
     // Try finding in artifacts directory
