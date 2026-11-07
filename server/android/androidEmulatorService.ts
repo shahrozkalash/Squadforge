@@ -1,7 +1,11 @@
+import { execFile, execFileSync, spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { 
   AndroidEmulatorState, 
   AndroidComposableNode, 
-  AndroidProjectConfig 
+  AndroidProjectConfig,
+  AndroidToolchainStatus 
 } from './types.js';
 
 export class AndroidEmulatorService {
@@ -14,6 +18,254 @@ export class AndroidEmulatorService {
     }
     return this.instance;
   }
+
+  private findExecutable(name: string): string | null {
+    const standardPaths = [
+      `/usr/bin/${name}`,
+      `/usr/local/bin/${name}`,
+      `/opt/android-sdk/platform-tools/${name}`,
+      `/opt/android-sdk/emulator/${name}`,
+      `/opt/android-sdk/cmdline-tools/latest/bin/${name}`,
+      `/usr/lib/android-sdk/platform-tools/${name}`
+    ];
+    for (const p of standardPaths) {
+      if (fs.existsSync(p)) return p;
+    }
+    try {
+      const out = execFileSync('which', [name], { encoding: 'utf-8', timeout: 2000 }).trim();
+      if (out && fs.existsSync(out)) return out;
+    } catch {
+      // not found
+    }
+    return null;
+  }
+
+  /**
+   * Detects the host Android SDK, ADB bridge, emulator installations, and connected devices
+   */
+  public async detectToolchain(): Promise<AndroidToolchainStatus> {
+    const adbPath = this.findExecutable('adb');
+    const emulatorPath = this.findExecutable('emulator');
+    const apksignerPath = this.findExecutable('apksigner');
+    const bundletoolPath = this.findExecutable('bundletool');
+
+    let sdkPath: string | undefined;
+    if (process.env.ANDROID_HOME && fs.existsSync(process.env.ANDROID_HOME)) {
+      sdkPath = process.env.ANDROID_HOME;
+    } else if (process.env.ANDROID_SDK_ROOT && fs.existsSync(process.env.ANDROID_SDK_ROOT)) {
+      sdkPath = process.env.ANDROID_SDK_ROOT;
+    } else if (fs.existsSync('/opt/android-sdk')) {
+      sdkPath = '/opt/android-sdk';
+    } else if (fs.existsSync('/usr/lib/android-sdk')) {
+      sdkPath = '/usr/lib/android-sdk';
+    }
+
+    let adbVersion: string | undefined;
+    if (adbPath) {
+      try {
+        const out = execFileSync(adbPath, ['version'], { encoding: 'utf-8', timeout: 3000 });
+        const match = out.match(/Android Debug Bridge version ([^\r\n]+)/);
+        adbVersion = match ? match[1] : out.trim().split('\n')[0];
+      } catch {
+        // ignore
+      }
+    }
+
+    // List AVDs
+    const availableAvds: string[] = [];
+    const avdmanager = this.findExecutable('avdmanager');
+    if (avdmanager) {
+      try {
+        const out = execFileSync(avdmanager, ['list', 'avd'], { encoding: 'utf-8', timeout: 4000 });
+        const nameMatches = out.matchAll(/Name:\s*([^\r\n]+)/g);
+        for (const m of nameMatches) {
+          if (m[1]) availableAvds.push(m[1].trim());
+        }
+      } catch {
+        // ignore
+      }
+    } else if (emulatorPath) {
+      try {
+        const out = execFileSync(emulatorPath, ['-list-avds'], { encoding: 'utf-8', timeout: 4000 });
+        for (const line of out.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed) availableAvds.push(trimmed);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // List connected devices via ADB
+    const connectedDevices = await this.listConnectedDevices();
+
+    return {
+      sdkFound: Boolean(sdkPath),
+      sdkPath,
+      adbFound: Boolean(adbPath),
+      adbPath: adbPath || undefined,
+      adbVersion,
+      emulatorFound: Boolean(emulatorPath),
+      emulatorPath: emulatorPath || undefined,
+      apksignerFound: Boolean(apksignerPath),
+      apksignerPath: apksignerPath || undefined,
+      bundletoolFound: Boolean(bundletoolPath),
+      bundletoolPath: bundletoolPath || undefined,
+      availableAvds,
+      connectedDevices
+    };
+  }
+
+  /**
+   * Queries `adb devices -l` to find all currently connected physical devices or emulators
+   */
+  public async listConnectedDevices(): Promise<Array<{
+    serial: string;
+    state: string;
+    model?: string;
+    product?: string;
+    isEmulator: boolean;
+  }>> {
+    const adbPath = this.findExecutable('adb');
+    if (!adbPath) return [];
+
+    return new Promise((resolve) => {
+      execFile(adbPath, ['devices', '-l'], { timeout: 4000 }, (err, stdout) => {
+        if (err || !stdout) {
+          return resolve([]);
+        }
+
+        const lines = stdout.split('\n');
+        const devices: Array<{ serial: string; state: string; model?: string; product?: string; isEmulator: boolean }> = [];
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('List of devices attached') || trimmed.startsWith('*')) {
+            continue;
+          }
+          const parts = trimmed.split(/\s+/);
+          if (parts.length >= 2) {
+            const serial = parts[0];
+            const state = parts[1];
+            const modelMatch = trimmed.match(/model:(\S+)/);
+            const productMatch = trimmed.match(/product:(\S+)/);
+            const isEmulator = serial.startsWith('emulator-');
+
+            devices.push({
+              serial,
+              state,
+              model: modelMatch ? modelMatch[1] : undefined,
+              product: productMatch ? productMatch[1] : undefined,
+              isEmulator
+            });
+          }
+        }
+        resolve(devices);
+      });
+    });
+  }
+
+  /**
+   * Starts a genuine Android emulator instance using the host emulator binary
+   */
+  public async startEmulator(avdName: string): Promise<{ success: boolean; pid?: number; message: string }> {
+    const emulatorPath = this.findExecutable('emulator');
+    if (!emulatorPath) {
+      return {
+        success: false,
+        message: 'Android emulator binary not found in system or SDK path.'
+      };
+    }
+
+    try {
+      const child = spawn(emulatorPath, ['-avd', avdName, '-no-snapshot', '-no-boot-anim'], {
+        detached: true,
+        stdio: 'ignore'
+      });
+      child.unref();
+
+      return {
+        success: true,
+        pid: child.pid,
+        message: `Started emulator instance for AVD "${avdName}" (PID: ${child.pid}).`
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: `Failed to launch emulator: ${err.message}`
+      };
+    }
+  }
+
+  /**
+   * Installs an APK onto a real device or running emulator via `adb install -r`
+   */
+  public async installApk(serial: string, apkPath: string): Promise<{ success: boolean; output: string }> {
+    const adbPath = this.findExecutable('adb');
+    if (!adbPath) {
+      return { success: false, output: 'ADB executable not found.' };
+    }
+    if (!fs.existsSync(apkPath)) {
+      return { success: false, output: `APK file not found at: ${apkPath}` };
+    }
+
+    return new Promise((resolve) => {
+      execFile(adbPath, ['-s', serial, 'install', '-r', apkPath], { timeout: 60000 }, (err, stdout, stderr) => {
+        const output = (stdout || '') + (stderr || '');
+        if (err || output.includes('Failure')) {
+          resolve({ success: false, output: output || err?.message || 'Install failed' });
+        } else {
+          resolve({ success: true, output: output.trim() || 'Success' });
+        }
+      });
+    });
+  }
+
+  /**
+   * Launches an installed Android application via `adb shell am start`
+   */
+  public async launchApp(serial: string, packageName: string, activityName: string = '.MainActivity'): Promise<{ success: boolean; output: string }> {
+    const adbPath = this.findExecutable('adb');
+    if (!adbPath) {
+      return { success: false, output: 'ADB executable not found.' };
+    }
+
+    const component = `${packageName}/${activityName}`;
+    return new Promise((resolve) => {
+      execFile(adbPath, ['-s', serial, 'shell', 'am', 'start', '-n', component], { timeout: 15000 }, (err, stdout, stderr) => {
+        const output = (stdout || '') + (stderr || '');
+        if (err || output.includes('Error')) {
+          resolve({ success: false, output: output || err?.message || 'Launch failed' });
+        } else {
+          resolve({ success: true, output: output.trim() });
+        }
+      });
+    });
+  }
+
+  /**
+   * Collects recent Logcat lines from a connected device/emulator via `adb logcat -d`
+   */
+  public async collectLogcat(serial: string, maxLines: number = 100): Promise<{ success: boolean; logs: string[] }> {
+    const adbPath = this.findExecutable('adb');
+    if (!adbPath) {
+      return { success: false, logs: ['ADB executable not found.'] };
+    }
+
+    return new Promise((resolve) => {
+      execFile(adbPath, ['-s', serial, 'logcat', '-d', '-v', 'time', '-t', String(maxLines)], { timeout: 8000 }, (err, stdout) => {
+        if (err || !stdout) {
+          return resolve({ success: false, logs: [err?.message || 'Failed to read logcat'] });
+        }
+        const lines = stdout.split('\n').filter(l => l.trim().length > 0);
+        resolve({ success: true, logs: lines });
+      });
+    });
+  }
+
+  // =========================================================================
+  // BROWSER SIMULATOR ENGINE (Clearly labelled as Browser Simulator)
+  // =========================================================================
 
   public getOrCreateState(buildId: string, config?: AndroidProjectConfig): AndroidEmulatorState {
     let state = this.statesByBuildId.get(buildId);

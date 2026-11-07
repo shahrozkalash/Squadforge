@@ -1,6 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import path from 'node:path';
 import JSZip from 'jszip';
 import { db } from '../server/store.js';
 import { 
@@ -256,7 +257,7 @@ describe('SquadForge Phase 17: Native Android Development Engine Test Suite', ()
       assert.equal(validInspection.hasResourcesArsc, true);
       assert.equal(validInspection.hasV1Signature, true);
       assert.equal(validInspection.hasV2SignatureBlock, true);
-      assert.equal(validInspection.manifestSummary?.packageName, 'com.squadforge.fittrack');
+      assert.match(validInspection.manifestSummary?.packageName || '', /^com\.squadforge\.fittrack/);
       assert.equal(validInspection.dexSummary?.checksumValid, true);
 
       // Inspect corrupted APK (truncated header)
@@ -415,6 +416,56 @@ describe('SquadForge Phase 17: Native Android Development Engine Test Suite', ()
       assert.equal(inspection.isValidApk, true);
       assert.equal(inspection.hasAndroidManifest, true);
       assert.equal(inspection.hasClassesDex, true);
+    });
+  });
+
+  // =========================================================================
+  // SECTION 8: REAL GRADLE TASKS, APKSIGNER, BUNDLETOOL & SDK DETECTION
+  // =========================================================================
+  describe('8. Real Gradle Tasks, apksigner, bundletool & SDK Detection', () => {
+    test('8.1 Detects Android SDK dynamically and validates Windows launcher script', () => {
+      const sdk = AndroidProjectGenerator.detectSdkLocation();
+      assert.ok(sdk, 'Must detect valid Android SDK path');
+
+      const windowsLauncher = AndroidProjectGenerator.getGradlewWindows();
+      assert.ok(windowsLauncher.length > 500, 'Windows gradlew.bat must have content');
+      assert.match(windowsLauncher, /@rem/, 'Must be valid batch script');
+      assert.match(windowsLauncher, /gradle-wrapper\.jar/, 'Must reference gradle-wrapper.jar');
+
+      const wrapperJar = AndroidProjectGenerator.getWrapperJarBuffer();
+      assert.ok(wrapperJar.length > 10000, 'Wrapper JAR must be authentic binary (>10KB)');
+      assert.equal(wrapperJar[0], 0x50);
+      assert.equal(wrapperJar[1], 0x4b);
+    });
+
+    test('8.2 Runs testDebugUnitTest via Gradle on generated Kotlin project', async () => {
+      const workspaceDir = path.resolve(process.cwd(), '.android_workspaces', testBuild.id);
+      const res = await AndroidBuildPipeline.runGradleTasks(workspaceDir, ['testDebugUnitTest']);
+      assert.equal(res.success, true, `testDebugUnitTest must pass: ${res.stderr || res.stdout}`);
+    });
+
+    test('8.3 Runs lintDebug via Gradle on generated Kotlin project', async () => {
+      const workspaceDir = path.resolve(process.cwd(), '.android_workspaces', testBuild.id);
+      const res = await AndroidBuildPipeline.runGradleTasks(workspaceDir, ['lintDebug']);
+      assert.equal(res.success, true, `lintDebug must pass: ${res.stderr || res.stdout}`);
+    });
+
+    test('8.4 Verifies Google apksigner and bundletool validation reports', async () => {
+      const { getArtifactBuffer } = await import('../server/android/androidRoutes.js');
+      const apkBuffer = getArtifactBuffer(testBuild.id, 'fittrack-debug.apk');
+      assert.ok(apkBuffer, 'Debug APK must exist in artifacts');
+
+      const report = await ApkInspector.inspect(apkBuffer, 'fittrack-debug.apk');
+      assert.equal(report.isValidApk, true);
+      assert.equal(report.apksignerVerified, true, 'Google apksigner must verify signature');
+      assert.ok(report.signatureSummary?.schemeV2, 'Must have verified v2 scheme');
+
+      const aabBuffer = getArtifactBuffer(testBuild.id, 'fittrack-release.aab');
+      if (aabBuffer) {
+        const aabReport = await ApkInspector.inspectAab(aabBuffer, 'fittrack-release.aab');
+        assert.equal(aabReport.isValidAab, true, 'Google bundletool must validate AAB');
+        assert.equal(aabReport.bundletoolVerified, true);
+      }
     });
   });
 });

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import JSZip from 'jszip';
 import { 
   AndroidProjectConfig, 
@@ -10,6 +11,7 @@ import {
   AndroidDiagnostic 
 } from './types.js';
 import { ApkInspector } from './apkInspector.js';
+import { AndroidProjectGenerator } from './androidProjectGenerator.js';
 
 export class AndroidBuildPipeline {
   private static buildCounter = 1;
@@ -449,7 +451,98 @@ export class AndroidBuildPipeline {
   }
 
   /**
-   * Executes the full Android build pipeline to generate APK and AAB
+   * Helper to spawn a Gradle process with live logging and streaming output
+   */
+  public static async runGradleProcess(
+    gradlewBin: string,
+    tasks: string[],
+    workspaceDir: string,
+    env: NodeJS.ProcessEnv,
+    addLog?: (level: 'INFO' | 'WARN' | 'ERROR' | 'DEBUG', step: string, message: string) => void
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    return new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+
+      const proc = spawn(gradlewBin, tasks, {
+        cwd: workspaceDir,
+        env,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      proc.stdout.on('data', (chunk) => {
+        const text = chunk.toString();
+        stdout += text;
+        if (addLog) {
+          const lines = text.split('\n').filter((l: string) => l.trim().length > 0);
+          for (const line of lines) {
+            const level = line.includes('FAILED') || line.includes('ERROR') ? 'ERROR'
+              : line.includes('WARNING') || line.includes('w:') ? 'WARN'
+              : 'INFO';
+            addLog(level, 'GRADLE', line.trim());
+          }
+        }
+      });
+
+      proc.stderr.on('data', (chunk) => {
+        const text = chunk.toString();
+        stderr += text;
+        if (addLog) {
+          const lines = text.split('\n').filter((l: string) => l.trim().length > 0);
+          for (const line of lines) {
+            addLog('WARN', 'GRADLE_ERR', line.trim());
+          }
+        }
+      });
+
+      proc.on('close', (code) => {
+        resolve({ exitCode: code ?? 1, stdout, stderr });
+      });
+
+      proc.on('error', (err) => {
+        stderr += err.message;
+        if (addLog) {
+          addLog('ERROR', 'GRADLE_EXEC', `Failed to spawn Gradle wrapper: ${err.message}`);
+        }
+        resolve({ exitCode: 1, stdout, stderr });
+      });
+    });
+  }
+
+  /**
+   * Runs arbitrary Gradle tasks in a given workspace directory
+   */
+  public static async runGradleTasks(
+    workspaceDir: string,
+    tasks: string[]
+  ): Promise<{ success: boolean; stdout: string; stderr: string; exitCode: number }> {
+    const sdkPath = AndroidProjectGenerator.detectSdkLocation();
+    const gradlewBin = process.platform === 'win32'
+      ? path.join(workspaceDir, 'gradlew.bat')
+      : path.join(workspaceDir, 'gradlew');
+
+    const javaHome = process.env.JAVA_HOME || '/usr/lib/jvm/java-17-openjdk-amd64';
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      JAVA_HOME: javaHome,
+      ANDROID_HOME: sdkPath || undefined,
+      ANDROID_SDK_ROOT: sdkPath || undefined,
+      PATH: sdkPath
+        ? `${path.join(sdkPath, 'platform-tools')}:${path.join(sdkPath, 'cmdline-tools/latest/bin')}:${process.env.PATH}`
+        : process.env.PATH
+    };
+
+    const res = await this.runGradleProcess(gradlewBin, tasks, workspaceDir, env);
+    return {
+      success: res.exitCode === 0,
+      stdout: res.stdout,
+      stderr: res.stderr,
+      exitCode: res.exitCode
+    };
+  }
+
+  /**
+   * Executes the full genuine Android build pipeline via Gradle to produce authentic APK and AAB
    */
   public static async build(
     buildId: string,
@@ -470,8 +563,8 @@ export class AndroidBuildPipeline {
       logs.push({ timestamp: Date.now(), level, step, message });
     };
 
-    addLog('INFO', 'INIT', `Starting Native Android Build #${buildNum} in ${options.mode} mode for ${config.packageName}`);
-    addLog('INFO', 'CONFIG', `Configured compileSdk=${config.compileSdk}, targetSdk=${config.targetSdk}, minSdk=${config.minSdk}, Compose BOM=${config.composeBomVersion}`);
+    addLog('INFO', 'INIT', `Starting Genuine Native Android Gradle Build #${buildNum} in ${options.mode} mode for ${config.packageName}`);
+    addLog('INFO', 'CONFIG', `Configured compileSdk=${config.compileSdk}, targetSdk=${config.targetSdk}, minSdk=${config.minSdk}, Kotlin=${config.kotlinVersion}, AGP=${config.agpVersion}`);
 
     // Check permissions
     if (config.permissions.length === 0) {
@@ -486,159 +579,253 @@ export class AndroidBuildPipeline {
       addLog('INFO', 'PERMISSIONS', `Validated ${config.permissions.length} declared permissions: ${config.permissions.join(', ')}`);
     }
 
-    // Step 1: Manifest Assembly & Validation
-    addLog('INFO', 'MANIFEST', 'Synthesizing and validating AndroidManifest.xml...');
-    const manifestXml = projectFiles['app/src/main/AndroidManifest.xml'] || 
-      `<?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="${config.packageName}">
-    <application android:label="${config.appName}" android:icon="@mipmap/ic_launcher">
-        <activity android:name=".MainActivity" android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-    </application>
-</manifest>`;
+    // Step 1: Establish isolated workspace
+    const workspaceDir = path.resolve(process.cwd(), '.android_workspaces', buildId);
+    if (!fs.existsSync(workspaceDir)) {
+      fs.mkdirSync(workspaceDir, { recursive: true });
+    }
+    addLog('INFO', 'PREPARE', `Materializing Android project in isolated workspace: ${workspaceDir}`);
 
-    // Step 2: Compile Resources
-    addLog('INFO', 'AAPT2', 'Compiling XML resources and synthesizing binary resources.arsc table...');
-    const resourcesArsc = this.generateResourcesArsc(config.packageName, config.appName);
-    addLog('INFO', 'AAPT2', `Synthesized resources.arsc (${resourcesArsc.length} bytes) with package ID 0x7F`);
-
-    // Step 3: Compile Kotlin & Synthesize DEX
-    addLog('INFO', 'KOTLIN', `Compiling Kotlin sources with Jetpack Compose Compiler (${config.kotlinVersion})...`);
-    addLog('INFO', 'D8', 'Translating Java/Kotlin bytecode to Dalvik Executable (classes.dex)...');
-    const classesDex = this.generateClassesDex(config.packageName, config.mainActivityName);
-    addLog('INFO', 'D8', `Generated classes.dex (${classesDex.length} bytes) with valid DEX 035 header and Adler32 checksum`);
-
-    // Step 4: Package APK ZIP
-    addLog('INFO', 'PACKAGE', 'Packaging Android application archive (.apk)...');
-    const filesToSign = new Map<string, Buffer>();
-    filesToSign.set('AndroidManifest.xml', Buffer.from(manifestXml, 'utf-8'));
-    filesToSign.set('classes.dex', classesDex);
-    filesToSign.set('resources.arsc', resourcesArsc);
-
-    // Add res files from projectFiles if present
-    for (const [p, content] of Object.entries(projectFiles)) {
-      if (p.startsWith('app/src/main/res/')) {
-        const apkResPath = p.replace('app/src/main/res/', 'res/');
-        filesToSign.set(apkResPath, Buffer.from(content, 'utf-8'));
+    // Materialize project files safely, preventing directory traversal
+    for (const [rawRelPath, content] of Object.entries(projectFiles)) {
+      const cleanRelPath = rawRelPath.replace(/^[/\\]+/, '');
+      const fullPath = path.resolve(workspaceDir, cleanRelPath);
+      if (!fullPath.startsWith(workspaceDir)) {
+        throw new Error(`Security Violation: Path traversal detected in project file: ${rawRelPath}`);
       }
-      if (p.startsWith('app/src/main/assets/')) {
-        const apkAssetPath = p.replace('app/src/main/assets/', 'assets/');
-        filesToSign.set(apkAssetPath, Buffer.from(content, 'utf-8'));
-      }
+      fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+      fs.writeFileSync(fullPath, content, 'utf-8');
     }
 
-    // Step 5: Sign APK (v1 + v2)
-    addLog('INFO', 'SIGN', `Signing APK with ${options.mode === 'release' ? 'Release Key' : 'Android Debug Keystore'} (RSA-2048)...`);
-    const signatures = this.generateSignatures(filesToSign);
+    // Step 2: Install official Gradle 8.7 wrapper assets
+    addLog('INFO', 'WRAPPER', 'Installing official Gradle 8.7 wrapper binary and launcher scripts...');
+    const wrapperDir = path.join(workspaceDir, 'gradle', 'wrapper');
+    fs.mkdirSync(wrapperDir, { recursive: true });
+    fs.writeFileSync(path.join(wrapperDir, 'gradle-wrapper.jar'), AndroidProjectGenerator.getWrapperJarBuffer());
 
-    const apkZip = new JSZip();
-    for (const [name, buf] of filesToSign.entries()) {
-      apkZip.file(name, buf);
+    const wrapperPropsPath = path.join(wrapperDir, 'gradle-wrapper.properties');
+    if (!fs.existsSync(wrapperPropsPath)) {
+      fs.writeFileSync(
+        wrapperPropsPath,
+        'distributionBase=GRADLE_USER_HOME\n' +
+        'distributionPath=wrapper/dists\n' +
+        'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-bin.zip\n' +
+        'networkTimeout=10000\n' +
+        'validateDistributionUrl=true\n' +
+        'zipStoreBase=GRADLE_USER_HOME\n' +
+        'zipStorePath=wrapper/dists\n',
+        'utf-8'
+      );
     }
-    apkZip.file('META-INF/MANIFEST.MF', signatures.manifestMf);
-    apkZip.file('META-INF/CERT.SF', signatures.certSf);
-    apkZip.file('META-INF/CERT.RSA', signatures.certRsa);
 
-    const rawApkZipBuffer = await apkZip.generateAsync({
-      type: 'nodebuffer',
-      compression: 'DEFLATE',
-      compressionOptions: { level: 6 }
-    });
+    const gradlewPosix = path.join(workspaceDir, 'gradlew');
+    fs.writeFileSync(gradlewPosix, AndroidProjectGenerator.getGradlewPosix(), 'utf-8');
+    try {
+      fs.chmodSync(gradlewPosix, 0o755);
+    } catch {
+      // Ignored on platforms without POSIX permissions
+    }
 
-    // Inject v2 APK Signing Block before Central Directory
-    // Look for End of Central Directory record (0x06054b50)
-    let finalApkBuffer = rawApkZipBuffer;
-    const eocdIndex = rawApkZipBuffer.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
-    if (eocdIndex !== -1 && eocdIndex >= 20) {
-      const cdOffset = rawApkZipBuffer.readUInt32LE(eocdIndex + 16);
-      if (cdOffset <= rawApkZipBuffer.length) {
-        const partBeforeCd = rawApkZipBuffer.subarray(0, cdOffset);
-        const centralDir = rawApkZipBuffer.subarray(cdOffset, eocdIndex);
-        const eocd = Buffer.from(rawApkZipBuffer.subarray(eocdIndex));
+    const gradlewWindows = path.join(workspaceDir, 'gradlew.bat');
+    fs.writeFileSync(gradlewWindows, AndroidProjectGenerator.getGradlewWindows(), 'utf-8');
 
-        // Update CD offset in EOCD
-        const newCdOffset = cdOffset + signatures.v2Block.length;
-        eocd.writeUInt32LE(newCdOffset, 16);
+    // Ensure gradle.properties exists with optimal daemon memory
+    const gradlePropsPath = path.join(workspaceDir, 'gradle.properties');
+    if (!fs.existsSync(gradlePropsPath)) {
+      fs.writeFileSync(
+        gradlePropsPath,
+        'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8\n' +
+        'android.useAndroidX=true\n' +
+        'android.nonTransitiveRClass=true\n' +
+        'kotlin.code.style=official\n',
+        'utf-8'
+      );
+    }
 
-        finalApkBuffer = Buffer.concat([partBeforeCd, signatures.v2Block, centralDir, eocd]);
-        addLog('INFO', 'SIGN', 'Injected APK Signature Scheme v2 Block before ZIP Central Directory.');
+    // Step 3: Detect Android SDK dynamically
+    const sdkPath = AndroidProjectGenerator.detectSdkLocation();
+    if (!sdkPath) {
+      addLog('ERROR', 'TOOLCHAIN', 'No Android SDK installation detected in environment (checked ANDROID_HOME, ANDROID_SDK_ROOT, and system paths).');
+      diagnostics.push({
+        severity: 'error',
+        file: 'local.properties',
+        message: 'Android SDK not detected. Configure ANDROID_HOME or ANDROID_SDK_ROOT.'
+      });
+
+      const failedResult: AndroidBuildResult = {
+        id: `abuild_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+        buildId,
+        buildNumber: buildNum,
+        timestamp: Date.now(),
+        status: 'failed',
+        mode: options.mode,
+        target: options.target,
+        logs,
+        diagnostics,
+        durationMs: Date.now() - startTime,
+        error: 'Android SDK not detected in environment'
+      };
+
+      return { result: failedResult };
+    }
+
+    addLog('INFO', 'TOOLCHAIN', `Configured Android SDK location: ${sdkPath}`);
+    fs.writeFileSync(path.join(workspaceDir, 'local.properties'), `sdk.dir=${sdkPath.replace(/\\/g, '/')}\n`, 'utf-8');
+
+    // Step 4: Determine Gradle tasks
+    const modeUpper = options.mode === 'release' ? 'Release' : 'Debug';
+    const gradleTasks: string[] = [];
+    if (options.target === 'apk') {
+      gradleTasks.push(`assemble${modeUpper}`);
+    } else if (options.target === 'aab') {
+      gradleTasks.push(`bundle${modeUpper}`);
+    } else {
+      gradleTasks.push(`assemble${modeUpper}`, `bundle${modeUpper}`);
+    }
+
+    if (options.runTests) {
+      gradleTasks.push(`test${modeUpper}UnitTest`);
+    }
+    if (options.lintCheck) {
+      gradleTasks.push(`lint${modeUpper}`);
+    }
+
+    // Step 5: Execute Gradle build with genuine AGP, AAPT2, D8/R8
+    addLog('INFO', 'GRADLE', `Running Gradle task(s): ./gradlew ${gradleTasks.join(' ')}`);
+    const gradlewBin = process.platform === 'win32' ? gradlewWindows : gradlewPosix;
+    const javaHome = process.env.JAVA_HOME || '/usr/lib/jvm/java-17-openjdk-amd64';
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      JAVA_HOME: javaHome,
+      ANDROID_HOME: sdkPath,
+      ANDROID_SDK_ROOT: sdkPath,
+      PATH: `${path.join(sdkPath, 'platform-tools')}:${path.join(sdkPath, 'cmdline-tools/latest/bin')}:${process.env.PATH}`
+    };
+
+    const gradleResult = await this.runGradleProcess(gradlewBin, gradleTasks, workspaceDir, env, addLog);
+
+    if (gradleResult.exitCode !== 0) {
+      addLog('ERROR', 'GRADLE', `Gradle build failed with exit code ${gradleResult.exitCode}`);
+      const errLines = gradleResult.stderr.split('\n').concat(gradleResult.stdout.split('\n'))
+        .filter(l => l.includes('e:') || l.includes('FAILURE:') || l.includes('FAILED') || l.includes('Exception:'));
+      for (const el of errLines.slice(0, 5)) {
+        diagnostics.push({
+          severity: 'error',
+          file: 'gradle',
+          message: el.trim()
+        });
       }
+
+      const durationMs = Date.now() - startTime;
+      const failedResult: AndroidBuildResult = {
+        id: `abuild_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+        buildId,
+        buildNumber: buildNum,
+        timestamp: Date.now(),
+        status: 'failed',
+        mode: options.mode,
+        target: options.target,
+        logs,
+        diagnostics,
+        durationMs,
+        error: `Gradle build failed with exit code ${gradleResult.exitCode}: ${errLines[0] || 'Unknown build failure'}`
+      };
+
+      return { result: failedResult };
     }
 
-    const apkFilename = `${config.appName.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${options.mode}.apk`;
-    const apkChecksum = crypto.createHash('sha256').update(finalApkBuffer).digest('hex');
-    addLog('INFO', 'PACKAGE', `Assembled and verified installable APK: ${apkFilename} (${finalApkBuffer.length} bytes, SHA-256: ${apkChecksum.slice(0, 16)}...)`);
-
-    // Step 6: Package AAB (Android App Bundle) if requested
+    // Step 6: Harvest and verify produced artifacts
+    let apkBuffer: Buffer | undefined;
     let aabBuffer: Buffer | undefined;
-    let aabFilename: string | undefined;
-    let aabChecksum: string | undefined;
+    const apkFilename = `${config.appName.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${options.mode}.apk`;
+    const aabFilename = `${config.appName.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${options.mode}.aab`;
 
-    if (options.target === 'aab' || options.target === 'both') {
-      addLog('INFO', 'AAB', 'Packaging Google Play Android App Bundle (AAB)...');
-      const aabZip = new JSZip();
-      aabZip.file('base/manifest/AndroidManifest.xml', Buffer.from(manifestXml, 'utf-8'));
-      aabZip.file('base/dex/classes.dex', classesDex);
-      aabZip.file('base/resources.pb', resourcesArsc); // Protocol buffer / compiled resource table
+    const artifactsDir = path.resolve(process.cwd(), '.android_artifacts', buildId);
+    if (!fs.existsSync(artifactsDir)) {
+      fs.mkdirSync(artifactsDir, { recursive: true });
+    }
 
-      for (const [p, content] of Object.entries(projectFiles)) {
-        if (p.startsWith('app/src/main/res/')) {
-          const aabResPath = p.replace('app/src/main/res/', 'base/res/');
-          aabZip.file(aabResPath, Buffer.from(content, 'utf-8'));
+    if (options.target === 'apk' || options.target === 'both') {
+      const candidates = [
+        path.join(workspaceDir, 'app', 'build', 'outputs', 'apk', options.mode, `app-${options.mode}.apk`),
+        path.join(workspaceDir, 'app', 'build', 'outputs', 'apk', options.mode, `app-${options.mode}-unsigned.apk`),
+        path.join(workspaceDir, 'app', 'build', 'outputs', 'apk', options.mode, 'app.apk')
+      ];
+      for (const cand of candidates) {
+        if (fs.existsSync(cand)) {
+          apkBuffer = fs.readFileSync(cand);
+          addLog('INFO', 'HARVEST', `Harvested genuine APK (${apkBuffer.length} bytes) from ${cand}`);
+          fs.writeFileSync(path.join(artifactsDir, apkFilename), apkBuffer);
+          break;
         }
       }
-
-      // BundleConfig.pb
-      const bundleConfig = Buffer.from('{\n  "compression": { "uncompressedGlob": ["assets/**"] }\n}');
-      aabZip.file('BundleConfig.pb', bundleConfig);
-      aabZip.file('META-INF/MANIFEST.MF', signatures.manifestMf);
-
-      aabBuffer = await aabZip.generateAsync({
-        type: 'nodebuffer',
-        compression: 'DEFLATE',
-        compressionOptions: { level: 9 }
-      });
-      aabFilename = `${config.appName.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${options.mode}.aab`;
-      aabChecksum = crypto.createHash('sha256').update(aabBuffer).digest('hex');
-      addLog('INFO', 'AAB', `Assembled Google Play App Bundle: ${aabFilename} (${aabBuffer.length} bytes)`);
     }
 
-    // Step 7: Inspect and validate APK
-    addLog('INFO', 'VERIFY', 'Running ApkInspector integrity audit on produced APK...');
-    const inspection = await ApkInspector.inspect(finalApkBuffer, apkFilename);
-    if (!inspection.isValidApk) {
-      addLog('ERROR', 'VERIFY', `APK validation failed with errors: ${inspection.errors.join('; ')}`);
-      diagnostics.push(...inspection.errors.map(e => ({
-        severity: 'error' as const,
-        file: apkFilename,
-        message: e
-      })));
-    } else {
-      addLog('INFO', 'VERIFY', 'ApkInspector audit passed: Valid ZIP structure, classes.dex magic, and v1+v2 signatures confirmed.');
+    if (options.target === 'aab' || options.target === 'both') {
+      const candidates = [
+        path.join(workspaceDir, 'app', 'build', 'outputs', 'bundle', options.mode, `app-${options.mode}.aab`),
+        path.join(workspaceDir, 'app', 'build', 'outputs', 'bundle', options.mode, `app-${options.mode}-unsigned.aab`),
+        path.join(workspaceDir, 'app', 'build', 'outputs', 'bundle', options.mode, 'app.aab')
+      ];
+      for (const cand of candidates) {
+        if (fs.existsSync(cand)) {
+          aabBuffer = fs.readFileSync(cand);
+          addLog('INFO', 'HARVEST', `Harvested genuine AAB (${aabBuffer.length} bytes) from ${cand}`);
+          fs.writeFileSync(path.join(artifactsDir, aabFilename), aabBuffer);
+          break;
+        }
+      }
     }
 
+    // Step 7: Inspect and validate produced artifacts via Google apksigner, aapt, and bundletool
+    let inspection: any = { isValidApk: false, errors: [] };
+    if (apkBuffer) {
+      addLog('INFO', 'VERIFY', 'Validating APK signatures via Google apksigner and manifest via aapt...');
+      inspection = await ApkInspector.inspect(apkBuffer, apkFilename);
+      if (!inspection.isValidApk) {
+        addLog('ERROR', 'VERIFY', `APK inspection failed: ${inspection.errors.join('; ')}`);
+        diagnostics.push(...inspection.errors.map((e: string) => ({
+          severity: 'error' as const,
+          file: apkFilename,
+          message: e
+        })));
+      } else {
+        addLog('INFO', 'VERIFY', `ApkInspector audit PASSED: apksignerVerified=${inspection.apksignerVerified}, v1=${inspection.hasV1Signature}, v2=${inspection.hasV2SignatureBlock}`);
+      }
+    }
+
+    if (aabBuffer) {
+      addLog('INFO', 'VERIFY', 'Validating Android App Bundle via Google bundletool...');
+      const aabInspection = await ApkInspector.inspectAab(aabBuffer, aabFilename);
+      if (!aabInspection.isValidAab) {
+        addLog('WARN', 'VERIFY', `AAB validation reported issues: ${aabInspection.errors.join('; ')}`);
+      } else {
+        addLog('INFO', 'VERIFY', `Bundletool validation PASSED for ${aabFilename}`);
+      }
+    }
+
+    const apkChecksum = apkBuffer ? crypto.createHash('sha256').update(apkBuffer).digest('hex') : undefined;
+    const aabChecksum = aabBuffer ? crypto.createHash('sha256').update(aabBuffer).digest('hex') : undefined;
     const durationMs = Date.now() - startTime;
-    addLog('INFO', 'FINISH', `Android build completed in ${durationMs}ms with status: ${inspection.isValidApk ? 'SUCCESS' : 'FAILED'}`);
+    const buildSuccess = (options.target === 'aab' && aabBuffer) ? true : inspection.isValidApk;
+
+    addLog('INFO', 'FINISH', `Native Android build #${buildNum} finished in ${durationMs}ms with status: ${buildSuccess ? 'SUCCESS' : 'FAILED'}`);
 
     const result: AndroidBuildResult = {
       id: `abuild_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
       buildId,
       buildNumber: buildNum,
       timestamp: Date.now(),
-      status: inspection.isValidApk ? 'success' : 'failed',
+      status: buildSuccess ? 'success' : 'failed',
       mode: options.mode,
       target: options.target,
-      apkPath: `/api/builds/${buildId}/android/artifacts/${apkFilename}`,
-      apkFilename,
-      apkSize: finalApkBuffer.length,
+      apkPath: apkBuffer ? `/api/builds/${buildId}/android/artifacts/${apkFilename}` : undefined,
+      apkFilename: apkBuffer ? apkFilename : undefined,
+      apkSize: apkBuffer?.length,
       apkChecksum,
-      aabPath: aabFilename ? `/api/builds/${buildId}/android/artifacts/${aabFilename}` : undefined,
-      aabFilename,
-      aabSize: aabBuffer ? aabBuffer.length : undefined,
+      aabPath: aabBuffer ? `/api/builds/${buildId}/android/artifacts/${aabFilename}` : undefined,
+      aabFilename: aabBuffer ? aabFilename : undefined,
+      aabSize: aabBuffer?.length,
       aabChecksum,
       logs,
       diagnostics,
@@ -646,12 +833,12 @@ export class AndroidBuildPipeline {
       dexSummary: inspection.dexSummary,
       signatureSummary: inspection.signatureSummary,
       durationMs,
-      error: inspection.errors.length > 0 ? inspection.errors.join('; ') : undefined
+      error: !buildSuccess ? (inspection.errors?.join('; ') || 'Build produced invalid artifacts') : undefined
     };
 
     return {
       result,
-      apkBuffer: finalApkBuffer,
+      apkBuffer,
       aabBuffer
     };
   }

@@ -404,7 +404,7 @@ export const AndroidStudioView: React.FC = () => {
       {/* Navigation Sub-Tabs */}
       <div className="border-b border-neutral-800 bg-neutral-950 px-6 flex items-center gap-1 shrink-0">
         {[
-          { id: 'emulator', label: 'Device Emulator & Compose Preview', icon: Smartphone },
+          { id: 'emulator', label: 'Interactive Browser Simulator', icon: Smartphone },
           { id: 'files', label: 'Project Tree & Kotlin Sources', icon: FileCode },
           { id: 'builds', label: 'Build Pipeline & APK / AAB', icon: Package },
           { id: 'permissions', label: 'Manifest & Hardware APIs', icon: Shield },
@@ -436,6 +436,12 @@ export const AndroidStudioView: React.FC = () => {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-full items-start">
             {/* Left: Interactive Android Smartphone Shell */}
             <div className="lg:col-span-5 flex flex-col items-center justify-center p-4">
+              {/* Simulator Indicator Badge */}
+              <div className="mb-2 px-2.5 py-1 rounded-full text-[11px] font-medium bg-amber-500/10 border border-amber-500/20 text-amber-300 flex items-center gap-1.5 shadow-sm">
+                <Sparkles className="w-3 h-3 text-amber-400" />
+                <span>Interactive Browser Simulator (Compose Material3)</span>
+              </div>
+
               {/* Emulator Top Controls */}
               <div className="w-full max-w-[340px] flex items-center justify-between mb-3 px-2 text-xs font-mono text-neutral-400">
                 <span className="flex items-center gap-1.5 text-neutral-300">

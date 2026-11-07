@@ -184,3 +184,25 @@ export interface AndroidEmulatorState {
   }>;
   currentComponents: AndroidComposableNode[];
 }
+
+export interface AndroidToolchainStatus {
+  sdkFound: boolean;
+  sdkPath?: string;
+  adbFound: boolean;
+  adbPath?: string;
+  adbVersion?: string;
+  emulatorFound: boolean;
+  emulatorPath?: string;
+  apksignerFound: boolean;
+  apksignerPath?: string;
+  bundletoolFound: boolean;
+  bundletoolPath?: string;
+  availableAvds: string[];
+  connectedDevices: Array<{
+    serial: string;
+    state: string;
+    model?: string;
+    product?: string;
+    isEmulator: boolean;
+  }>;
+}
