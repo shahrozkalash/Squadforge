@@ -377,5 +377,46 @@ describe('SquadForge Phase 17: Native Android Development Engine Test Suite', ()
       assert.ok(entries.includes('app/src/main/java/com/squadforge/fittrack/MainActivity.kt'));
     });
   });
+
+  // =========================================================================
+  // SECTION 7: WORKSPACE ARTIFACT FILE VALIDATION & DOWNLOAD INTEGRITY
+  // =========================================================================
+  describe('7. Workspace Artifact File Validation & Download Check', () => {
+    test('7.1 Validates generated APK exists in workspace and rejects missing files', async () => {
+      const { storeArtifactBuffer, getArtifactBuffer } = await import('../server/android/androidRoutes.js');
+      const config = AndroidProjectGenerator.getDefaultConfig('FitTrack', 'com.squadforge.fittrack');
+      const files = AndroidProjectGenerator.generateProjectFiles(config);
+
+      const { result, apkBuffer } = await AndroidBuildPipeline.build(
+        testBuild.id,
+        config,
+        files,
+        { mode: 'debug', target: 'apk' }
+      );
+      assert.ok(apkBuffer);
+      assert.ok(result.apkFilename);
+
+      // Store in artifact cache & disk
+      storeArtifactBuffer(testBuild.id, result.apkFilename, apkBuffer);
+
+      // Verify getArtifactBuffer retrieves it
+      const retrieved = getArtifactBuffer(testBuild.id, result.apkFilename);
+      assert.ok(retrieved, 'Must retrieve artifact buffer');
+      assert.equal(retrieved.length, apkBuffer.length);
+      assert.equal(retrieved[0], 0x50); // ZIP magic 'P'
+      assert.equal(retrieved[1], 0x4b); // ZIP magic 'K'
+
+      // Check non-existent artifact validation
+      const missingBuf = getArtifactBuffer(testBuild.id, 'non-existent-app.apk');
+      assert.equal(missingBuf, undefined, 'Missing artifact must return undefined');
+
+      // Validate APK integrity
+      const inspection = await ApkInspector.inspect(retrieved, result.apkFilename);
+      assert.equal(inspection.isValidApk, true);
+      assert.equal(inspection.hasAndroidManifest, true);
+      assert.equal(inspection.hasClassesDex, true);
+    });
+  });
 });
+
 

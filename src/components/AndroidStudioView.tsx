@@ -122,8 +122,46 @@ export const AndroidStudioView: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string>('app/src/main/java/com/squadforge/app/MainActivity.kt');
   const [fileContent, setFileContent] = useState<string>('');
+  const [validating, setValidating] = useState<boolean>(false);
 
   const buildId = activeBuild?.id;
+  const hasSuccessfulBuild = Boolean(
+    latestBuild && latestBuild.status === 'success' && latestBuild.apkFilename
+  );
+
+  const handleDownloadApk = async () => {
+    if (!buildId || !latestBuild?.apkFilename) return;
+    setValidating(true);
+    setStatusMessage(`Validating generated APK "${latestBuild.apkFilename}" in workspace...`);
+    try {
+      const res = await fetch(`/api/builds/${buildId}/android/artifacts/${latestBuild.apkFilename}/validate`);
+      const data = await res.json();
+
+      if (!res.ok || !data.exists) {
+        setStatusMessage(`Validation Failed: ${data.error || 'Generated APK file not found in workspace.'}`);
+        return;
+      }
+
+      if (!data.isValid) {
+        setStatusMessage(`Validation Warning: File "${data.filename}" exists in workspace but is not a valid APK ZIP archive.`);
+        return;
+      }
+
+      setStatusMessage(`✓ Validated ${data.filename} (${Math.round(data.sizeBytes / 1024)} KB) in workspace. Starting download...`);
+
+      const downloadUrl = `/api/builds/${buildId}/android/artifacts/${latestBuild.apkFilename}`;
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = latestBuild.apkFilename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    } catch (err: any) {
+      setStatusMessage(`Validation error: ${err.message}`);
+    } finally {
+      setValidating(false);
+    }
+  };
 
   // Load config & emulator state
   useEffect(() => {
@@ -303,10 +341,38 @@ export const AndroidStudioView: React.FC = () => {
             Build Debug APK
           </button>
 
+          {/* Download APK button: active only after a successful build, validates file exists in workspace */}
+          <button
+            onClick={handleDownloadApk}
+            disabled={!hasSuccessfulBuild || validating || building}
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all font-mono ${
+              hasSuccessfulBuild
+                ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm shadow-emerald-600/30 cursor-pointer'
+                : 'bg-neutral-800/80 text-neutral-500 border border-neutral-800 cursor-not-allowed opacity-60'
+            }`}
+            title={
+              hasSuccessfulBuild
+                ? `Validate & Download ${latestBuild?.apkFilename || 'APK'} (${latestBuild?.apkSize ? `${Math.round(latestBuild.apkSize / 1024)} KB` : 'Ready'})`
+                : 'Build an APK first to enable download'
+            }
+          >
+            {validating ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-emerald-300" />
+            ) : (
+              <Download className="w-3.5 h-3.5" />
+            )}
+            <span>Download APK</span>
+            {hasSuccessfulBuild && latestBuild?.apkSize && (
+              <span className="px-1.5 py-0.2 rounded text-[10px] bg-emerald-700/80 text-emerald-100">
+                {Math.round(latestBuild.apkSize / 1024)} KB
+              </span>
+            )}
+          </button>
+
           <button
             onClick={() => handleBuild('release')}
             disabled={building || loading}
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white flex items-center gap-1.5 transition-all font-mono"
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 flex items-center gap-1.5 transition-all font-mono"
             title="Assembles signed release APK & Google Play App Bundle (AAB)"
           >
             <Package className="w-3.5 h-3.5" />
@@ -713,14 +779,18 @@ export const AndroidStudioView: React.FC = () => {
                       <p>v2 Sig Block: <span className="text-emerald-400 font-bold">APK Sig Block 42 INJECTED</span></p>
                     </div>
 
-                    <a
-                      href={latestBuild.apkPath}
-                      download={latestBuild.apkFilename}
-                      className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-md shadow-emerald-500/20"
+                    <button
+                      onClick={handleDownloadApk}
+                      disabled={validating}
+                      className="w-full py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-md shadow-emerald-500/20 disabled:opacity-50 cursor-pointer"
                     >
-                      <Download className="w-4 h-4" />
-                      Download {latestBuild.apkFilename}
-                    </a>
+                      {validating ? (
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Download className="w-4 h-4" />
+                      )}
+                      <span>{validating ? 'Validating in Workspace...' : `Download ${latestBuild.apkFilename}`}</span>
+                    </button>
                   </div>
                 )}
 

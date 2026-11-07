@@ -1,5 +1,7 @@
 import express, { Router, Request, Response } from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import JSZip from 'jszip';
 import { db } from '../store.js';
 import { Build } from '../types.js';
@@ -18,6 +20,7 @@ import { ApprovalGateService } from '../swarm/approvalGateService.js';
 
 // In-memory cache for generated artifact buffers (buildId -> filename -> Buffer)
 const artifactBufferCache: Map<string, Map<string, Buffer>> = new Map();
+const ARTIFACTS_BASE_DIR = path.resolve(process.cwd(), '.android_artifacts');
 
 export function storeArtifactBuffer(buildId: string, filename: string, buffer: Buffer) {
   let buildMap = artifactBufferCache.get(buildId);
@@ -26,10 +29,63 @@ export function storeArtifactBuffer(buildId: string, filename: string, buffer: B
     artifactBufferCache.set(buildId, buildMap);
   }
   buildMap.set(filename, buffer);
+
+  // Also persist to workspace filesystem
+  try {
+    const dir = path.join(ARTIFACTS_BASE_DIR, buildId);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(path.join(dir, filename), buffer);
+
+    if (filename.endsWith('.apk')) {
+      const mode = filename.includes('release') ? 'release' : 'debug';
+      const gradleDir = path.resolve(process.cwd(), 'app', 'build', 'outputs', 'apk', mode);
+      if (!fs.existsSync(gradleDir)) {
+        fs.mkdirSync(gradleDir, { recursive: true });
+      }
+      fs.writeFileSync(path.join(gradleDir, filename), buffer);
+    }
+  } catch (err) {
+    console.warn(`[Android] Failed to write artifact to workspace disk: ${err}`);
+  }
 }
 
 export function getArtifactBuffer(buildId: string, filename: string): Buffer | undefined {
-  return artifactBufferCache.get(buildId)?.get(filename);
+  const inMemory = artifactBufferCache.get(buildId)?.get(filename);
+  if (inMemory) return inMemory;
+
+  try {
+    // Check .android_artifacts
+    const diskPath = path.join(ARTIFACTS_BASE_DIR, buildId, filename);
+    if (fs.existsSync(diskPath)) {
+      const buf = fs.readFileSync(diskPath);
+      let buildMap = artifactBufferCache.get(buildId);
+      if (!buildMap) {
+        buildMap = new Map();
+        artifactBufferCache.set(buildId, buildMap);
+      }
+      buildMap.set(filename, buf);
+      return buf;
+    }
+
+    // Check app/build/outputs/apk
+    const mode = filename.includes('release') ? 'release' : 'debug';
+    const gradlePath = path.resolve(process.cwd(), 'app', 'build', 'outputs', 'apk', mode, filename);
+    if (fs.existsSync(gradlePath)) {
+      const buf = fs.readFileSync(gradlePath);
+      let buildMap = artifactBufferCache.get(buildId);
+      if (!buildMap) {
+        buildMap = new Map();
+        artifactBufferCache.set(buildId, buildMap);
+      }
+      buildMap.set(filename, buf);
+      return buf;
+    }
+  } catch {
+    // Ignore error
+  }
+  return undefined;
 }
 
 export interface AndroidRouteDependencies {
@@ -285,6 +341,64 @@ export function createAndroidRouter(deps: AndroidRouteDependencies): Router {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length);
     res.send(buffer);
+  });
+
+  // 7. Validate that an artifact file exists in the workspace
+  router.get('/artifacts/:filename/validate', (req: Request, res: Response) => {
+    const { id, filename } = req.params;
+    const buffer = getArtifactBuffer(id, filename);
+
+    const mode = filename.includes('release') ? 'release' : 'debug';
+    const workspaceRelativePaths = [
+      path.join('.android_artifacts', id, filename),
+      path.join('app', 'build', 'outputs', 'apk', mode, filename)
+    ];
+
+    let foundOnDisk = false;
+    let diskLocation = '';
+    for (const relPath of workspaceRelativePaths) {
+      const fullPath = path.resolve(process.cwd(), relPath);
+      if (fs.existsSync(fullPath)) {
+        foundOnDisk = true;
+        diskLocation = relPath;
+        break;
+      }
+    }
+
+    if (!buffer && !foundOnDisk) {
+      return res.status(404).json({
+        exists: false,
+        filename,
+        error: `Generated file "${filename}" does not exist in workspace filesystem or artifact cache.`
+      });
+    }
+
+    const effectiveBuffer = buffer || (foundOnDisk ? fs.readFileSync(path.resolve(process.cwd(), diskLocation)) : null);
+    if (!effectiveBuffer || effectiveBuffer.length === 0) {
+      return res.status(400).json({
+        exists: false,
+        filename,
+        error: `Artifact file "${filename}" in workspace is empty or unreadable.`
+      });
+    }
+
+    const isZip = effectiveBuffer.length >= 4 &&
+      effectiveBuffer[0] === 0x50 &&
+      effectiveBuffer[1] === 0x4b &&
+      effectiveBuffer[2] === 0x03 &&
+      effectiveBuffer[3] === 0x04;
+
+    const sha256 = crypto.createHash('sha256').update(effectiveBuffer).digest('hex');
+
+    res.json({
+      exists: true,
+      isValid: isZip,
+      filename,
+      sizeBytes: effectiveBuffer.length,
+      sha256,
+      workspacePath: diskLocation || 'in-memory buffer',
+      isZipArchive: isZip
+    });
   });
 
   // 7. Inspect an APK
