@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { AndroidProjectConfig, AndroidPermission } from './types.js';
 
@@ -17,7 +18,6 @@ export class AndroidProjectGenerator {
     if (fs.existsSync(jarPath)) {
       return fs.readFileSync(jarPath);
     }
-    // Fallback: check /tmp/test-wrap or workspace root assets
     const altPath = path.resolve(process.cwd(), 'server/android/assets/gradle-wrapper.jar');
     if (fs.existsSync(altPath)) {
       return fs.readFileSync(altPath);
@@ -53,6 +53,97 @@ export class AndroidProjectGenerator {
       return fs.readFileSync(altPath, 'utf-8');
     }
     return `@rem Gradle startup script for Windows\r\n@if "%DEBUG%"=="" @echo off\r\nset DIRNAME=%~dp0\r\nif "%DIRNAME%"=="" set DIRNAME=.\r\njava -jar "%DIRNAME%gradle\\wrapper\\gradle-wrapper.jar" %*\r\n`;
+  }
+
+  /**
+   * Verifies that the Gradle wrapper JAR and launcher assets are authentic and intact
+   */
+  public static verifyWrapperAssets(): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+
+    try {
+      const jarBuf = this.getWrapperJarBuffer();
+      if (jarBuf.length < 10000) {
+        errors.push(`gradle-wrapper.jar size too small (${jarBuf.length} bytes; expected >10KB)`);
+      }
+      if (jarBuf[0] !== 0x50 || jarBuf[1] !== 0x4b || jarBuf[2] !== 0x03 || jarBuf[3] !== 0x04) {
+        errors.push('gradle-wrapper.jar does not have valid ZIP/JAR magic bytes (PK\\x03\\x04)');
+      }
+    } catch (err: any) {
+      errors.push(`gradle-wrapper.jar missing or unreadable: ${err.message}`);
+    }
+
+    const posixScript = this.getGradlewPosix();
+    if (!posixScript || posixScript.length < 50) {
+      errors.push('POSIX gradlew script missing or empty');
+    }
+
+    const winScript = this.getGradlewWindows();
+    if (!winScript || winScript.length < 50) {
+      errors.push('Windows gradlew.bat script missing or empty');
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors
+    };
+  }
+
+  /**
+   * Detects Java and validates JAVA_HOME without hardcoding machine-specific paths
+   */
+  public static detectJavaHome(): string | null {
+    // 1. Check process.env.JAVA_HOME
+    if (process.env.JAVA_HOME && fs.existsSync(process.env.JAVA_HOME)) {
+      const javaExe = process.platform === 'win32'
+        ? path.join(process.env.JAVA_HOME, 'bin', 'java.exe')
+        : path.join(process.env.JAVA_HOME, 'bin', 'java');
+      if (fs.existsSync(javaExe)) {
+        return process.env.JAVA_HOME;
+      }
+    }
+
+    // 2. Candidate JDK directories (standard cross-platform paths)
+    const candidateDirs = [
+      '/usr/lib/jvm/default-java',
+      '/usr/lib/jvm/java-17-openjdk-amd64',
+      '/usr/lib/jvm/java-21-openjdk-amd64',
+      '/usr/lib/jvm/java-17-openjdk',
+      '/usr/lib/jvm/java-21-openjdk',
+      '/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home',
+      process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Java', 'jdk-17') : null,
+      process.env.ProgramFiles ? path.join(process.env.ProgramFiles, 'Eclipse Adoptium', 'jdk-17') : null
+    ].filter(Boolean) as string[];
+
+    for (const cand of candidateDirs) {
+      const javaExe = process.platform === 'win32'
+        ? path.join(cand, 'bin', 'java.exe')
+        : path.join(cand, 'bin', 'java');
+      if (fs.existsSync(javaExe)) {
+        return cand;
+      }
+    }
+
+    // 3. Search PATH for java binary
+    try {
+      const lookupCmd = process.platform === 'win32' ? 'where' : 'which';
+      const out = execFileSync(lookupCmd, ['java'], { encoding: 'utf-8', timeout: 2000 }).trim();
+      if (out && fs.existsSync(out)) {
+        const resolved = fs.realpathSync(out);
+        const binDir = path.dirname(resolved);
+        const homeDir = path.dirname(binDir);
+        const testExe = process.platform === 'win32'
+          ? path.join(homeDir, 'bin', 'java.exe')
+          : path.join(homeDir, 'bin', 'java');
+        if (fs.existsSync(testExe)) {
+          return homeDir;
+        }
+      }
+    } catch {
+      // not in PATH
+    }
+
+    return null;
   }
 
   /**

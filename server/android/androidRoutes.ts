@@ -22,7 +22,23 @@ import { ApprovalGateService } from '../swarm/approvalGateService.js';
 const artifactBufferCache: Map<string, Map<string, Buffer>> = new Map();
 const ARTIFACTS_BASE_DIR = path.resolve(process.cwd(), '.android_artifacts');
 
+export function validateArtifactFilename(filename: string): boolean {
+  if (typeof filename !== 'string' || !filename.trim()) return false;
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\') || filename.includes('\0')) return false;
+  return /^[a-zA-Z0-9_.-]+\.(apk|aab)$/i.test(filename);
+}
+
+export function validateBuildId(buildId: string): boolean {
+  if (typeof buildId !== 'string' || !buildId.trim()) return false;
+  if (buildId.includes('..') || buildId.includes('/') || buildId.includes('\\') || buildId.includes('\0')) return false;
+  return /^[a-zA-Z0-9_-]+$/.test(buildId);
+}
+
 export function storeArtifactBuffer(buildId: string, filename: string, buffer: Buffer) {
+  if (!validateBuildId(buildId) || !validateArtifactFilename(filename)) {
+    throw new Error(`Security Violation: Invalid buildId or filename for artifact storage: ${filename}`);
+  }
+
   let buildMap = artifactBufferCache.get(buildId);
   if (!buildMap) {
     buildMap = new Map();
@@ -36,44 +52,35 @@ export function storeArtifactBuffer(buildId: string, filename: string, buffer: B
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(path.join(dir, filename), buffer);
-
-    if (filename.endsWith('.apk')) {
-      const mode = filename.includes('release') ? 'release' : 'debug';
-      const gradleDir = path.resolve(process.cwd(), 'app', 'build', 'outputs', 'apk', mode);
-      if (!fs.existsSync(gradleDir)) {
-        fs.mkdirSync(gradleDir, { recursive: true });
-      }
-      fs.writeFileSync(path.join(gradleDir, filename), buffer);
+    const fullPath = path.resolve(dir, filename);
+    const rel = path.relative(dir, fullPath);
+    if (rel.startsWith('..') || path.isAbsolute(rel) || rel !== filename) {
+      throw new Error(`Security Violation: Path traversal in artifact storage: ${filename}`);
     }
-  } catch (err) {
-    console.warn(`[Android] Failed to write artifact to workspace disk: ${err}`);
+    fs.writeFileSync(fullPath, buffer);
+  } catch (err: any) {
+    console.warn(`[Android] Failed to write artifact to workspace disk: ${err?.message || err}`);
   }
 }
 
 export function getArtifactBuffer(buildId: string, filename: string): Buffer | undefined {
+  if (!validateBuildId(buildId) || !validateArtifactFilename(filename)) {
+    return undefined;
+  }
+
   const inMemory = artifactBufferCache.get(buildId)?.get(filename);
   if (inMemory) return inMemory;
 
   try {
-    // Check .android_artifacts
-    const diskPath = path.join(ARTIFACTS_BASE_DIR, buildId, filename);
-    if (fs.existsSync(diskPath)) {
-      const buf = fs.readFileSync(diskPath);
-      let buildMap = artifactBufferCache.get(buildId);
-      if (!buildMap) {
-        buildMap = new Map();
-        artifactBufferCache.set(buildId, buildMap);
-      }
-      buildMap.set(filename, buf);
-      return buf;
+    const dir = path.join(ARTIFACTS_BASE_DIR, buildId);
+    const diskPath = path.resolve(dir, filename);
+    const rel = path.relative(dir, diskPath);
+    if (rel.startsWith('..') || path.isAbsolute(rel) || rel !== filename) {
+      return undefined;
     }
 
-    // Check app/build/outputs/apk
-    const mode = filename.includes('release') ? 'release' : 'debug';
-    const gradlePath = path.resolve(process.cwd(), 'app', 'build', 'outputs', 'apk', mode, filename);
-    if (fs.existsSync(gradlePath)) {
-      const buf = fs.readFileSync(gradlePath);
+    if (fs.existsSync(diskPath)) {
+      const buf = fs.readFileSync(diskPath);
       let buildMap = artifactBufferCache.get(buildId);
       if (!buildMap) {
         buildMap = new Map();
@@ -320,13 +327,16 @@ export function createAndroidRouter(deps: AndroidRouteDependencies): Router {
     });
   }));
 
-  // 6. Download artifact (APK or AAB)
-  router.get('/artifacts/:filename', (req: Request, res: Response) => {
-    const { id, filename } = req.params;
-    const buffer = getArtifactBuffer(id, filename);
+  // 6. Download artifact (APK or AAB) - strictly authenticated & owned
+  router.get('/artifacts/:filename', requireAuth, owned((build, req, res) => {
+    const { filename } = req.params;
+    if (!validateArtifactFilename(filename)) {
+      return res.status(400).json({ error: 'Security Violation: Invalid artifact filename or path traversal detected.' });
+    }
 
+    const buffer = getArtifactBuffer(build.id, filename);
     if (!buffer) {
-      return res.status(404).json({ error: 'Artifact not found or has expired. Please run a build to regenerate.' });
+      return res.status(404).json({ error: 'Artifact not found for this build or has expired.' });
     }
 
     const isApk = filename.endsWith('.apk');
@@ -341,30 +351,24 @@ export function createAndroidRouter(deps: AndroidRouteDependencies): Router {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', buffer.length);
     res.send(buffer);
-  });
+  }));
 
-  // 7. Validate that an artifact file exists in the workspace
-  router.get('/artifacts/:filename/validate', (req: Request, res: Response) => {
-    const { id, filename } = req.params;
-    const buffer = getArtifactBuffer(id, filename);
-
-    const mode = filename.includes('release') ? 'release' : 'debug';
-    const workspaceRelativePaths = [
-      path.join('.android_artifacts', id, filename),
-      path.join('app', 'build', 'outputs', 'apk', mode, filename)
-    ];
-
-    let foundOnDisk = false;
-    let diskLocation = '';
-    for (const relPath of workspaceRelativePaths) {
-      const fullPath = path.resolve(process.cwd(), relPath);
-      if (fs.existsSync(fullPath)) {
-        foundOnDisk = true;
-        diskLocation = relPath;
-        break;
-      }
+  // 7. Validate that an artifact file exists in the workspace - strictly authenticated & owned
+  router.get('/artifacts/:filename/validate', requireAuth, owned((build, req, res) => {
+    const { filename } = req.params;
+    if (!validateArtifactFilename(filename)) {
+      return res.status(400).json({ exists: false, error: 'Security Violation: Invalid artifact filename or path traversal detected.' });
     }
 
+    const buffer = getArtifactBuffer(build.id, filename);
+    const artifactsDir = path.join(ARTIFACTS_BASE_DIR, build.id);
+    const fullPath = path.resolve(artifactsDir, filename);
+    const rel = path.relative(artifactsDir, fullPath);
+    if (rel.startsWith('..') || path.isAbsolute(rel) || rel !== filename) {
+      return res.status(400).json({ exists: false, error: 'Security Violation: Path traversal detected.' });
+    }
+
+    const foundOnDisk = fs.existsSync(fullPath);
     if (!buffer && !foundOnDisk) {
       return res.status(404).json({
         exists: false,
@@ -373,7 +377,7 @@ export function createAndroidRouter(deps: AndroidRouteDependencies): Router {
       });
     }
 
-    const effectiveBuffer = buffer || (foundOnDisk ? fs.readFileSync(path.resolve(process.cwd(), diskLocation)) : null);
+    const effectiveBuffer = buffer || (foundOnDisk ? fs.readFileSync(fullPath) : null);
     if (!effectiveBuffer || effectiveBuffer.length === 0) {
       return res.status(400).json({
         exists: false,
@@ -396,16 +400,19 @@ export function createAndroidRouter(deps: AndroidRouteDependencies): Router {
       filename,
       sizeBytes: effectiveBuffer.length,
       sha256,
-      workspacePath: diskLocation || 'in-memory buffer',
+      workspacePath: path.join('.android_artifacts', build.id, filename),
       isZipArchive: isZip
     });
-  });
+  }));
 
-  // 7. Inspect an APK
+  // 8. Inspect an APK
   router.post('/inspect-apk', requireAuth, owned(async (build, req, res) => {
     const filename = req.body?.filename || build.androidBuilds?.[0]?.apkFilename;
     if (!filename) {
       return res.status(400).json({ error: 'No APK filename provided and no prior builds found.' });
+    }
+    if (!validateArtifactFilename(filename)) {
+      return res.status(400).json({ error: 'Security Violation: Invalid or unsafe APK filename.' });
     }
 
     const buffer = getArtifactBuffer(build.id, filename);
@@ -417,7 +424,7 @@ export function createAndroidRouter(deps: AndroidRouteDependencies): Router {
     res.json({ success: true, report });
   }));
 
-  // 8. Virtual Emulator State
+  // 9. Virtual Emulator State (Browser Simulator)
   router.get('/emulator', requireAuth, owned((build, _req, res) => {
     const config = getOrCreateConfig(build);
     const state = emulatorService.getOrCreateState(build.id, config);
@@ -506,11 +513,16 @@ Generated by SquadForge Multi-AI Parallel Swarm Engineering Platform.
   router.post('/device/install', requireAuth, owned(async (build, req, res) => {
     const { deviceSerial, filename } = req.body || {};
     const apkFile = filename || build.androidBuilds?.[0]?.apkFilename;
-    if (!apkFile) {
-      return res.status(400).json({ error: 'No APK specified to install' });
+    if (!apkFile || !validateArtifactFilename(apkFile)) {
+      return res.status(400).json({ error: 'Invalid or missing APK specified to install' });
     }
 
-    const apkPath = path.resolve(process.cwd(), '.android_artifacts', build.id, apkFile);
+    const apkDir = path.resolve(process.cwd(), '.android_artifacts', build.id);
+    const apkPath = path.resolve(apkDir, apkFile);
+    const rel = path.relative(apkDir, apkPath);
+    if (rel.startsWith('..') || path.isAbsolute(rel) || rel !== apkFile) {
+      return res.status(400).json({ error: 'Security Violation: Path traversal in APK install path' });
+    }
     if (!fs.existsSync(apkPath)) {
       return res.status(404).json({ error: `APK file not found on disk: ${apkFile}` });
     }

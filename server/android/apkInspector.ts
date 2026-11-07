@@ -180,7 +180,7 @@ export class ApkInspector {
         hasV2SignatureBlock = true;
       }
 
-      // 3. Genuine apksigner verification
+      // 3. Genuine apksigner verification (Strict: required for validity)
       let apksignerVerified = false;
       let apksignerOutput = '';
       let signatureSummary: AndroidSignatureSummary | undefined;
@@ -202,8 +202,8 @@ export class ApkInspector {
             const sha256Match = apksignerOutput.match(/certificate SHA-256 digest:\s*([0-9a-fA-F]+)/i);
 
             signatureSummary = {
-              schemeV1: isV1 || hasV1Signature,
-              schemeV2: isV2 || hasV2SignatureBlock,
+              schemeV1: isV1,
+              schemeV2: isV2,
               certificateIssuer: dnMatch ? dnMatch[1].trim() : 'Android Keystore',
               certificateSubject: dnMatch ? dnMatch[1].trim() : 'Android Keystore',
               validFrom: '2024-01-01',
@@ -211,30 +211,19 @@ export class ApkInspector {
               fingerprintSha256: sha256Match ? sha256Match[1].trim() : ''
             };
           } else {
-            errors.push('apksigner verification rejected APK signature');
+            errors.push('Google apksigner verification rejected APK signature (verification did not return Verifies)');
           }
         } catch (signerErr: any) {
           const errMsg = signerErr.stderr?.toString() || signerErr.stdout?.toString() || signerErr.message;
           apksignerOutput = errMsg;
-          errors.push(`apksigner signature verification failed: ${errMsg.split('\n')[0]}`);
+          errors.push(`Google apksigner signature verification failed: ${errMsg.split('\n')[0]}`);
         }
       } else {
-        warnings.push('Google apksigner binary not found on host; falling back to archive signature inspection');
-        if (hasV1Signature || hasV2SignatureBlock) {
-          signatureSummary = {
-            schemeV1: hasV1Signature,
-            schemeV2: hasV2SignatureBlock,
-            certificateIssuer: 'Android Keystore',
-            certificateSubject: 'Android Keystore',
-            validFrom: '2024-01-01',
-            validTo: '2054-01-01',
-            fingerprintSha256: crypto.createHash('sha256').update(buffer.subarray(0, 1024)).digest('hex')
-          };
-        }
+        errors.push('Strict verification failure: Google "apksigner" binary not found on host. Signature validity cannot be established without official apksigner verification.');
       }
 
-      if (!hasV1Signature && !hasV2SignatureBlock && !apksignerVerified) {
-        errors.push('APK is unsigned (missing verified signature)');
+      if (!apksignerVerified) {
+        errors.push('APK signature is unverified or invalid. Official Google apksigner verification is strictly required.');
       }
 
       // 4. Manifest & Resource Analysis via AAPT / AAPT2
@@ -288,7 +277,7 @@ export class ApkInspector {
       const md5 = crypto.createHash('md5').update(buffer).digest('hex');
 
       return {
-        isValidApk: errors.length === 0,
+        isValidApk: errors.length === 0 && apksignerVerified === true,
         filename,
         fileSizeBytes: buffer.length,
         sha256,
@@ -399,11 +388,15 @@ export class ApkInspector {
           errors.push(`Bundletool validation failed: ${errMsg.split('\n')[0]}`);
         }
       } else {
-        warnings.push('Google bundletool not found on host; checked ZIP layout only');
+        errors.push('Strict verification failure: Google "bundletool" binary not found on host. Official AAB validation cannot be verified.');
+      }
+
+      if (!bundletoolVerified) {
+        errors.push('AAB validation is unverified or failed. Official Google bundletool validation is strictly required.');
       }
 
       return {
-        isValidAab: errors.length === 0,
+        isValidAab: errors.length === 0 && bundletoolVerified === true,
         filename,
         fileSizeBytes: buffer.length,
         sha256,

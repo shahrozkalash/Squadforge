@@ -168,7 +168,9 @@ export class AndroidEmulatorService {
   /**
    * Starts a genuine Android emulator instance using the host emulator binary
    */
-  public async startEmulator(avdName: string): Promise<{ success: boolean; pid?: number; message: string }> {
+  public async startEmulator(optionsOrAvd?: string | { avdName?: string; headless?: boolean }): Promise<{ success: boolean; pid?: number; message: string }> {
+    const avdName = typeof optionsOrAvd === 'string' ? optionsOrAvd : (optionsOrAvd?.avdName || 'pixel_8');
+    const headless = typeof optionsOrAvd === 'object' && optionsOrAvd !== null ? Boolean(optionsOrAvd.headless) : false;
     const emulatorPath = this.findExecutable('emulator');
     if (!emulatorPath) {
       return {
@@ -178,7 +180,11 @@ export class AndroidEmulatorService {
     }
 
     try {
-      const child = spawn(emulatorPath, ['-avd', avdName, '-no-snapshot', '-no-boot-anim'], {
+      const args = ['-avd', avdName, '-no-snapshot', '-no-boot-anim'];
+      if (headless) {
+        args.push('-no-window');
+      }
+      const child = spawn(emulatorPath, args, {
         detached: true,
         stdio: 'ignore'
       });
@@ -246,19 +252,42 @@ export class AndroidEmulatorService {
   /**
    * Collects recent Logcat lines from a connected device/emulator via `adb logcat -d`
    */
-  public async collectLogcat(serial: string, maxLines: number = 100): Promise<{ success: boolean; logs: string[] }> {
+  public async collectLogcat(
+    serialOrOptions?: string | { deviceSerial?: string; lines?: number; filterTag?: string },
+    maxLines: number = 100
+  ): Promise<{ success: boolean; logs: string[] }> {
+    let serial: string | undefined;
+    let lines = maxLines;
+    let filterTag: string | undefined;
+
+    if (typeof serialOrOptions === 'object' && serialOrOptions !== null) {
+      serial = serialOrOptions.deviceSerial;
+      lines = serialOrOptions.lines ?? maxLines;
+      filterTag = serialOrOptions.filterTag;
+    } else if (typeof serialOrOptions === 'string') {
+      serial = serialOrOptions;
+    }
+
     const adbPath = this.findExecutable('adb');
     if (!adbPath) {
       return { success: false, logs: ['ADB executable not found.'] };
     }
 
+    const args = serial
+      ? ['-s', serial, 'logcat', '-d', '-v', 'time', '-t', String(lines)]
+      : ['logcat', '-d', '-v', 'time', '-t', String(lines)];
+
+    if (filterTag) {
+      args.push('-s', filterTag);
+    }
+
     return new Promise((resolve) => {
-      execFile(adbPath, ['-s', serial, 'logcat', '-d', '-v', 'time', '-t', String(maxLines)], { timeout: 8000 }, (err, stdout) => {
+      execFile(adbPath, args, { timeout: 8000 }, (err, stdout) => {
         if (err || !stdout) {
           return resolve({ success: false, logs: [err?.message || 'Failed to read logcat'] });
         }
-        const lines = stdout.split('\n').filter(l => l.trim().length > 0);
-        resolve({ success: true, logs: lines });
+        const outLines = stdout.split('\n').filter(l => l.trim().length > 0);
+        resolve({ success: true, logs: outLines });
       });
     });
   }
