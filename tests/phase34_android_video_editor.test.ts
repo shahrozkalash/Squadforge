@@ -85,21 +85,45 @@ describe('Phase 34: generated project completeness', () => {
   });
 
   test('generated Kotlin has no broken multi-line string literals', () => {
-    // Regression guard for CI runs 45665260288: single-backslash
-    // escapes in the generator's TS templates turned "\n" inside
-    // Kotlin string literals into real line breaks (EditorOps.kt
-    // captionsToSrt and EditorViewModel.kt export notes), which the
-    // Kotlin compiler rejects. Every generated string literal must
-    // open and close on the same line.
+    // Regression guard for CI runs 45665260288 and 45668710334:
+    // single-backslash escapes in the generator's TS templates
+    // turned "\n" inside Kotlin literals into real line breaks —
+    // first in two string literals (captionsToSrt's cue separator,
+    // EditorViewModel.kt export notes), then in two CHAR literals
+    // ('\n' after the cue index and timestamp line), which a
+    // double-quote-only scan cannot see. The scanner below is
+    // escape- and comment-aware and tracks string AND char
+    // literals; every literal must close on the line it opens.
+    const unterminated = (content: string): number[] => {
+      const bad: number[] = [];
+      let inStr = false, inChar = false, inBlock = false, esc = false;
+      content.split('\n').forEach((line, i) => {
+        let inLineComment = false;
+        for (let j = 0; j < line.length; j++) {
+          const c = line[j], n = line[j + 1] ?? '';
+          if (inLineComment) break;
+          if (inBlock) { if (c === '*' && n === '/') { inBlock = false; j++; } continue; }
+          if (esc) { esc = false; continue; }
+          if ((inStr || inChar) && c === '\\') { esc = true; continue; }
+          if (!inStr && !inChar) {
+            if (c === '/' && n === '/') { inLineComment = true; break; }
+            if (c === '/' && n === '*') { inBlock = true; j++; continue; }
+            if (c === '"') inStr = true;
+            else if (c === "'") inChar = true;
+          } else if (inStr && c === '"') inStr = false;
+          else if (inChar && c === "'") inChar = false;
+        }
+        if (inStr || inChar) { bad.push(i + 1); inStr = false; inChar = false; esc = false; }
+      });
+      return bad;
+    };
     for (const [path, content] of Object.entries(files)) {
       if (!path.endsWith('.kt')) continue;
-      content.split('\n').forEach((line, i) => {
-        const quotes = (line.replace(/\\"/g, '').match(/"/g) || []).length;
-        assert.equal(quotes % 2, 0, `${path}:${i + 1} has an unterminated string literal`);
-      });
+      assert.deepEqual(unterminated(content), [], `${path} has unterminated literals`);
     }
     const ops = kt('/editor/EditorOps.kt');
     assert.ok(ops.includes('out.append(cue.text).append("\\n\\n")'));
+    assert.ok(ops.includes("out.append(index + 1).append('\\n')"));
     const vm = kt('/ui/EditorViewModel.kt');
     assert.ok(vm.includes('"\\nNotes: "'));
   });

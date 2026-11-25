@@ -103,12 +103,34 @@ describe('Phase 35: generated project completeness', () => {
     // Same regression class as the Phase 34 Kotlin failure: a
     // single-backslash escape in a generator template would turn a
     // Swift "\n" into a real line break inside a string literal.
+    // Escape- and comment-aware scanner (string and char literals);
+    // every literal must close on the line it opens.
+    const unterminated = (content: string): number[] => {
+      const bad: number[] = [];
+      let inStr = false, inChar = false, inBlock = false, esc = false;
+      content.split('\n').forEach((line, i) => {
+        let inLineComment = false;
+        for (let j = 0; j < line.length; j++) {
+          const c = line[j], n = line[j + 1] ?? '';
+          if (inLineComment) break;
+          if (inBlock) { if (c === '*' && n === '/') { inBlock = false; j++; } continue; }
+          if (esc) { esc = false; continue; }
+          if ((inStr || inChar) && c === '\\') { esc = true; continue; }
+          if (!inStr && !inChar) {
+            if (c === '/' && n === '/') { inLineComment = true; break; }
+            if (c === '/' && n === '*') { inBlock = true; j++; continue; }
+            if (c === '"') inStr = true;
+            else if (c === "'") inChar = true;
+          } else if (inStr && c === '"') inStr = false;
+          else if (inChar && c === "'") inChar = false;
+        }
+        if (inStr || inChar) { bad.push(i + 1); inStr = false; inChar = false; esc = false; }
+      });
+      return bad;
+    };
     for (const [path, content] of Object.entries(files)) {
       if (!path.endsWith('.swift')) continue;
-      content.split('\n').forEach((line, i) => {
-        const quotes = (line.replace(/\\"/g, '').match(/"/g) || []).length;
-        assert.equal(quotes % 2, 0, `${path}:${i + 1} has an unterminated string literal`);
-      });
+      assert.deepEqual(unterminated(content), [], `${path} has unterminated literals`);
     }
   });
 
@@ -131,6 +153,13 @@ describe('Phase 35: media import, preview, export wiring', () => {
     assert.ok(view.includes('.fileImporter('));
     assert.ok(view.includes('UTType') || view.includes('UniformTypeIdentifiers'));
     const vm = sw('/UI/EditorViewModel.swift');
+    // The picker/transfer types live in CoreTransferable + PhotosUI
+    // and the picker surface in SwiftUI — CI run 45678088776 failed
+    // with all three "cannot find type in scope" until the ViewModel
+    // imported them explicitly.
+    for (const mod of ['import CoreTransferable', 'import PhotosUI', 'import SwiftUI']) {
+      assert.ok(vm.includes(mod), `EditorViewModel must ${mod}`);
+    }
     assert.ok(vm.includes('FileRepresentation(contentType: .movie)'), 'movie transfer copies the picked file');
     assert.ok(vm.includes('startAccessingSecurityScopedResource'), 'document-picker files are copied out of the security scope');
     assert.ok(vm.includes('asset.load(.duration)'), 'metadata is probed with AVFoundation');

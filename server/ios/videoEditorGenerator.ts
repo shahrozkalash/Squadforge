@@ -1511,8 +1511,10 @@ function editorViewModelSwift(): string {
 //
 
 import AVFoundation
+import CoreTransferable
 import Foundation
 import PhotosUI
+import SwiftUI
 import UniformTypeIdentifiers
 
 /// Where imported media lives: the app's Documents/media folder.

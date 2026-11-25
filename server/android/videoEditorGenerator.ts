@@ -693,8 +693,8 @@ object EditorOps {
         }
         val out = StringBuilder()
         project.captions.sortedBy { it.startSec }.forEachIndexed { index, cue ->
-            out.append(index + 1).append('\n')
-            out.append(stamp(cue.startSec)).append(" --> ").append(stamp(cue.endSec)).append('\n')
+            out.append(index + 1).append('\\n')
+            out.append(stamp(cue.startSec)).append(" --> ").append(stamp(cue.endSec)).append('\\n')
             out.append(cue.text).append("\\n\\n")
         }
         return out.toString()
