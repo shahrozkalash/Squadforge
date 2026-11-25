@@ -54,8 +54,9 @@ jobs:
       - name: Install gVisor (runsc)
         run: |
           set -e
-          curl -fsSL -o /tmp/runsc https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc
-          curl -fsSL -o /tmp/runsc.sha512 https://storage.googleapis.com/gvisor/releases/release/latest/x86_64/runsc.sha512
+          # Pinned release: the release/latest/ alias now returns 404 (proven by run 45665209774); 20251110.0 is a real, verified release.
+          curl -fsSL -o /tmp/runsc https://storage.googleapis.com/gvisor/releases/release/20251110.0/x86_64/runsc
+          curl -fsSL -o /tmp/runsc.sha512 https://storage.googleapis.com/gvisor/releases/release/20251110.0/x86_64/runsc.sha512
           expected="$(awk '{print $1}' /tmp/runsc.sha512)"
           actual="$(sha512sum /tmp/runsc | awk '{print $1}')"
           [ "$expected" = "$actual" ] || { echo "runsc checksum mismatch"; exit 1; }
