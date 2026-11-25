@@ -197,15 +197,27 @@ export interface ExportSettings {
   height: number;
   fps: number;
   format: 'mp4';
-  videoCodec: 'libx264';
+  /** The software encoder; Phase 30 widens this to any ffmpeg encoder name resolved by the render engine. */
+  videoCodec: string;
   audioCodec: 'aac';
   videoBitrateKbps: number;
+  /** Phase 30: AAC bitrate (default 160). */
+  audioBitrateKbps?: number;
+  /** Phase 30: the export preset this settings object came from, when any. */
+  preset?: string;
+  /**
+   * Phase 30: 'software' (default) renders with libx264; 'auto' uses the
+   * first hardware encoder that passes a real encode probe; any other
+   * value names a specific encoder. Unavailable or failing hardware
+   * encoders fall back to software automatically, with a note.
+   */
+  encoderPreference?: 'software' | 'auto' | string;
   /** Phase 29: burn project captions into the video (default true when captions exist). */
   burnInCaptions?: boolean;
 }
 
 export interface ExportResult {
-  status: 'success' | 'failed';
+  status: 'success' | 'failed' | 'cancelled';
   outputPath?: string;
   outputBytes?: number;
   durationSec?: number;
@@ -214,6 +226,8 @@ export interface ExportResult {
   error?: string;
   /** Phase 26: honest notes about what was applied (overlays, texts, ignored base transforms). */
   notes?: string[];
+  /** Phase 30: the encoder that actually produced the file (after any fallback). */
+  encoderUsed?: string;
   /** ffprobe facts about the produced file, when it exists. */
   probe?: {
     durationSec: number;

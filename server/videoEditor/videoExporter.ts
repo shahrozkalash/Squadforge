@@ -11,6 +11,7 @@ import type {
 import { mediaKind } from './types.js';
 import { baseVideoTrack, clipDuration, clipSpeed, timelineDuration, validateProject, writeJournal } from './timeline.js';
 import { detectFfmpeg, probeMedia } from './mediaProbe.js';
+import { firstVerifiedHardwareEncoder, verifyEncoder } from './hwAccel.js';
 
 /**
  * Phase 20: real video export through ffmpeg.
@@ -76,20 +77,82 @@ export function rotateFilter(rotationDeg: number, media: MediaAsset): string {
   return `rotate=${rad.toFixed(6)}:c=none`;
 }
 
-export function runFfmpeg(ffmpeg: string, args: string[], timeoutMs: number): Promise<{ code: number; log: string }> {
+export interface RunFfmpegOptions {
+  /** Phase 30: called with ffmpeg's reported elapsed output seconds. */
+  onProgress?: (elapsedSec: number) => void;
+  /** Phase 30: aborting kills the process and resolves as cancelled. */
+  signal?: AbortSignal;
+}
+
+const TIME_RE = /time=(\d+):(\d+):(\d+(?:\.\d+)?)/;
+const LOG_CAP = 512 * 1024;
+
+export function runFfmpeg(
+  ffmpeg: string,
+  args: string[],
+  timeoutMs: number,
+  options: RunFfmpegOptions = {}
+): Promise<{ code: number; log: string; cancelled?: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn(ffmpeg, args, { shell: false });
+    if (options.signal?.aborted) {
+      resolve({ code: -2, log: 'cancelled before start', cancelled: true });
+      return;
+    }
+    // With stderr piped (not a TTY), ffmpeg suppresses its periodic
+    // stats lines — only the final summary appears. The documented
+    // machine-readable channel is `-progress pipe:1`, which emits
+    // out_time_us blocks on stdout throughout the render.
+    const effectiveArgs = options.onProgress ? ['-progress', 'pipe:1', ...args] : args;
+    const child = spawn(ffmpeg, effectiveArgs, { shell: false });
     let log = '';
+    let rolling = '';
+    let lastProgress = -1;
+    let cancelled = false;
     const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stderr?.on('data', (d) => (log += d.toString()));
-    child.stdout?.on('data', (d) => (log += d.toString()));
+    const onAbort = (): void => {
+      cancelled = true;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 1500).unref?.();
+    };
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    const reportElapsed = (elapsed: number): void => {
+      if (elapsed > lastProgress) {
+        lastProgress = elapsed;
+        options.onProgress?.(elapsed);
+      }
+    };
+    const consume = (d: Buffer, isStdout: boolean): void => {
+      const text = d.toString();
+      log += text;
+      // The log is evidence, not storage: keep a bounded tail so a
+      // multi-hour render cannot grow memory without limit.
+      if (log.length > LOG_CAP) log = log.slice(-LOG_CAP / 2);
+      if (!options.onProgress) return;
+      if (isStdout) {
+        // -progress blocks: out_time_us=<microseconds> per block.
+        rolling = (rolling + text).slice(-4096);
+        for (const m of rolling.matchAll(/out_time_(?:us|ms)=(\d+)/g)) {
+          reportElapsed(Number(m[1]) / 1_000_000);
+        }
+      } else {
+        // Fallback: the stderr stats/summary time= token.
+        rolling = (rolling + text).slice(-4096);
+        for (const m of rolling.matchAll(new RegExp(TIME_RE.source, 'g'))) {
+          reportElapsed(Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]));
+        }
+      }
+    };
+    child.stderr?.on('data', (d) => consume(d, false));
+    child.stdout?.on('data', (d) => consume(d, true));
     child.on('error', (err) => {
       clearTimeout(timer);
-      resolve({ code: -1, log: log + String(err) });
+      options.signal?.removeEventListener('abort', onAbort);
+      resolve({ code: -1, log: log + String(err), cancelled });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      resolve({ code: code ?? -1, log });
+      options.signal?.removeEventListener('abort', onAbort);
+      resolve({ code: cancelled ? -2 : code ?? -1, log, cancelled });
     });
   });
 }
@@ -143,7 +206,14 @@ export async function exportVideo(
   mediaAssets: Map<string, MediaAsset>,
   settings: ExportSettings,
   outputPath: string,
-  options: { journalDir?: string; timeoutMs?: number } = {}
+  options: {
+    journalDir?: string;
+    timeoutMs?: number;
+    /** Phase 30: render progress as a 0..1 fraction of the expected duration. */
+    onProgress?: (fraction: number, elapsedSec: number) => void;
+    /** Phase 30: aborting cancels the render; the partial file is removed. */
+    signal?: AbortSignal;
+  } = {}
 ): Promise<ExportResult> {
   const expectedDurationSec = timelineDuration(project);
   const notes: string[] = [];
@@ -525,19 +595,83 @@ export async function exportVideo(
     audioLabel = 'aout';
   }
 
-  const args: string[] = ['-y'];
-  for (const input of inputs) args.push(...input.preArgs, '-i', input.path);
-  args.push('-filter_complex', filters.join(';'));
-  args.push('-map', `[${videoLabel}]`);
-  if (audioLabel) args.push('-map', `[${audioLabel}]`);
-  args.push('-c:v', settings.videoCodec, '-pix_fmt', 'yuv420p', '-r', String(settings.fps), '-b:v', `${settings.videoBitrateKbps}k`);
-  if (audioLabel) args.push('-c:a', settings.audioCodec, '-b:a', '160k');
-  args.push(outputPath);
+  const buildArgs = (codec: string): string[] => {
+    const a: string[] = ['-y'];
+    for (const input of inputs) a.push(...input.preArgs, '-i', input.path);
+    a.push('-filter_complex', filters.join(';'));
+    a.push('-map', `[${videoLabel}]`);
+    if (audioLabel) a.push('-map', `[${audioLabel}]`);
+    a.push('-c:v', codec, '-pix_fmt', 'yuv420p', '-r', String(settings.fps), '-b:v', `${settings.videoBitrateKbps}k`);
+    if (audioLabel) a.push('-c:a', settings.audioCodec, '-b:a', `${settings.audioBitrateKbps ?? 160}k`);
+    a.push(outputPath);
+    return a;
+  };
+
+  // Phase 30: resolve the encoder honestly. 'software' is libx264;
+  // 'auto' picks the first probe-verified hardware encoder; a specific
+  // name is used only if it verifies. Anything else falls back to
+  // software with a note — never a silent or fake "GPU render".
+  let encoderUsed = 'libx264';
+  const preference = settings.encoderPreference ?? 'software';
+  if (preference === 'auto') {
+    const hw = await firstVerifiedHardwareEncoder(ffmpeg);
+    if (hw) {
+      encoderUsed = hw;
+      notes.push(`Hardware encoder ${hw} selected (verified by a real encode probe).`);
+    } else {
+      notes.push('No verified hardware encoder available on this host; rendered with software libx264.');
+    }
+  } else if (preference !== 'software' && preference !== 'libx264') {
+    if (await verifyEncoder(ffmpeg, preference)) {
+      encoderUsed = preference;
+      notes.push(`Hardware encoder ${preference} selected (verified by a real encode probe).`);
+    } else {
+      notes.push(`Requested encoder ${preference} is not available on this host; fell back to software libx264.`);
+    }
+  }
 
   if (options.journalDir) {
     await writeJournal(options.journalDir, 'exporting', `ffmpeg export to ${path.basename(outputPath)} started`);
   }
-  const { code, log } = await runFfmpeg(ffmpeg, args, options.timeoutMs ?? 600_000);
+  const runOptions: RunFfmpegOptions = {
+    signal: options.signal,
+    onProgress: options.onProgress
+      ? (elapsedSec) => options.onProgress!(expectedDurationSec > 0 ? Math.min(1, elapsedSec / expectedDurationSec) : 0, elapsedSec)
+      : undefined
+  };
+  let attempt = await runFfmpeg(ffmpeg, buildArgs(encoderUsed), options.timeoutMs ?? 600_000, runOptions);
+  if (attempt.cancelled) {
+    fs.rmSync(outputPath, { force: true });
+    if (options.journalDir) await writeJournal(options.journalDir, 'export-cancelled', 'render cancelled by request; partial output removed');
+    return {
+      status: 'cancelled',
+      expectedDurationSec,
+      ffmpegLogTail: attempt.log.slice(-1500),
+      error: 'Export cancelled; the partial output file was removed.',
+      notes,
+      encoderUsed
+    };
+  }
+  if (attempt.code !== 0 && encoderUsed !== 'libx264') {
+    // A verified encoder can still fail on a real graph (driver,
+    // format negotiation). Fall back to software once, honestly.
+    notes.push(`Hardware encoder ${encoderUsed} failed on this render (exit ${attempt.code}); retried with software libx264.`);
+    encoderUsed = 'libx264';
+    attempt = await runFfmpeg(ffmpeg, buildArgs(encoderUsed), options.timeoutMs ?? 600_000, runOptions);
+    if (attempt.cancelled) {
+      fs.rmSync(outputPath, { force: true });
+      if (options.journalDir) await writeJournal(options.journalDir, 'export-cancelled', 'render cancelled by request; partial output removed');
+      return {
+        status: 'cancelled',
+        expectedDurationSec,
+        ffmpegLogTail: attempt.log.slice(-1500),
+        error: 'Export cancelled; the partial output file was removed.',
+        notes,
+        encoderUsed
+      };
+    }
+  }
+  const { code, log } = attempt;
   if (code !== 0) {
     if (options.journalDir) await writeJournal(options.journalDir, 'export-failed', `ffmpeg exited ${code}`);
     return fail(`ffmpeg exited with code ${code}`, log);
@@ -567,6 +701,7 @@ export async function exportVideo(
       durationSec: probe.durationSec,
       expectedDurationSec,
       notes,
+      encoderUsed,
       ffmpegLogTail: log.slice(-1500),
       probe: {
         durationSec: probe.durationSec,

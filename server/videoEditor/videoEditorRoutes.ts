@@ -12,6 +12,8 @@ import { computeWaveform } from './waveform.js';
 import { formatCaptions, parseCaptions } from './captions.js';
 import { analyzeMedia } from './aiEditing.js';
 import { captionProviderConfigFromEnv, generateCaptionsWithProvider, type CaptionProviderConfig } from './captionProviders.js';
+import { renderCapabilities, settingsForPreset } from './renderEngine.js';
+import { RenderJobManager } from './renderJobs.js';
 import { detectFfmpeg, detectFfprobe, importMedia } from './mediaProbe.js';
 import type { ExportSettings, SerializedVideoProject } from './types.js';
 import { assertSafeWorkspacePath } from '../pathSecurity.js';
@@ -24,6 +26,18 @@ export interface VideoEditorRouteDependencies {
 export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Router {
   const { requireAuth, verifyBuildOwnership } = deps;
   const router = Router({ mergeParams: true });
+
+  // Phase 30: one background render-job manager per build, persisted
+  // under .video_jobs/<buildId> so interrupted jobs survive restarts.
+  const jobManagers = new Map<string, RenderJobManager>();
+  const jobsFor = (buildId: string): RenderJobManager => {
+    let manager = jobManagers.get(buildId);
+    if (!manager) {
+      manager = new RenderJobManager(path.join(process.cwd(), '.video_jobs', buildId));
+      jobManagers.set(buildId, manager);
+    }
+    return manager;
+  };
 
   const owned = (action: (build: Build, req: Request, res: Response) => Promise<unknown> | unknown) =>
     async (req: Request, res: Response) => {
@@ -242,13 +256,15 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
     const data = req.body?.project as SerializedVideoProject;
     if (!data) return res.status(400).json({ error: 'project is required' });
     const { project, mediaAssets } = deserializeVideoProject(data);
-    const settings: ExportSettings = {
-      ...defaultExportSettings(project),
-      ...(req.body?.settings || {}),
-      format: 'mp4',
-      videoCodec: 'libx264',
-      audioCodec: 'aac'
-    };
+    const settings: ExportSettings = req.body?.preset
+      ? settingsForPreset(project, String(req.body.preset), (req.body?.settings || {}) as Partial<ExportSettings>)
+      : {
+          ...defaultExportSettings(project),
+          ...(req.body?.settings || {}),
+          format: 'mp4',
+          videoCodec: 'libx264',
+          audioCodec: 'aac'
+        };
     const outDir = path.join(process.cwd(), '.video_artifacts', build.id);
     fs.mkdirSync(outDir, { recursive: true });
     const outputPath = path.join(outDir, `${project.name.replace(/[^a-zA-Z0-9_-]/g, '_')}.mp4`);
@@ -259,6 +275,88 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
       result,
       project: serializeVideoProject(project, mediaAssets)
     });
+  }));
+
+  // 5. Phase 30: render capabilities (presets + probe-verified encoders)
+  router.get('/render/capabilities', requireAuth, owned(async (_build, _req, res) => {
+    return res.json({ success: true, capabilities: await renderCapabilities() });
+  }));
+
+  // 6. Phase 30: submit a background render job (202; poll the job).
+  router.post('/export/jobs', requireAuth, owned(async (build, req, res) => {
+    const data = req.body?.project as SerializedVideoProject;
+    if (!data) return res.status(400).json({ error: 'project is required' });
+    const { project, mediaAssets } = deserializeVideoProject(data);
+    const settings: ExportSettings = req.body?.preset
+      ? settingsForPreset(project, String(req.body.preset), (req.body?.settings || {}) as Partial<ExportSettings>)
+      : {
+          ...defaultExportSettings(project),
+          ...(req.body?.settings || {}),
+          format: 'mp4',
+          videoCodec: 'libx264',
+          audioCodec: 'aac'
+        };
+    const manager = jobsFor(build.id);
+    await manager.load();
+    const outDir = path.join(process.cwd(), '.video_artifacts', build.id);
+    fs.mkdirSync(outDir, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+    const outputPath = path.join(outDir, `${project.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_${stamp}.mp4`);
+    const job = await manager.submit({ buildId: build.id, project, mediaAssets, settings, outputPath });
+    return res.status(202).json({ success: true, job });
+  }));
+
+  // 7. Phase 30: list render jobs for this build.
+  router.get('/export/jobs', requireAuth, owned(async (build, _req, res) => {
+    const manager = jobsFor(build.id);
+    await manager.load();
+    return res.json({ success: true, jobs: manager.list(build.id) });
+  }));
+
+  // 8. Phase 30: one render job (progress / status polling).
+  router.get('/export/jobs/:jobId', requireAuth, owned(async (build, req, res) => {
+    const manager = jobsFor(build.id);
+    await manager.load();
+    const job = manager.get(req.params.jobId);
+    if (!job || job.buildId !== build.id) return res.status(404).json({ error: 'render job not found' });
+    return res.json({ success: true, job });
+  }));
+
+  // 9. Phase 30: cancel a queued or running render job.
+  router.post('/export/jobs/:jobId/cancel', requireAuth, owned(async (build, req, res) => {
+    const manager = jobsFor(build.id);
+    await manager.load();
+    const job = manager.get(req.params.jobId);
+    if (!job || job.buildId !== build.id) return res.status(404).json({ error: 'render job not found' });
+    const cancelled = manager.cancel(job.id);
+    return res.json({ success: true, cancelled, job: manager.get(job.id) });
+  }));
+
+  // 10. Phase 30: retry a failed / cancelled / interrupted job.
+  router.post('/export/jobs/:jobId/retry', requireAuth, owned(async (build, req, res) => {
+    const manager = jobsFor(build.id);
+    await manager.load();
+    const job = manager.get(req.params.jobId);
+    if (!job || job.buildId !== build.id) return res.status(404).json({ error: 'render job not found' });
+    const retried = await manager.retry(job.id);
+    return res.status(202).json({ success: true, job: retried });
+  }));
+
+  // 11. Phase 30: delete a finished job's output file (record kept).
+  router.delete('/export/jobs/:jobId/output', requireAuth, owned(async (build, req, res) => {
+    const manager = jobsFor(build.id);
+    await manager.load();
+    const job = manager.get(req.params.jobId);
+    if (!job || job.buildId !== build.id) return res.status(404).json({ error: 'render job not found' });
+    const updated = await manager.deleteOutput(job.id);
+    return res.json({ success: true, job: updated });
+  }));
+
+  // 12. Phase 30: export history (finished jobs, newest first).
+  router.get('/export/history', requireAuth, owned(async (build, _req, res) => {
+    const manager = jobsFor(build.id);
+    await manager.load();
+    return res.json({ success: true, history: manager.history(build.id) });
   }));
 
   return router;
