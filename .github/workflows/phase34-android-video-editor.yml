@@ -49,10 +49,30 @@ jobs:
         run: npm ci
 
       - name: Genuine ClipForge build (Gradle assembleDebug + testDebugUnitTest)
-        run: npx tsx scripts/phase34-genuine-build.ts build | tee phase34-build-output.txt
+        run: |
+          set -eo pipefail
+          npx tsx scripts/phase34-genuine-build.ts build | tee phase34-build-output.txt
 
       - name: Negative test - broken Kotlin source must fail honestly
-        run: npx tsx scripts/phase34-genuine-build.ts broken | tee phase34-broken-output.txt
+        if: always()
+        run: |
+          set -eo pipefail
+          npx tsx scripts/phase34-genuine-build.ts broken | tee phase34-broken-output.txt
+
+      - name: Validate genuine results (fail the workflow on any failed check)
+        if: always()
+        run: |
+          set -e
+          echo "Validating Phase 34 evidence (a green workflow requires every check below):"
+          grep -q '"ok":true' phase34-build-output.txt || { echo "FAIL: build RESULT_JSON is not ok:true"; exit 1; }
+          grep -Eq '"apkBytes":[1-9][0-9]*' phase34-build-output.txt || { echo "FAIL: apkBytes is zero or missing"; exit 1; }
+          grep -q 'UNIT_TESTS tests=' phase34-build-output.txt || { echo "FAIL: no unit-test evidence in the build output"; exit 1; }
+          grep -q 'failures=0 errors=0' phase34-build-output.txt || { echo "FAIL: unit tests had failures or errors"; exit 1; }
+          grep -q 'apksigner verification strictly PASSED' phase34-build-output.txt || { echo "FAIL: apksigner verification did not pass"; exit 1; }
+          grep -q '"ok":true' phase34-broken-output.txt || { echo "FAIL: broken-source negative test did not fail honestly"; exit 1; }
+          APK=$(find .android_artifacts -name '*.apk' -size +0 2>/dev/null | head -1)
+          [ -n "$APK" ] || { echo "FAIL: no non-empty APK artifact on disk"; exit 1; }
+          echo "All Phase 34 checks passed. APK: $APK"
 
       - name: Upload genuine build outputs
         if: always()
@@ -60,6 +80,7 @@ jobs:
         with:
           name: phase34-genuine-artifacts
           path: |
+            .android_artifacts/**/*.apk
             phase34-build-output.txt
             phase34-broken-output.txt
           if-no-files-found: warn
