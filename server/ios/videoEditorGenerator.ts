@@ -1542,14 +1542,14 @@ struct MovieFile: Transferable {
     let url: URL
 
     static var transferRepresentation: some TransferRepresentation {
-        // Export and receive are separate representations in the
-        // builder (the combined receiving trailing-closure form is
-        // rejected by the iOS 18 SDK compiler — CI run 45684915958:
-        // "extra trailing closure passed in call").
+        // FileRepresentation's combined initializer takes the two
+        // closures under the labels exporting / importing (the
+        // iOS 18 SDK has no "receiving" label and no separate
+        // one-closure import/export pair — CI runs 45684915958 and
+        // 45698798182 rejected both shapes).
         FileRepresentation(contentType: .movie) { movie in
             SentTransferredFile(movie.url)
-        }
-        FileRepresentation(contentType: .movie) { received in
+        } importing: { received in
             let ext = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
             let dest = MediaStorage.newFileURL(fileExtension: ext)
             try FileManager.default.copyItem(at: received.file, to: dest)

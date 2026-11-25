@@ -59,7 +59,34 @@ export class ApkInspector {
     for (const p of standardPaths) {
       if (fs.existsSync(p)) return p;
     }
-    // 2. which lookup
+    // 2. SDK roots from the environment (GitHub runners and most
+    // dev machines keep the SDK under ANDROID_HOME / ANDROID_SDK_ROOT,
+    // e.g. /usr/local/lib/android/sdk — the hardcoded paths above
+    // missed it and strict verification failed with "apksigner
+    // binary not found" in Phase 34 CI run 45698797957 even though
+    // the APK had built). Scan every installed build-tools version,
+    // newest first, plus platform-tools.
+    for (const root of [process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT]) {
+      if (!root) continue;
+      const buildToolsDir = path.join(root, 'build-tools');
+      try {
+        const versions = fs
+          .readdirSync(buildToolsDir, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => e.name)
+          .sort()
+          .reverse();
+        for (const v of versions) {
+          const candidate = path.join(buildToolsDir, v, name);
+          if (fs.existsSync(candidate)) return candidate;
+        }
+      } catch {
+        // no build-tools under this root
+      }
+      const platformTools = path.join(root, 'platform-tools', name);
+      if (fs.existsSync(platformTools)) return platformTools;
+    }
+    // 3. which lookup
     try {
       const out = execFileSync('which', [name], { encoding: 'utf-8', timeout: 2000 }).trim();
       if (out && fs.existsSync(out)) return out;

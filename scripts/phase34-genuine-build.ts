@@ -17,6 +17,8 @@
  * Exit code: 0 when the outcome matches the expectation, 1 otherwise.
  * A single RESULT_JSON line is printed for machine-readable evidence.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { AndroidBuildPipeline } from '../server/android/androidBuildPipeline.js';
 import {
   generateVideoEditorProject,
@@ -72,6 +74,44 @@ if (mode === 'broken') {
   process.exit(ok ? 0 : 1);
 }
 
+// Unit-test evidence: read Gradle's own test-results XML from the
+// workspace instead of merely claiming the tests were included
+// (CI run 45698797957's log had no visible test evidence at all).
+let unitTests: { tests: number; failures: number; errors: number; skipped: number; suites: string[] } | null = null;
+try {
+  const resultsDir = path.resolve(
+    process.cwd(),
+    '.android_workspaces',
+    buildId,
+    'app',
+    'build',
+    'test-results',
+    'testDebugUnitTest'
+  );
+  const xmlFiles = fs.readdirSync(resultsDir).filter((f) => f.endsWith('.xml'));
+  if (xmlFiles.length) {
+    unitTests = { tests: 0, failures: 0, errors: 0, skipped: 0, suites: [] };
+    for (const f of xmlFiles) {
+      const xml = fs.readFileSync(path.join(resultsDir, f), 'utf-8');
+      const head = xml.match(/<testsuite[^>]*>/);
+      if (!head) continue;
+      const attr = (name: string) => Number(head[0].match(new RegExp(`${name}="(\\d+)"`))?.[1] || 0);
+      unitTests.tests += attr('tests');
+      unitTests.failures += attr('failures');
+      unitTests.errors += attr('errors');
+      unitTests.skipped += attr('skipped');
+      const suiteName = head[0].match(/name="([^"]+)"/)?.[1];
+      if (suiteName) unitTests.suites.push(suiteName);
+    }
+    console.log(
+      `UNIT_TESTS tests=${unitTests.tests} failures=${unitTests.failures} errors=${unitTests.errors} skipped=${unitTests.skipped} suites=${unitTests.suites.join(',')}`
+    );
+  }
+} catch {
+  unitTests = null;
+}
+if (!unitTests) console.log('UNIT_TESTS none found (test-results XML missing)');
+
 const ok = result.status === 'success' && Boolean(apkBuffer);
 console.log(
   'RESULT_JSON ' +
@@ -83,6 +123,7 @@ console.log(
       apkBytes: apkBuffer?.length || 0,
       apkSha256: result.apkChecksum || null,
       unitTestsIncluded: true,
+      unitTests,
       buildId
     })
 );
