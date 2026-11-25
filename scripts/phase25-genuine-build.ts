@@ -71,6 +71,10 @@ for (const a of result.artifacts) console.log(`ARTIFACT ${a.filename} kind=${a.k
 for (const d of result.diagnostics.slice(0, 10)) {
   console.log(`DIAG [${d.severity}] ${d.file}:${d.line ?? ''} ${d.message}`);
 }
+if (result.outputTail) {
+  console.log('=== XCODEBUILD OUTPUT TAIL ===');
+  console.log(result.outputTail);
+}
 console.log('buildId:', buildId);
 
 if (result.status === 'environment-unavailable') {

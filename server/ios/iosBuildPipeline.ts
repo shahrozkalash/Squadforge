@@ -24,6 +24,12 @@ function run(cmd: string, args: string[], cwd: string, timeoutMs: number): Promi
   });
 }
 
+/** Last lines of a tool's combined output, for failure surfacing. */
+export function outputTail(output: string, lines: number = 40): string {
+  const all = output.split('\n').filter((l) => l.trim().length > 0);
+  return all.slice(-lines).join('\n');
+}
+
 /** Parse xcodebuild's `path:line:col: error|warning: message` diagnostic lines. */
 export function parseXcodeDiagnostics(output: string): IosDiagnostic[] {
   const diagnostics: IosDiagnostic[] = [];
@@ -149,7 +155,7 @@ export class IosBuildPipeline {
       if (list.code !== 0) {
         const diagnostics = parseXcodeDiagnostics(list.output);
         log('ERROR', 'LIST', '`xcodebuild -list` rejected the project');
-        return { buildId, status: 'failed', durationMs: Date.now() - started, destination, environment, logs, diagnostics, artifacts: [], ipaNote: null, error: 'xcodebuild -list failed; see diagnostics/output' };
+        return { buildId, status: 'failed', durationMs: Date.now() - started, destination, environment, logs, diagnostics, artifacts: [], ipaNote: null, error: 'xcodebuild -list failed; see diagnostics/output', outputTail: outputTail(list.output) };
       }
       log('INFO', 'LIST', 'xcodebuild accepted the project and listed its schemes');
 
@@ -171,7 +177,7 @@ export class IosBuildPipeline {
       fs.writeFileSync(path.join(workspace, 'xcodebuild.log'), build.output);
       if (build.code !== 0) {
         log('ERROR', 'BUILD', `xcodebuild exited ${build.code} with ${diagnostics.filter((d) => d.severity === 'error').length} error(s)`);
-        return { buildId, status: 'failed', durationMs: Date.now() - started, destination, environment, logs, diagnostics, artifacts: [], ipaNote: null, error: 'xcodebuild build failed; see diagnostics' };
+        return { buildId, status: 'failed', durationMs: Date.now() - started, destination, environment, logs, diagnostics, artifacts: [], ipaNote: null, error: 'xcodebuild build failed; see diagnostics', outputTail: outputTail(build.output) };
       }
       log('INFO', 'BUILD', 'xcodebuild build succeeded (unsigned, CODE_SIGNING_ALLOWED=NO)');
 

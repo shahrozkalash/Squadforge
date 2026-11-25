@@ -99,6 +99,13 @@ export interface IosBuildResult {
   /** Set when IPA export was requested but could not be performed. */
   ipaNote: string | null;
   error: string | null;
+  /**
+   * Tail of the raw xcodebuild output when a step fails without
+   * producing parseable `path:line: error:` diagnostics, so the
+   * actual failure is visible to callers instead of being lost with
+   * the ephemeral build workspace.
+   */
+  outputTail?: string;
 }
 
 export interface IosValidationResult {
