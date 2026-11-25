@@ -59,6 +59,7 @@ import { createDeploymentRouter, serveStaticDeployment } from './server/deployme
 import { createAndroidRouter } from './server/android/index.js';
 import { createDesktopRouter } from './server/desktop/index.js';
 import { createImageEditorRouter } from './server/imageEditor/index.js';
+import { createVideoEditorRouter } from './server/videoEditor/index.js';
 
 
 dotenv.config();
@@ -2615,6 +2616,12 @@ app.use('/api/builds/:id/desktop', createDesktopRouter({
 
 // Image Editing Engine (Phase 19)
 app.use('/api/builds/:id/image-editor', createImageEditorRouter({
+  requireAuth,
+  verifyBuildOwnership
+}));
+
+// Video Editing Engine (Phase 20)
+app.use('/api/builds/:id/video-editor', createVideoEditorRouter({
   requireAuth,
   verifyBuildOwnership
 }));
