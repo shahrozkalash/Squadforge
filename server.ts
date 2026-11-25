@@ -60,6 +60,7 @@ import { createAndroidRouter } from './server/android/index.js';
 import { createDesktopRouter } from './server/desktop/index.js';
 import { createImageEditorRouter } from './server/imageEditor/index.js';
 import { createVideoEditorRouter } from './server/videoEditor/index.js';
+import { createScene3dRouter } from './server/scene3d/index.js';
 
 
 dotenv.config();
@@ -2622,6 +2623,12 @@ app.use('/api/builds/:id/image-editor', createImageEditorRouter({
 
 // Video Editing Engine (Phase 20)
 app.use('/api/builds/:id/video-editor', createVideoEditorRouter({
+  requireAuth,
+  verifyBuildOwnership
+}));
+
+// 3D Creation Engine (Phase 21)
+app.use('/api/builds/:id/scene3d', createScene3dRouter({
   requireAuth,
   verifyBuildOwnership
 }));

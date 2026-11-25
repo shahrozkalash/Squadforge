@@ -70,6 +70,7 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 18 | Desktop Development Engine (Windows first). Implemented and verified on 2026-11-25, including a genuine local `dotnet build` of a generated project producing a PE-verified Windows `.exe`. See `PHASE_18_ACCEPTANCE_REPORT.md`. |
 | Phase 19 | Image Editing Engine. Implemented and verified on 2026-11-25: real pixel/layer/tool engine with PNG/BMP codecs (24/24 tests) plus a generated C# editor app that compiles genuinely via the Phase 18 pipeline. See `PHASE_19_ACCEPTANCE_REPORT.md`. |
 | Phase 20 | Video Editing Engine. Implemented and verified on 2026-11-25: multitrack timeline model with validated operations, genuine ffmpeg exports (crossfades, titles, effects, audio mix) validated by ffprobe (15/15 tests), journal-based recovery, plus a generated C# editor app that compiles genuinely. See `PHASE_20_ACCEPTANCE_REPORT.md`. |
+| Phase 21 | 3D Creation Engine. Implemented and verified on 2026-11-25: scene graph with primitives/materials/lights/keyframe animation, a genuine z-buffer software renderer (17/17 tests), real OBJ and glTF 2.0 export, plus a generated C# 3D app that compiles genuinely via the Phase 18 pipeline. See `PHASE_21_ACCEPTANCE_REPORT.md`. |
 
 Later roadmap:
 
