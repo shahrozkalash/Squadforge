@@ -1,6 +1,6 @@
 # SquadForge Phase 12 Progress: Automated Testing and Quality Assurance
 
-**Status:** Implemented & verified — awaiting owner acceptance
+**Status:** Implemented & verified — **accepted by the project owner on 2026-11-25**
 **Branch / Integration:** `main`
 **Base commit inspected:** `c6e90c1` (latest `main` when work began, 2026-11-07)
 **Date:** 2026-11-25

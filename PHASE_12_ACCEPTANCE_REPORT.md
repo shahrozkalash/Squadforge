@@ -1,9 +1,7 @@
 # Phase 12 Acceptance Report
 
-**Status:** Implemented and verified. **Not yet accepted** — acceptance is
-the project owner's decision, per the phase-acceptance process.
-**Recommendation:** Recommend acceptance, with the limitations and the two
-pre-existing failures below kept on record.
+**Status:** **Accepted by the project owner on 2026-11-25**, with the
+limitations and the two pre-existing failures below kept on record.
 **Assessed base commit:** `c6e90c1` on `main` (latest commit when the audit
 began, 2026-11-07)
 **Date:** 2026-11-25
@@ -113,8 +111,9 @@ both directions (evidence → passed, no evidence → skipped).
 
 ## Decisions for the owner
 
-1. **Accept Phase 12, or ask for changes.** Phase 13–17 already exist, so
-   acceptance here is about the record, not about unblocking later work.
+1. **Accept Phase 12, or ask for changes.** Accepted on 2026-11-25.
+   Phase 13–17 already exist, so acceptance here is about the record, not
+   about unblocking later work.
 2. **Should below-goal coverage fail the verification verdict?** Today it
    is a blocked check and a named risk. Making it a hard gate would change
    verdicts for projects that currently verify with thin test suites.
