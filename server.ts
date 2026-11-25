@@ -58,6 +58,7 @@ import { createGitHubRouter } from './server/github/index.js';
 import { createDeploymentRouter, serveStaticDeployment } from './server/deployment/index.js';
 import { createAndroidRouter } from './server/android/index.js';
 import { createDesktopRouter } from './server/desktop/index.js';
+import { createImageEditorRouter } from './server/imageEditor/index.js';
 
 
 dotenv.config();
@@ -2608,6 +2609,12 @@ app.use('/api/builds/:id/android', createAndroidRouter({
 
 // Desktop Development Engine (Phase 18)
 app.use('/api/builds/:id/desktop', createDesktopRouter({
+  requireAuth,
+  verifyBuildOwnership
+}));
+
+// Image Editing Engine (Phase 19)
+app.use('/api/builds/:id/image-editor', createImageEditorRouter({
   requireAuth,
   verifyBuildOwnership
 }));

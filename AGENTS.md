@@ -68,6 +68,7 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 16 | Production Readiness and Intelligence. Implemented and verified on 2026-11-06. See `PHASE_16_ACCEPTANCE_REPORT.md`. |
 | Phase 17 | Native Android Development Engine. Implemented and verified on 2026-11-06. See `PHASE_17_ACCEPTANCE_REPORT.md`. |
 | Phase 18 | Desktop Development Engine (Windows first). Implemented and verified on 2026-11-25, including a genuine local `dotnet build` of a generated project producing a PE-verified Windows `.exe`. See `PHASE_18_ACCEPTANCE_REPORT.md`. |
+| Phase 19 | Image Editing Engine. Implemented and verified on 2026-11-25: real pixel/layer/tool engine with PNG/BMP codecs (24/24 tests) plus a generated C# editor app that compiles genuinely via the Phase 18 pipeline. See `PHASE_19_ACCEPTANCE_REPORT.md`. |
 
 Later roadmap:
 
