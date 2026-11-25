@@ -1,12 +1,20 @@
 # Phase 35 Progress — Native iOS Video Editor (ClipForge)
 
-Status: implemented and verified locally on 2026-11-25. Genuine
-Xcode compilation is **pending** — it runs in the Phase 35 CI
-workflow on a macOS runner (native iOS builds are impossible on
-this host; the Phase 25 pipeline reports environment-unavailable
-here by design), and the workflow file reaches the repo through
-the GitHub web UI because the GitHub App cannot push workflow
-files. Final acceptance remains the project owner's decision.
+Status: implemented and verified locally on 2026-11-25, and
+**genuinely compile-verified in CI on 2026-11-26** — run
+[45700928726](https://github.com/shahrozkalash/Squadforge/actions/runs/45700928726)
+(macos-15, Xcode 16.4) returned `ok:true`: ClipForge.app
+executable 72,232 bytes (sha256 `2b83a46d…c95759`), Mach-O
+universal x86_64 + arm64, bundle id `com.squadforge.clipforge`,
+swiftc ops checks passed. It took five CI runs; runs #1–#4 each
+failed on a distinct root cause in the generated Swift, all
+fixed in the generator (full history in the acceptance report).
+Genuine Xcode compilation runs in the Phase 35 CI workflow on a
+macOS runner (native iOS builds are impossible on this host; the
+Phase 25 pipeline reports environment-unavailable here by design),
+and the workflow file reached the repo through the GitHub web UI
+because the GitHub App cannot push workflow files. Final
+acceptance remains the project owner's decision.
 
 ## What was built
 

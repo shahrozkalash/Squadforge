@@ -1,11 +1,13 @@
 # Phase 32 Progress — Production Execution Infrastructure
 
-Status: **implemented and locally verified on 2026-11-25**. Genuine
-daemon evidence (TLS, gVisor, limit enforcement against a real
-dockerd) is **pending the Phase 32 CI run** — the development VM has
-no Docker daemon, no `docker` CLI and no `runsc`, so nothing in this
-phase claims daemon behaviour from local runs. Final acceptance
-remains the project owner's decision.
+Status: **implemented and locally verified on 2026-11-25, and
+proven in CI on 2026-11-25** — run
+[45669432584](https://github.com/shahrozkalash/Squadforge/actions/runs/45669432584)
+passed end to end against a genuine TLS + runsc dockerd (all 7
+gated integration tests; see "Remaining" and the acceptance
+report). The development VM has no Docker daemon, no `docker` CLI
+and no `runsc`, so the daemon evidence comes from CI, not local
+runs. Final acceptance remains the project owner's decision.
 
 Phase 32 extends the Phase 10 execution architecture in
 `server/execution/` in place. No duplicate sandbox system was created.
@@ -135,9 +137,15 @@ Phase 32 extends the Phase 10 execution architecture in
 
 ## Remaining
 
-- **CI evidence**: the Phase 32 workflow has not run yet (the file
-  must be created on GitHub via the web UI first). Until a green run
-  exists, TLS/gVisor/limit enforcement are *implemented and
-  integration-tested in code*, not *proven*.
+- **CI evidence**: DONE — workflow created via the web UI
+  (`70fa5f3`); run #2 (45665209774) failed at the gVisor install
+  (Google retired the `release/latest/` alias, HTTP 404); the
+  workflow now pins gVisor release 20251110.0 (`8064be2`), and
+  run #3 (45669432584) passed all steps: daemon lists runsc,
+  storage overlayfs, gated integration suite **7/7** (valid-cert
+  TLS, wrong-CA rejection, plaintext rejection, runsc isolation,
+  memory-limit termination, pids-limit containment,
+  destroy/orphan-sweep cleanup). TLS/gVisor/limit enforcement
+  are now *proven* at the CI tier.
 - **Real infrastructure**: no production worker exists yet; nothing
   has run against one.

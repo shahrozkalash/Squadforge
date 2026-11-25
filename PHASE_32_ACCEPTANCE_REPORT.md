@@ -1,13 +1,15 @@
 # Phase 32 Acceptance Report — Production Execution Infrastructure
 
-**Status:** Implemented and locally verified on 2026-11-25. Genuine
-daemon evidence is **pending the Phase 32 CI run** — this host has no
-Docker daemon, so TLS, gVisor and limit enforcement have not yet been
-observed against a real dockerd anywhere. Final acceptance remains
-the project owner's decision.
-**Recommendation:** Accept the implementation with the CI run as the
-remaining gate. Do not treat any Docker/TLS/gVisor/quota behaviour as
-proven until the workflow below is green.
+**Status:** Implemented and locally verified on 2026-11-25, and
+**proven against a genuine TLS + runsc dockerd in CI** on
+2026-11-25: run
+[45669432584](https://github.com/shahrozkalash/Squadforge/actions/runs/45669432584)
+passed end to end, including all 7 gated Docker integration tests
+(see "CI tested" below). Final acceptance remains the project
+owner's decision.
+**Recommendation:** Accept. The CI tier is proven; the only
+unproven tier is a real production worker, which does not exist
+yet.
 
 ## Evidence, in three tiers
 
@@ -77,18 +79,47 @@ in the test file. They prove SquadForge-side logic only.
   and classifies as `CANCELLED`. Verified: Phase 9 gate-bypass +
   Phase 33 suites, 48 pass / 1 gated skip / 0 fail.
 
-### CI tested — PENDING
+### CI tested — PROVEN (2026-11-25)
 
-`.github/workflows/phase32-execution-verify.yml` exists locally and
-must be created on GitHub via the web UI (the GitHub App cannot push
-workflow files), then run. It builds a real TLS-verified dockerd with
-the runsc runtime on the runner and runs
+`.github/workflows/phase32-execution-verify.yml` was created on
+GitHub via the web UI (commit `70fa5f3`; the GitHub App cannot push
+workflow files). It builds a real TLS-verified dockerd with the
+runsc runtime on the runner and runs
 `tests/phase32_docker_integration.test.ts` with
-`DOCKER_INTEGRATION=1`: valid-certificate TLS connection, wrong-CA
-certificate rejection, plaintext-to-TLS-port rejection, runsc
-execution verified by `docker inspect`, memory-limit OOM kill,
-pids-limit containment, and destroy/sweep cleanup leaving zero
-labelled resources. **No CI result exists yet.**
+`DOCKER_INTEGRATION=1`.
+
+Run history:
+
+- Run #1 (45658590636) was triggered by the workflow creation
+  itself, before the Phase 32 code was on main; not meaningful.
+- Run #2 (45665209774, commit `8910208f`) passed the unit suites
+  and the sandbox image build, then failed at "Install gVisor
+  (runsc)": Google has retired the `release/latest/` download
+  alias (HTTP 404 for both `runsc` and `runsc.sha512`, verified
+  directly). The integration tests never ran.
+- The workflow now pins gVisor release **20251110.0** (verified
+  200 for binary + sha512 before pinning; commit `8064be2`).
+- **Run #3
+  ([45669432584](https://github.com/shahrozkalash/Squadforge/actions/runs/45669432584),
+  commit `8064be2`) — SUCCESS, all steps.** Daemon: Docker Engine
+  29.4.2, containerd v2.4.2, runc 1.5.3; `docker info` lists
+  `"runsc": {"path": "/usr/local/bin/runsc"}` among the runtimes;
+  storage driver overlayfs. The gated integration suite passed
+  **7/7** (verbatim test names from the step log):
+
+  1. TLS connection to the daemon succeeds with the client
+     certificate and the daemon accepts the request
+  2. a client certificate signed by a different CA is rejected
+     by the daemon
+  3. a plaintext HTTP request to the TLS listener is rejected
+  4. containers run under runsc with a writable isolated
+     filesystem and do not leak processes after exit
+  5. a container that exceeds its memory limit is terminated by
+     the runtime
+  6. the pids limit kills additional processes inside the
+     container
+  7. destroy and orphan sweep remove the container, its
+     processes, and its network namespace
 
 ### Real infrastructure tested — NONE
 

@@ -1,11 +1,17 @@
 # Phase 35 Acceptance Report — Native iOS Video Editor
 
-**Status:** Implemented and verified locally on 2026-11-25; genuine
-Xcode compilation evidence is pending the CI workflow run (see
-"Not demonstrated"). Final acceptance remains the project owner's
-decision.
-**Recommendation:** Safe to keep. Do not treat the generated app as
-compile-verified until the Phase 35 CI run lands.
+**Status:** Implemented and verified locally on 2026-11-25, and
+**genuinely compile-verified in CI** on 2026-11-26: run
+[45700928726](https://github.com/shahrozkalash/Squadforge/actions/runs/45700928726)
+(macos-15, Xcode 16.4) returned `ok:true` — xcodebuild produced
+the ClipForge .app (executable **72,232 bytes**, sha256
+`2b83a46dbdfe9d4bd68f0bb0dab965b9dcc0833b83dcf30832d84d25c6f95759`,
+**Mach-O universal x86_64 + arm64**, bundle id
+`com.squadforge.clipforge`), and the swiftc ops checks passed.
+Final acceptance remains the project owner's decision.
+**Recommendation:** Accept. The generated app is compile-verified
+end to end; the remaining limitations below are behavioural, not
+build evidence.
 
 ## What this phase delivered
 
@@ -24,25 +30,43 @@ compile-verified until the Phase 35 CI run lands.
 | 11 | Project save/reopen integration with the existing engine | **Done.** Optional client for the Phase 31 `/project/load` + `/project/save` endpoints with the user's own session cookie, translating the SerializedVideoProject envelope both ways. |
 | 12 | iOS permissions + sandboxed file access | **Done.** Only the photoLibrary usage description (picker-based import); all media copied into Documents; no security-scoped bookmarks needed; paths re-resolve by file name across container changes. |
 | 13 | No whole-video memory loading | **Done and tested.** AVFoundation probing + composition pipelines stream from files; tests scan the import/preview/export sources for whole-file reads. |
-| 14 | Genuine Xcode projects through Phase 25 | **Generator + pipeline wired** (`scripts/phase35-genuine-build.ts` drives the Phase 25 pipeline; the pbxproj patch passes the Phase 25 validator). **.app evidence pending CI** — see below. |
-| 15 | Tests: import, editing ops, persistence, export | **Done** at the level this host supports: 13/13 repo tests (structure, wiring, interop, route) + a swiftc-compiled ops test main (the Android app's EditorOpsTest checks, transposed) that runs in CI. |
+| 14 | Genuine Xcode projects through Phase 25 | **Done and CI-proven.** `scripts/phase35-genuine-build.ts` drives the Phase 25 pipeline; the pbxproj patch passes the Phase 25 validator. Run 45700928726: .app executable 72,232 bytes, sha256 `2b83a46d…c95759`, Mach-O universal, bundle id `com.squadforge.clipforge`. |
+| 15 | Tests: import, editing ops, persistence, export | **Done.** 14/14 repo tests (structure, wiring, interop, route, literal scanners, import guards) + a swiftc-compiled ops test main (the Android app's EditorOpsTest checks, transposed) that runs in CI and passed in run 45700928726 (`OPS_ALL_PASS`). |
 
 ## Check results
 
 | Check | Result |
 | :--- | :--- |
-| Phase 35 tests | 13/13 pass |
-| Phase 25 + 35 regression | 27/27 pass |
+| Phase 35 tests | 14/14 pass |
+| Phase 25 + 35 regression | 27/27 pass (2026-11-25); 58/58 for Phases 17 + 34 + 35 (2026-11-26) |
 | Phase 20/26–31 + 34 regression | 85/85 pass |
+| Genuine Xcode build (CI run 45700928726) | **Pass** — .app 72,232 B executable, Mach-O universal, ops checks pass |
 | Lint / typecheck | Pass (`tsc --noEmit`) |
 | Production build | Pass (`vite build`) |
 
 ## Not demonstrated / limitations
 
-- **Genuine Xcode compilation and the .app** are pending the CI
-  workflow run (the workflow file must be created via the GitHub
-  web UI; the GitHub App cannot push workflow files). This host
-  cannot build iOS apps at all — the standing Phase 25 limitation.
+- **Genuine Xcode compilation and the .app** were proven only
+  after four failing CI runs, each a distinct root cause in the
+  generated Swift, fixed in the generator (never by weakening a
+  check): #1 (45670074609) never acquired a runner (GitHub macOS
+  capacity; cancelled in queue — no build attempted). #2
+  (45678088776): `EditorViewModel.swift` used `Transferable`,
+  `TransferRepresentation` and `PhotosPickerItem` without
+  importing CoreTransferable/SwiftUI → imports added, test-
+  guarded. #3 (45684915958): the `MovieFile` transfer used a
+  combined trailing-closure shape the iOS 18 SDK rejects
+  ("extra trailing closure passed in call") → rewritten. #4
+  (45698798182): the rewrite still missed the initializer's real
+  labels — "missing argument for parameter 'importing'" →
+  `FileRepresentation`'s combined initializer takes its closures
+  as `exporting:` / `importing:`; fixed and test-guarded. #5
+  (45700928726): **full success** (above). The swiftc ops checks
+  passed in every attempted run, including the failures. This
+  host cannot build iOS apps at all — the standing Phase 25
+  limitation — which is why every one of these needed a CI
+  round-trip. The workflow file was created via the GitHub web
+  UI; the GitHub App cannot push workflow files.
 - **No IPA**: no signing team/certificates exist in CI; the Phase
   25 pipeline only attempts IPA export with a configured team and
   otherwise says so. Nothing about signing is fabricated.

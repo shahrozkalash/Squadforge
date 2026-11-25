@@ -1,11 +1,18 @@
 # Phase 34 Progress — Native Android Video Editor (ClipForge)
 
-Status: implemented and verified locally on 2026-11-25. Genuine
-Gradle compilation runs in the Phase 34 CI workflow on a
-GitHub-hosted runner (this host cannot run the Gradle daemon; see
-"Verification"). The workflow file reached the repo through the
-GitHub web UI (commit `f312ce1`) because the GitHub App cannot
-push workflow files. **CI run #1 (45649089150) FAILED genuinely:**
+Status: implemented and verified locally on 2026-11-25, and
+**genuinely compile-verified in CI on 2026-11-26** — run
+[45700928724](https://github.com/shahrozkalash/Squadforge/actions/runs/45700928724)
+returned `ok:true`: APK 12,584,339 bytes (sha256 `7bd6af54…ee216`),
+apksigner verification PASSED, app JVM unit tests 8/8. It took six
+CI runs; runs #1–#5 each failed on a distinct root cause, all
+fixed in the generator/harness (full history in the acceptance
+report). Genuine Gradle compilation runs in the Phase 34 CI
+workflow on a GitHub-hosted runner (this host cannot run the
+Gradle daemon; see "Verification"). The workflow file reached the
+repo through the GitHub web UI (commit `f312ce1`) because the
+GitHub App cannot push workflow files. **CI run #1 (45649089150)
+FAILED genuinely:**
 the build died at `:app:checkDebugAarMetadata` — Media3 1.6.1's
 `media3-datasource`/`media3-database` AAR metadata requires
 compileSdk 35, and the generated project inherited the Phase 17

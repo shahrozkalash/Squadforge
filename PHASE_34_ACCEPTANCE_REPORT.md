@@ -1,11 +1,18 @@
 # Phase 34 Acceptance Report — Native Android Video Editor
 
-**Status:** Implemented and verified locally on 2026-11-25; genuine
-Gradle compilation evidence is pending the CI workflow run (see
-"Not demonstrated"). Final acceptance remains the project owner's
+**Status:** Implemented and verified locally on 2026-11-25, and
+**genuinely compile-verified in CI** on 2026-11-26: run
+[45700928724](https://github.com/shahrozkalash/Squadforge/actions/runs/45700928724)
+returned `ok:true` — a real Gradle build produced the ClipForge
+debug APK (**12,584,339 bytes**, sha256
+`7bd6af54a66dc0aa268761d7a5fa80ed4d642dbc5bfb3b9980cb545e2d3ee216`),
+Google apksigner verification **PASSED**, and the app's own JVM
+unit tests ran green (**8 tests, 0 failures**, incl.
+`EditorOpsTest`). Final acceptance remains the project owner's
 decision.
-**Recommendation:** Safe to keep. Do not treat the generated app as
-compile-verified until the Phase 34 CI run lands.
+**Recommendation:** Accept. The generated app is compile-verified
+end to end; the remaining limitations below are behavioural, not
+build evidence.
 
 ## What this phase delivered
 
@@ -24,31 +31,48 @@ compile-verified until the Phase 34 CI run lands.
 | 11 | Connect to the existing editing API | **Done.** Optional client for the Phase 31 `/project/load` + `/project/save` endpoints with the user's own session cookie. |
 | 12 | Library licenses verified | **Done.** Media3/Compose/coroutines are Apache-2.0; JUnit EPL-1.0 (tests); org.json BSD-style (tests). Listed in the generated README. |
 | 13 | No whole-video memory loading | **Done and tested.** Streaming probe + player/transformer pipelines; tests scan the app sources for whole-file reads/decodes. |
-| 14 | Genuine projects/APKs through Phase 17 | **Generator + pipeline wired** (`scripts/phase34-genuine-build.ts` drives the Phase 17 pipeline with `runTests`). **APK evidence pending CI** — see below. |
-| 15 | Tests: import, editing ops, persistence, export | **Done** at the level this host supports: 13/13 repo tests (structure, wiring, interop, route) + the generated app's own `EditorOpsTest` JVM suite, which runs in CI via `testDebugUnitTest`. |
+| 14 | Genuine projects/APKs through Phase 17 | **Done and CI-proven.** `scripts/phase34-genuine-build.ts` drives the Phase 17 pipeline with `runTests`. Run 45700928724: APK 12,584,339 bytes, sha256 `7bd6af54…ee216`, apksigner verification PASSED. |
+| 15 | Tests: import, editing ops, persistence, export | **Done.** 15/15 repo tests (structure, wiring, interop, route, literal scanners) + the generated app's own `EditorOpsTest` JVM suite, run in CI via `testDebugUnitTest`: 8 tests, 0 failures/errors (Gradle test-results XML, reported by the harness as `unitTests`). |
 
 ## Check results
 
 | Check | Result |
 | :--- | :--- |
-| Phase 34 tests | 13/13 pass |
-| Phase 17 + 34 regression | 42/42 pass |
+| Phase 34 tests | 15/15 pass |
+| Phase 17 + 34 + 35 regression | 58/58 pass |
+| Genuine Gradle build (CI run 45700928724) | **Pass** — APK 12,584,339 B, apksigner PASSED, unit tests 8/8 |
 | Lint / typecheck | Pass (`tsc --noEmit`) |
 | Production build | Pass |
 
 ## Not demonstrated / limitations
 
-- **Genuine Gradle compilation and the APK**: CI run #1
-  (45649089150, workflow commit `f312ce1`) failed at
-  `:app:checkDebugAarMetadata` — Media3 1.6.1 requires
-  compileSdk 35; the generator inherited 34 from Phase 17. No APK
-  was produced and the app's JVM tests never ran (the run's GitHub
-  headline read "Success" only because the harness reports via
-  RESULT_JSON with exit 0 — the JSON said `ok:false`). The fix
-  (compileSdk 35 for the editor config + suppress flag, test-
-  guarded) is implemented locally; compilation evidence awaits
-  the re-run triggered by pushing it. This host cannot run the
-  Gradle daemon — the standing Phase 17 limitation.
+- **Genuine Gradle compilation and the APK** were proven only
+  after five failing CI runs, each a distinct root cause, fixed
+  in the generator/harness (never by weakening a check):
+  #1 (45649089150) Media3 1.6.1 requires compileSdk 35, the
+  generator inherited 34 → editor config pins compileSdk 35.
+  #2 (45665260288) and #3 (45668710334): single-backslash escapes
+  in the generator's TS templates turned `\n` inside two Kotlin
+  string literals — and then two `'\n'` char literals the first
+  scan could not see — into real line breaks in `EditorOps.kt`
+  (`Incorrect character literal`, `apkBytes: 0`) → escapes fixed;
+  the repo suite now scans generated Kotlin/Swift with an
+  escape- and comment-aware literal scanner covering char
+  literals. #4 (45684916243): the EditorScreen overlay label's
+  escaped quotes collapsed into `"""`, a Kotlin raw-string opener
+  that ran the parser to EOF → fixed; the suite now also bans
+  triple quotes in generated Kotlin. #5 (45698797957): the APK
+  **built** (12,584,141 bytes) but strict verification failed —
+  `ApkInspector.findExecutable` never searched `$ANDROID_HOME`,
+  where the runner keeps its SDK → the inspector now scans every
+  build-tools version under `ANDROID_HOME`/`ANDROID_SDK_ROOT`,
+  and the harness reports Gradle's real test-results XML counts
+  instead of a bare claim. #6 (45700928724): **full success**
+  (above). Note the runs' GitHub headlines often read "Success"
+  while the harness RESULT_JSON said `ok:false` — the JSON is
+  the evidence, not the headline. This host cannot run the
+  Gradle daemon — the standing Phase 17 limitation — which is
+  why every one of these needed a CI round-trip.
 - The generated app's GUI was not exercised on a device/emulator.
 - Timeline clip movement is button-driven (±0.5 s), not drag.
 - App export: overlay video tracks not composited, transitions as
