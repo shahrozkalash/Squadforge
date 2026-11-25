@@ -121,6 +121,16 @@ describe('Phase 34: generated project completeness', () => {
       if (!path.endsWith('.kt')) continue;
       assert.deepEqual(unterminated(content), [], `${path} has unterminated literals`);
     }
+    // No generated Kotlin file may contain a triple quote: the
+    // overlay label's escaped quotes once collapsed into """ in
+    // EditorScreen.kt, which Kotlin reads as a raw-string opener
+    // (CI run 45684916243: parser ran to EOF, "Expecting \"\"").
+    for (const [path, content] of Object.entries(files)) {
+      if (!path.endsWith('.kt')) continue;
+      assert.ok(!content.includes('"""'), `${path} must not contain a raw-string opener`);
+    }
+    const screen = kt('/ui/EditorScreen.kt');
+    assert.ok(screen.includes('"\\"" + text.text + "\\" @ "'), 'overlay label quotes the text');
     const ops = kt('/editor/EditorOps.kt');
     assert.ok(ops.includes('out.append(cue.text).append("\\n\\n")'));
     assert.ok(ops.includes("out.append(index + 1).append('\\n')"));

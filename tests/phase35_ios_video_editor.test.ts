@@ -160,6 +160,11 @@ describe('Phase 35: media import, preview, export wiring', () => {
     for (const mod of ['import CoreTransferable', 'import PhotosUI', 'import SwiftUI']) {
       assert.ok(vm.includes(mod), `EditorViewModel must ${mod}`);
     }
+    // Export and receive are separate FileRepresentations; the
+    // combined "} receiving: {" trailing-closure form is rejected
+    // by the iOS 18 SDK compiler (CI run 45684915958).
+    assert.ok(!vm.includes('} receiving: {'), 'no combined receiving trailing closure');
+    assert.equal((vm.match(/FileRepresentation\(contentType: \.movie\)/g) || []).length, 2, 'separate export + receive representations');
     assert.ok(vm.includes('FileRepresentation(contentType: .movie)'), 'movie transfer copies the picked file');
     assert.ok(vm.includes('startAccessingSecurityScopedResource'), 'document-picker files are copied out of the security scope');
     assert.ok(vm.includes('asset.load(.duration)'), 'metadata is probed with AVFoundation');

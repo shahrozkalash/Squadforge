@@ -1767,7 +1767,7 @@ fun EditorScreen(viewModel: EditorViewModel) {
         for (text in project.texts) {
             Row(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    "\"" + text.text + "\" @ " + fmt(text.trackStart),
+                    "\\"" + text.text + "\\" @ " + fmt(text.trackStart),
                     modifier = Modifier.weight(1f)
                 )
                 TextButton(onClick = { viewModel.removeText(text.id) }) { Text("Remove") }
