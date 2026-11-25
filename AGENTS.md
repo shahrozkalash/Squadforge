@@ -61,7 +61,7 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 9 | Advanced Code Generation Engine. Accepted by the owner on 2026-11-05 at `e87efe8`, with the limitations in `PHASE_9_ACCEPTANCE_REPORT.md`. |
 | Phase 10 | Execution environment. Accepted by the owner on 2026-11-05 at `e87efe8`. Off by default and still not ready for production. See `PHASE_10_ACCEPTANCE_REPORT.md`. |
 | Phase 11 | Advanced Debugging and Self-Improvement. Accepted by the owner on 2026-11-05 at `708e761`. Most limitations were then fixed, in two rounds. See `PHASE_11_ACCEPTANCE_REPORT.md`. |
-| Phase 12 | Automated Testing and Quality Assurance. |
+| Phase 12 | Automated Testing and Quality Assurance. Implemented and verified on 2026-11-25: file-level test coverage analysis wired into the verification service, a test-output parsing honesty fix, and the `.env.example` keys restored so the CI integrity test passes. Awaiting owner acceptance. See `PHASE_12_ACCEPTANCE_REPORT.md`. |
 | Phase 13 | Advanced Application Development. Implemented and verified on 2026-11-06. See `PHASE_13_ACCEPTANCE_REPORT.md`. |
 | Phase 14 | GitHub and Project Lifecycle. Implemented and verified on 2026-11-06. See `PHASE_14_ACCEPTANCE_REPORT.md`. |
 | Phase 15 | Deployment and Distribution. Implemented and verified on 2026-11-06. See `PHASE_15_ACCEPTANCE_REPORT.md`. |

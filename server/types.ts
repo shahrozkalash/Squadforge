@@ -646,11 +646,32 @@ export interface BrowserRuntimeVerificationReport {
   dependencyIntegrityVerified: boolean;
 }
 
+/**
+ * Phase 12: file-level automated test coverage for a generated project.
+ * This is a static, deterministic measurement of which testable source
+ * files are exercised by at least one test file. It is NOT line or branch
+ * coverage, and reports must describe it as file-level coverage.
+ */
+export interface TestCoverageReport {
+  totalSourceFiles: number;
+  coveredSourceFiles: number;
+  uncoveredSourceFiles: string[];
+  coveragePercent: number;
+  goalPercent: number;
+  goalMet: boolean;
+  testFileCount: number;
+  declaredTests: number;
+  skippedTests: number;
+  perFile: Array<{ path: string; coveredBy: string[] }>;
+  method: 'file_level_static_analysis';
+}
+
 export interface VerificationReport {
   verdict: VerificationVerdict;
   evaluatedAt: number;
   checks: VerificationCheckItem[];
   requirementsCoveragePercent: number;
+  testCoverage?: TestCoverageReport;
   requirementsReport?: {
     originalRequirements?: string;
     total: number;

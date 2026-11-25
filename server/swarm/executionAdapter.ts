@@ -629,19 +629,29 @@ export class ExecutionAdapter {
       }
     }
 
-    // Fallback: if TAP parser didn't catch individual tests, extract test('...') declarations
+    // Fallback: if TAP parser didn't catch individual tests, extract test('...') declarations.
+    // Phase 12 honesty fix: a declared test with no mention in the runner
+    // output has no execution evidence, so it is reported as skipped —
+    // never as passed. Previously it was counted as passed whenever its
+    // name was absent from the output, which inverted the evidence rule
+    // ("missing execution evidence must not be treated as success").
     if (results.length === 0) {
       for (const tf of testFiles) {
         const matches = tf.content.matchAll(/(?:test|it)(?:\.(skip|only))?\s*\(\s*['"]([^'"]+)['"]/g);
         for (const m of matches) {
           const isSkipped = m[1] === 'skip';
           const name = m[2];
-          const hasError = stdout.includes(name) && (stdout.includes('fail') || stderr.includes('Error'));
+          const mentioned = stdout.includes(name) || stderr.includes(name);
+          const hasError = mentioned && (stdout.includes('fail') || stderr.includes('Error'));
           results.push({
             name,
-            passed: !hasError && !isSkipped,
-            status: isSkipped ? 'skipped' : (hasError ? 'failed' : 'passed'),
-            message: isSkipped ? 'Test marked as skipped' : (hasError ? 'Execution failure reported in test output' : undefined)
+            passed: mentioned && !hasError && !isSkipped,
+            status: isSkipped ? 'skipped' : (!mentioned ? 'skipped' : (hasError ? 'failed' : 'passed')),
+            message: isSkipped
+              ? 'Test marked as skipped'
+              : (!mentioned
+                ? 'No execution evidence found in test output; not counted as passed'
+                : (hasError ? 'Execution failure reported in test output' : undefined))
           });
         }
       }

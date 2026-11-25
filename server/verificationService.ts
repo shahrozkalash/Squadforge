@@ -3,6 +3,7 @@ import { ExecutionAdapter } from './swarm/executionAdapter.js';
 import { ProjectMemoryService } from './swarm/projectMemory.js';
 import { PreviewGenerator } from './swarm/previewGenerator.js';
 import { BrowserRuntimeVerifier } from './swarm/runtimeVerifier.js';
+import { TestCoverageAnalyzer } from './testing/testCoverageAnalyzer.js';
 import { IntegrationAgent } from './swarm/integrationAgent.js';
 import { 
   Build, 
@@ -157,6 +158,37 @@ export class HonestVerificationService {
       for (const t of testReport.details.filter(d => !d.passed)) {
         knownDefects.push(`Failing test "${t.name}": ${t.message || 'Assertion failed'}`);
       }
+    }
+
+    // Phase 12: file-level automated test coverage. The blueprint's
+    // testing strategy sets an 85% automated coverage goal, but pass/fail
+    // counts alone cannot show which source files no test exercises.
+    // Below-goal coverage is reported as a blocked check and an unresolved
+    // risk; it does not by itself fail the verdict, because making it a
+    // hard gate is an owner decision (see PHASE_12_ACCEPTANCE_REPORT.md).
+    const coverageReport = TestCoverageAnalyzer.analyzeProject(files);
+    const coverageStatus: 'passed' | 'blocked' | 'skipped' =
+      coverageReport.totalSourceFiles === 0
+        ? 'skipped'
+        : coverageReport.goalMet
+          ? 'passed'
+          : 'blocked';
+    checks.push({
+      category: 'tests',
+      name: 'Automated Test Coverage (file-level)',
+      status: coverageStatus,
+      passed: coverageStatus === 'passed',
+      evidence: coverageReport.totalSourceFiles === 0
+        ? 'No testable source files in workspace; file-level coverage is not applicable.'
+        : `${coverageReport.coveredSourceFiles}/${coverageReport.totalSourceFiles} testable source file(s) covered by ${coverageReport.testFileCount} test file(s) (${coverageReport.coveragePercent}% file-level coverage, goal ${coverageReport.goalPercent}%). ${coverageReport.declaredTests} test(s) declared, ${coverageReport.skippedTests} skipped. File-level coverage is not line coverage.`,
+      reasonIfSkipped: coverageStatus === 'skipped' ? 'No testable source files in workspace' : undefined
+    });
+
+    if (coverageReport.totalSourceFiles > 0 && !coverageReport.goalMet) {
+      const untested = coverageReport.uncoveredSourceFiles.slice(0, 5).join(', ');
+      unresolvedRisks.push(
+        `Automated test coverage ${coverageReport.coveragePercent}% is below the ${coverageReport.goalPercent}% goal. Untested source file(s): ${untested}${coverageReport.uncoveredSourceFiles.length > 5 ? ` and ${coverageReport.uncoveredSourceFiles.length - 5} more` : ''}.`
+      );
     }
 
     // Production build check
@@ -471,6 +503,7 @@ export class HonestVerificationService {
       evaluatedAt: Date.now(),
       checks,
       requirementsCoveragePercent,
+      testCoverage: coverageReport,
       syntaxChecksPassed: syntaxPassed,
       typeChecksPassed: typePassed,
       previewMode: previewResult.mode,
