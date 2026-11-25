@@ -108,6 +108,18 @@ export interface TimelineClip {
   effects?: ClipEffectInstance[];
   /** Phase 28: transform keyframes (clip-local time). */
   keyframes?: Keyframe[];
+  /** Phase 29: audio fade-in length (seconds of timeline time). Audio-bearing clips only. */
+  fadeInSec?: number;
+  /** Phase 29: audio fade-out length (seconds of timeline time). */
+  fadeOutSec?: number;
+}
+
+/** Phase 29: one caption/subtitle cue on the project's caption track. */
+export interface CaptionCue {
+  id: string;
+  startSec: number;
+  endSec: number;
+  text: string;
 }
 
 /** Phase 28: transition kinds, mapped to ffmpeg xfade names in effects.ts. */
@@ -152,6 +164,10 @@ export interface TimelineTrack {
   kind: 'video' | 'audio';
   name: string;
   clips: TimelineClip[];
+  /** Phase 29: track-level gain multiplier (0..2, default 1). Applies to the track's audio. */
+  volume?: number;
+  /** Phase 29: muted tracks contribute no audio to the mix. */
+  muted?: boolean;
 }
 
 export interface Transition {
@@ -172,6 +188,8 @@ export interface VideoProject {
   transitions: Transition[];
   /** Phase 26: text layer elements (optional in Phase 20 projects). */
   texts?: TextElement[];
+  /** Phase 29: caption track cues (optional in pre-Phase 29 projects). */
+  captions?: CaptionCue[];
 }
 
 export interface ExportSettings {
@@ -182,6 +200,8 @@ export interface ExportSettings {
   videoCodec: 'libx264';
   audioCodec: 'aac';
   videoBitrateKbps: number;
+  /** Phase 29: burn project captions into the video (default true when captions exist). */
+  burnInCaptions?: boolean;
 }
 
 export interface ExportResult {

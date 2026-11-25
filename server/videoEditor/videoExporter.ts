@@ -460,33 +460,61 @@ export async function exportVideo(
     notes.push(`Rendered ${textElements.length} text element(s).`);
   }
 
+  // Phase 29: caption burn-in (drawtext per cue, bottom-centre),
+  // above text elements. Disable with settings.burnInCaptions=false.
+  const captionCues = (project.captions ?? []).filter((c) => c.text && c.text.trim());
+  if (captionCues.length > 0 && settings.burnInCaptions !== false) {
+    const font = findFontFile();
+    if (!font) return fail('Captions are present but no usable font file was found on this host for drawtext.');
+    const fontEscaped = font.replace(/\\/g, '/').replace(/:/g, '\\:');
+    for (const cue of captionCues) {
+      const outLabel = `vcap${videoLabel}`;
+      filters.push(
+        `[${videoLabel}]drawtext=fontfile='${fontEscaped}':text='${escapeDrawtext(cue.text)}':fontsize=28:` +
+          `fontcolor=white:borderw=2:box=1:boxcolor=black@0.55:boxborderw=8:x=(w-text_w)/2:y=h-52:` +
+          `enable='between(t,${cue.startSec.toFixed(3)},${cue.endSec.toFixed(3)})'[${outLabel}]`
+      );
+      videoLabel = outLabel;
+    }
+    notes.push(`Burned in ${captionCues.length} caption cue(s).`);
+  }
+
   // Audio: base-clip audio + overlay-clip audio + audio-track clips,
   // each placed on the output timeline. Phase 26: speed uses atempo.
+  // Phase 29: per-track gain and mute, per-clip fade-in/fade-out.
   const audioLabels: string[] = [];
   let audioCount = 0;
-  const addAudio = (clip: TimelineClip, atSec: number) => {
+  const addAudio = (clip: TimelineClip, atSec: number, track?: { volume?: number; muted?: boolean }) => {
     const media = mediaAssets.get(clip.mediaId)!;
     if (!media.hasAudio) return;
+    if (track?.muted) return;
     const idx = useMedia(clip.mediaId);
     const label = `a${audioCount++}`;
     const delayMs = Math.max(0, Math.round(atSec * 1000));
     const tempo = atempoChain(clipSpeed(clip));
+    const effectiveVolume = Math.min(2, Math.max(0, clip.volume * (track?.volume ?? 1)));
+    const dur = clipDuration(clip);
+    const fades: string[] = [];
+    if (clip.fadeInSec && clip.fadeInSec > 0) fades.push(`afade=t=in:st=0:d=${clip.fadeInSec.toFixed(3)}`);
+    if (clip.fadeOutSec && clip.fadeOutSec > 0) {
+      fades.push(`afade=t=out:st=${Math.max(0, dur - clip.fadeOutSec).toFixed(3)}:d=${clip.fadeOutSec.toFixed(3)}`);
+    }
     filters.push(
       `[${idx}:a]atrim=start=${clip.sourceIn}:end=${clip.sourceOut},asetpts=PTS-STARTPTS,` +
-        `${tempo ? `${tempo},` : ''}volume=${clip.volume},adelay=${delayMs}:all=1[${label}]`
+        `${tempo ? `${tempo},` : ''}${fades.length > 0 ? `${fades.join(',')},` : ''}volume=${effectiveVolume.toFixed(3)},adelay=${delayMs}:all=1[${label}]`
     );
     audioLabels.push(label);
   };
-  for (const clip of baseClips) addAudio(clip, outputStartOf(clip));
+  for (const clip of baseClips) addAudio(clip, outputStartOf(clip), base);
   for (const track of overlayTracks) {
     for (const clip of [...track.clips].sort((a, b) => a.trackStart - b.trackStart)) {
-      addAudio(clip, clip.trackStart);
+      addAudio(clip, clip.trackStart, track);
     }
   }
   for (const track of project.tracks) {
     if (track.kind !== 'audio') continue;
     for (const clip of [...track.clips].sort((a, b) => a.trackStart - b.trackStart)) {
-      addAudio(clip, clip.trackStart);
+      addAudio(clip, clip.trackStart, track);
     }
   }
   let audioLabel: string | null = null;

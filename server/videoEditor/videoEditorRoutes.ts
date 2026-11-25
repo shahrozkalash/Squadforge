@@ -8,6 +8,10 @@ import { deserializeVideoProject, serializeVideoProject } from './timeline.js';
 import { applyEditOperation, type EditOperation } from './editingOps.js';
 import { defaultExportSettings, exportVideo } from './videoExporter.js';
 import { playbackInfo, renderPreviewFrame } from './playback.js';
+import { computeWaveform } from './waveform.js';
+import { formatCaptions, parseCaptions } from './captions.js';
+import { analyzeMedia } from './aiEditing.js';
+import { captionProviderConfigFromEnv, generateCaptionsWithProvider, type CaptionProviderConfig } from './captionProviders.js';
 import { detectFfmpeg, detectFfprobe, importMedia } from './mediaProbe.js';
 import type { ExportSettings, SerializedVideoProject } from './types.js';
 import { assertSafeWorkspacePath } from '../pathSecurity.js';
@@ -130,6 +134,107 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
     if (!fs.existsSync(abs)) return res.status(404).json({ error: 'preview frame not found' });
     res.type('png');
     return res.sendFile(abs);
+  }));
+
+  // 3f. Phase 29: import an audio file (e.g. a voiceover recorded in
+  // the browser) into the build's media workspace and probe it.
+  router.post('/media/import', requireAuth, owned(async (build, req, res) => {
+    const filename = path.basename(String(req.body?.filename || ''));
+    const dataBase64 = String(req.body?.dataBase64 || '');
+    if (!filename || !dataBase64) return res.status(400).json({ error: 'filename and dataBase64 are required' });
+    if (!/\.(mp3|wav|m4a|aac|ogg|opus|flac|mp4|mov|webm)$/i.test(filename)) {
+      return res.status(400).json({ error: 'unsupported media extension' });
+    }
+    const data = Buffer.from(dataBase64, 'base64');
+    if (data.length === 0) return res.status(400).json({ error: 'empty upload' });
+    if (data.length > 25 * 1024 * 1024) return res.status(413).json({ error: 'upload exceeds 25 MB' });
+    const baseDir = path.join(process.cwd(), '.video_media', build.id);
+    fs.mkdirSync(baseDir, { recursive: true });
+    const abs = assertSafeWorkspacePath(baseDir, filename);
+    fs.writeFileSync(abs, data);
+    const asset = await importMedia(abs);
+    return res.json({ success: true, asset });
+  }));
+
+  // 3g. Phase 29: waveform peaks computed from the actual audio.
+  router.post('/waveform', requireAuth, owned(async (build, req, res) => {
+    const rel = String(req.body?.path || '');
+    if (!rel) return res.status(400).json({ error: 'path is required' });
+    const baseDir = path.join(process.cwd(), '.video_media', build.id);
+    const abs = assertSafeWorkspacePath(baseDir, rel);
+    const result = await computeWaveform(abs, {
+      bucketsPerSecond: req.body?.bucketsPerSecond ? Number(req.body.bucketsPerSecond) : undefined
+    });
+    if (result.status === 'error') return res.status(422).json({ success: false, error: result.error });
+    return res.json({ success: true, waveform: result });
+  }));
+
+  // 3h. Phase 29: media analysis (scene + silence detection -> suggested cuts).
+  router.post('/analyze', requireAuth, owned(async (build, req, res) => {
+    const rel = String(req.body?.path || '');
+    if (!rel) return res.status(400).json({ error: 'path is required' });
+    const baseDir = path.join(process.cwd(), '.video_media', build.id);
+    const abs = assertSafeWorkspacePath(baseDir, rel);
+    const result = await analyzeMedia(abs, {
+      sceneThreshold: req.body?.sceneThreshold ? Number(req.body.sceneThreshold) : undefined,
+      silenceNoiseDb: req.body?.silenceNoiseDb ? Number(req.body.silenceNoiseDb) : undefined,
+      silenceMinDurationSec: req.body?.silenceMinDurationSec ? Number(req.body.silenceMinDurationSec) : undefined
+    });
+    if (result.status === 'error') return res.status(422).json({ success: false, error: result.error });
+    return res.json({ success: true, analysis: result });
+  }));
+
+  // 3i. Phase 29: caption import (SRT/VTT -> project cues).
+  router.post('/captions/import', requireAuth, owned(async (_build, req, res) => {
+    const data = req.body?.project as SerializedVideoProject;
+    const format = req.body?.format as 'srt' | 'vtt';
+    const content = String(req.body?.content || '');
+    if (!data) return res.status(400).json({ error: 'project is required' });
+    if (format !== 'srt' && format !== 'vtt') return res.status(400).json({ error: "format must be 'srt' or 'vtt'" });
+    if (!content) return res.status(400).json({ error: 'content is required' });
+    const { project, mediaAssets } = deserializeVideoProject(data);
+    const cues = parseCaptions(content, format);
+    project.captions = cues;
+    return res.json({ success: true, imported: cues.length, project: serializeVideoProject(project, mediaAssets) });
+  }));
+
+  // 3j. Phase 29: caption export (project cues -> SRT/VTT text).
+  router.post('/captions/export', requireAuth, owned(async (_build, req, res) => {
+    const data = req.body?.project as SerializedVideoProject;
+    const format = req.body?.format as 'srt' | 'vtt';
+    if (!data) return res.status(400).json({ error: 'project is required' });
+    if (format !== 'srt' && format !== 'vtt') return res.status(400).json({ error: "format must be 'srt' or 'vtt'" });
+    const { project } = deserializeVideoProject(data);
+    return res.json({ success: true, format, content: formatCaptions(project.captions ?? [], format) });
+  }));
+
+  // 3k. Phase 29: automatic captions via the configured provider
+  // adapter (server-side config only; 'none' reports unavailable and
+  // fabricates nothing).
+  router.post('/captions/generate', requireAuth, owned(async (build, req, res) => {
+    const data = req.body?.project as SerializedVideoProject;
+    if (!data) return res.status(400).json({ error: 'project is required' });
+    const rel = String(req.body?.path || '');
+    if (!rel) return res.status(400).json({ error: 'path (media to transcribe) is required' });
+    const baseDir = path.join(process.cwd(), '.video_media', build.id);
+    const abs = assertSafeWorkspacePath(baseDir, rel);
+    const config: CaptionProviderConfig = {
+      ...captionProviderConfigFromEnv(),
+      ...(req.body?.provider === 'whisper-cli' ? { provider: 'whisper-cli' as const } : {}),
+      language: req.body?.language ? String(req.body.language) : undefined
+    };
+    const result = await generateCaptionsWithProvider(abs, config);
+    if (result.status !== 'success') {
+      return res.status(422).json({ success: false, status: result.status, provider: result.provider, error: result.error });
+    }
+    const { project, mediaAssets } = deserializeVideoProject(data);
+    project.captions = result.cues!;
+    return res.json({
+      success: true,
+      provider: result.provider,
+      generated: result.cues!.length,
+      project: serializeVideoProject(project, mediaAssets)
+    });
   }));
 
   // 4. Real export: project JSON -> ffmpeg -> ffprobe-validated MP4

@@ -22,7 +22,8 @@ import {
   validateEffectInstance,
   validateKeyframes
 } from './effects.js';
-import type { ClipEffectInstance, EffectType, Keyframe, TransitionType } from './types.js';
+import type { CaptionCue, ClipEffectInstance, EffectType, Keyframe, TransitionType } from './types.js';
+import { addCaption, removeCaption, updateCaption } from './captions.js';
 
 /**
  * Phase 26: reusable, NON-DESTRUCTIVE editing operations.
@@ -181,6 +182,28 @@ export function setTextKeyframes(project: VideoProject, textId: string, keyframe
   return element;
 }
 
+// ---------------------------------------------------------------- Phase 29 ops
+
+export function setClipFades(project: VideoProject, clipId: string, fadeInSec: number, fadeOutSec: number): TimelineClip {
+  const { clip } = getClip(project, clipId);
+  if (fadeInSec < 0 || fadeOutSec < 0) throw new Error('audio fades cannot be negative');
+  if (fadeInSec + fadeOutSec > clipDuration(clip) + 1e-6) {
+    throw new Error(`audio fades (${fadeInSec}s + ${fadeOutSec}s) exceed the clip duration (${clipDuration(clip)}s)`);
+  }
+  clip.fadeInSec = fadeInSec;
+  clip.fadeOutSec = fadeOutSec;
+  return clip;
+}
+
+export function setTrackVolume(project: VideoProject, trackId: string, volume: number): void {
+  if (volume < 0 || volume > 2) throw new Error('track volume must be between 0 and 2');
+  getTrack(project, trackId).volume = volume;
+}
+
+export function setTrackMuted(project: VideoProject, trackId: string, muted: boolean): void {
+  getTrack(project, trackId).muted = muted;
+}
+
 export type EditOperation =
   | { type: 'addClip'; trackId: string; clip: Parameters<typeof addClip>[3] }
   | { type: 'trim'; clipId: string; sourceIn: number; sourceOut: number; keepEndFixed?: boolean }
@@ -202,14 +225,20 @@ export type EditOperation =
   | { type: 'setKeyframes'; clipId: string; keyframes: Keyframe[] }
   | { type: 'setTextKeyframes'; textId: string; keyframes: Keyframe[] }
   | { type: 'addTransition'; afterClipId: string; durationSec: number; transitionType?: TransitionType }
-  | { type: 'removeTransition'; afterClipId: string };
+  | { type: 'removeTransition'; afterClipId: string }
+  | { type: 'setFades'; clipId: string; fadeInSec: number; fadeOutSec: number }
+  | { type: 'setTrackVolume'; trackId: string; volume: number }
+  | { type: 'setTrackMuted'; trackId: string; muted: boolean }
+  | { type: 'addCaption'; caption: Omit<CaptionCue, 'id'> }
+  | { type: 'updateCaption'; cueId: string; patch: Partial<Omit<CaptionCue, 'id'>> }
+  | { type: 'removeCaption'; cueId: string };
 
 /** The single entry point the routes/UI use — one validated operation at a time. */
 export function applyEditOperation(
   project: VideoProject,
   mediaAssets: Map<string, MediaAsset>,
   op: EditOperation
-): { clip?: TimelineClip; text?: TextElement } {
+): { clip?: TimelineClip; text?: TextElement; caption?: CaptionCue } {
   switch (op.type) {
     case 'addClip':
       return { clip: addClip(project, mediaAssets, op.trackId, op.clip) };
@@ -262,6 +291,21 @@ export function applyEditOperation(
       return {};
     case 'removeTransition':
       removeTransition(project, op.afterClipId);
+      return {};
+    case 'setFades':
+      return { clip: setClipFades(project, op.clipId, op.fadeInSec, op.fadeOutSec) };
+    case 'setTrackVolume':
+      setTrackVolume(project, op.trackId, op.volume);
+      return {};
+    case 'setTrackMuted':
+      setTrackMuted(project, op.trackId, op.muted);
+      return {};
+    case 'addCaption':
+      return { caption: addCaption(project, op.caption) };
+    case 'updateCaption':
+      return { caption: updateCaption(project, op.cueId, op.patch) };
+    case 'removeCaption':
+      removeCaption(project, op.cueId);
       return {};
     default:
       throw new Error(`Unknown edit operation: ${(op as any).type}`);

@@ -13,6 +13,7 @@ import type {
 } from './types.js';
 import { mediaKind } from './types.js';
 import { validateEffectInstance, validateKeyframes, validateTransitionType } from './effects.js';
+import { validateCue } from './captions.js';
 
 /**
  * Phase 20: timeline model operations — pure, validated, and honest.
@@ -52,7 +53,8 @@ export function createProject(name: string, width: number = 1280, height: number
       { id: crypto.randomUUID(), kind: 'audio', name: 'Audio 1', clips: [] }
     ],
     transitions: [],
-    texts: []
+    texts: [],
+    captions: []
   };
 }
 
@@ -100,6 +102,13 @@ function validateClipAgainstMedia(clip: TimelineClip, media: MediaAsset): void {
     throw new Error('speed must be between 0.25 and 4');
   }
   if (clip.transform) validateTransform(clip.transform, media);
+  // Phase 29: audio fades must fit inside the clip's timeline span.
+  const fadeIn = clip.fadeInSec ?? 0;
+  const fadeOut = clip.fadeOutSec ?? 0;
+  if (fadeIn < 0 || fadeOut < 0) throw new Error('audio fades cannot be negative');
+  if (fadeIn + fadeOut > clipDuration(clip) + 1e-6) {
+    throw new Error(`audio fades (${fadeIn}s + ${fadeOut}s) exceed the clip duration (${clipDuration(clip)}s)`);
+  }
 }
 
 /** Phase 26: shared transform validation (also used by the editing operations). */
@@ -333,6 +342,19 @@ export function validateProject(project: VideoProject, mediaAssets: Map<string, 
       errors.push(e.message);
     }
   }
+  // Phase 29: track gain/mute + caption cue validation.
+  for (const track of project.tracks) {
+    if (track.volume !== undefined && (track.volume < 0 || track.volume > 2)) {
+      errors.push(`Track "${track.name}": volume must be between 0 and 2`);
+    }
+  }
+  for (const cue of project.captions ?? []) {
+    try {
+      validateCue(cue);
+    } catch (e: any) {
+      errors.push(`Caption ${cue.id}: ${e.message}`);
+    }
+  }
   return errors;
 }
 
@@ -354,6 +376,7 @@ export function deserializeVideoProject(data: SerializedVideoProject): { project
   const mediaAssets = new Map<string, MediaAsset>();
   for (const m of data.media || []) mediaAssets.set(m.id, m);
   if (!Array.isArray(data.project.texts)) data.project.texts = []; // Phase 20 files predate text layers
+  if (!Array.isArray(data.project.captions)) data.project.captions = []; // pre-Phase 29 files predate captions
   const errors = validateProject(data.project, mediaAssets);
   if (errors.length > 0) throw new Error(`Invalid video project: ${errors.join('; ')}`);
   return { project: data.project, mediaAssets };

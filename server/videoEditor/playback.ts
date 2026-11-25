@@ -443,6 +443,12 @@ export function buildPreviewArgs(
   if (baseEntry?.clip.title && baseEntry.clip.title.trim()) {
     drawtexts.push({ text: baseEntry.clip.title, x: -1, y: -1, fontSize: 36, color: 'white' });
   }
+  // Phase 29: the caption cue active at this instant, bottom-centre
+  // exactly as the exporter burns it in.
+  const activeCue = (project.captions ?? []).find((c) => timeSec >= c.startSec && timeSec < c.endSec && c.text.trim());
+  if (activeCue) {
+    drawtexts.push({ text: activeCue.text, x: -1, y: height - 52, fontSize: 28, color: 'white' });
+  }
   for (const el of project.texts ?? []) {
     if (timeSec >= el.trackStart && timeSec < el.trackStart + el.durationSec && el.text.trim()) {
       const sx = width / project.width;
@@ -474,7 +480,7 @@ export function buildPreviewArgs(
     if (!font) throw new Error('Text is present but no usable font file was found on this host for drawtext.');
     const fontEscaped = font.replace(/\\/g, '/').replace(/:/g, '\\:');
     drawtexts.forEach((d, i) => {
-      const pos = d.x === -1 ? `x=(w-text_w)/2:y=h-70` : `x=${d.x}:y=${d.y}`;
+      const pos = d.x === -1 ? `x=(w-text_w)/2:y=${d.y >= 0 ? d.y : 'h-70'}` : `x=${d.x}:y=${d.y}`;
       const alpha = d.opacity !== undefined && d.opacity < 1 ? `@${d.opacity}` : '';
       const outLabel = `ptx${i}`;
       filters.push(
