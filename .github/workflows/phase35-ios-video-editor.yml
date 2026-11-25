@@ -45,7 +45,9 @@ jobs:
         run: npm ci
 
       - name: Genuine ClipForge iOS build (xcodebuild, unsigned simulator)
-        run: npx tsx scripts/phase35-genuine-build.ts build | tee phase35-build-output.txt
+        run: |
+          set -eo pipefail
+          npx tsx scripts/phase35-genuine-build.ts build | tee phase35-build-output.txt
 
       - name: Verify the harvested .app directly
         run: |
@@ -59,11 +61,28 @@ jobs:
 
       - name: Editor ops checks (swiftc compile + run)
         if: always()
-        run: npx tsx scripts/phase35-genuine-build.ts ops | tee phase35-ops-output.txt
+        run: |
+          set -eo pipefail
+          npx tsx scripts/phase35-genuine-build.ts ops | tee phase35-ops-output.txt
 
       - name: Negative test - broken Swift source must fail honestly
         if: always()
-        run: npx tsx scripts/phase35-genuine-build.ts broken | tee phase35-broken-output.txt
+        run: |
+          set -eo pipefail
+          npx tsx scripts/phase35-genuine-build.ts broken | tee phase35-broken-output.txt
+
+      - name: Validate genuine results (fail the workflow on any failed check)
+        if: always()
+        run: |
+          set -e
+          echo "Validating Phase 35 evidence (a green workflow requires every check below):"
+          grep -q '"ok":true' phase35-build-output.txt || { echo "FAIL: build RESULT_JSON is not ok:true"; exit 1; }
+          grep -Eq '"appBytes":[1-9][0-9]*' phase35-build-output.txt || { echo "FAIL: appBytes is zero or missing"; exit 1; }
+          grep -q '"ok":true' phase35-ops-output.txt || { echo "FAIL: ops checks RESULT_JSON is not ok:true"; exit 1; }
+          grep -q '"ok":true' phase35-broken-output.txt || { echo "FAIL: broken-source negative test did not fail honestly"; exit 1; }
+          APP=$(ls -d .ios_artifacts/*/ClipForge.app 2>/dev/null | head -1)
+          [ -n "$APP" ] && [ -s "$APP/ClipForge" ] || { echo "FAIL: no non-empty ClipForge.app executable on disk"; exit 1; }
+          echo "All Phase 35 checks passed. App: $APP"
 
       - name: Upload genuine artifacts and build outputs
         if: always()
