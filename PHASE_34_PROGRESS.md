@@ -1,12 +1,34 @@
 # Phase 34 Progress — Native Android Video Editor (ClipForge)
 
 Status: implemented and verified locally on 2026-11-25. Genuine
-Gradle compilation is **pending** — it runs in the Phase 34 CI
-workflow on a GitHub-hosted runner (this host cannot run the Gradle
-daemon; see "Verification"), and the workflow file reaches the repo
-through the GitHub web UI because the GitHub App cannot push
-workflow files. Final acceptance remains the project owner's
-decision.
+Gradle compilation runs in the Phase 34 CI workflow on a
+GitHub-hosted runner (this host cannot run the Gradle daemon; see
+"Verification"). The workflow file reached the repo through the
+GitHub web UI (commit `f312ce1`) because the GitHub App cannot
+push workflow files. **CI run #1 (45649089150) FAILED genuinely:**
+the build died at `:app:checkDebugAarMetadata` — Media3 1.6.1's
+`media3-datasource`/`media3-database` AAR metadata requires
+compileSdk 35, and the generated project inherited the Phase 17
+default of 34. (GitHub's headline said "Success" only because the
+harness exits 0 and reports via RESULT_JSON; the RESULT_JSON said
+`ok:false`, no APK was produced, and the JVM tests never ran.)
+Fix: the video editor config now uses compileSdk 35 (targetSdk
+stays 34) with `android.suppressUnsupportedCompileSdk=35` in the
+generated gradle.properties, guarded by a repo test. The re-run
+triggers automatically when the fix is pushed. Final acceptance
+remains the project owner's decision.
+
+**API-client envelope fix (2026-11-25, found during Phase 35):**
+the generated `SquadForgeApi` originally fed the server's
+SerializedVideoProject envelope straight to
+`VideoProject.fromJson` on load (which silently yields an empty
+project — the real project and its media live one level down) and
+sent `{project: <bare project>}` on save, which the server's
+`deserializeVideoProject` rejects. The client now translates the
+envelope both ways (media merged into the project on load; media
+moved out into the envelope on save), guarded by a repo test; the
+Phase 34 suite is 14/14. The iOS client (Phase 35) was written
+against the real envelope from the start.
 
 ## What was built
 

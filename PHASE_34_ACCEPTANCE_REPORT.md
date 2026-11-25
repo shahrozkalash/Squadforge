@@ -38,10 +38,17 @@ compile-verified until the Phase 34 CI run lands.
 
 ## Not demonstrated / limitations
 
-- **Genuine Gradle compilation and the APK** are pending the CI
-  workflow run (the workflow file must be created via the GitHub
-  web UI; the GitHub App cannot push workflow files). This host
-  cannot run the Gradle daemon — the standing Phase 17 limitation.
+- **Genuine Gradle compilation and the APK**: CI run #1
+  (45649089150, workflow commit `f312ce1`) failed at
+  `:app:checkDebugAarMetadata` — Media3 1.6.1 requires
+  compileSdk 35; the generator inherited 34 from Phase 17. No APK
+  was produced and the app's JVM tests never ran (the run's GitHub
+  headline read "Success" only because the harness reports via
+  RESULT_JSON with exit 0 — the JSON said `ok:false`). The fix
+  (compileSdk 35 for the editor config + suppress flag, test-
+  guarded) is implemented locally; compilation evidence awaits
+  the re-run triggered by pushing it. This host cannot run the
+  Gradle daemon — the standing Phase 17 limitation.
 - The generated app's GUI was not exercised on a device/emulator.
 - Timeline clip movement is button-driven (±0.5 s), not drag.
 - App export: overlay video tracks not composited, transitions as

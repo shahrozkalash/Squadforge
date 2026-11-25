@@ -78,6 +78,10 @@ describe('Phase 34: generated project completeness', () => {
       assert.ok(gradle.includes(`androidx.media3:${artifact}:${MEDIA3_VERSION}`), artifact);
     }
     assert.ok(gradle.includes('testImplementation("org.json:json:20230618")'));
+    // Media3 1.6.1 AAR metadata requires compileSdk 35 (CI run
+    // 45649089150 failed at checkDebugAarMetadata with 34).
+    assert.match(gradle, /compileSdk = 35/);
+    assert.ok(files['gradle.properties'].includes('android.suppressUnsupportedCompileSdk=35'));
   });
 
   test('manifest needs no storage permission (picker-based import)', () => {
@@ -152,6 +156,21 @@ describe('Phase 34: media import, preview, export wiring', () => {
     assert.ok(api.includes('"/project/save"'));
     assert.ok(api.includes('"/api/builds/"'));
     assert.ok(api.includes('HttpURLConnection'));
+  });
+
+  test('API client translates the SerializedVideoProject envelope both ways', () => {
+    const api = kt('/editor/SquadForgeApi.kt');
+    // Load: response.project is the envelope; the real project is
+    // envelope.project and media must be merged back into it —
+    // feeding the envelope to fromJson yields an empty project.
+    assert.ok(api.includes('envelope.optJSONObject("project")'));
+    assert.ok(api.includes('merged.put("media", envelope.optJSONArray("media")'));
+    // Save: the body IS the envelope (format/version/project/media),
+    // with media moved out of the project object.
+    assert.ok(api.includes('payload.put("format", "squadforge-video-project")'));
+    assert.ok(api.includes('payload.put("version", 1)'));
+    assert.ok(api.includes('projectJson.remove("media")'));
+    assert.ok(api.includes('payload.put("media", media)'));
   });
 });
 

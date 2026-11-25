@@ -43,6 +43,12 @@ export function getVideoEditorConfig(
   const base = AndroidProjectGenerator.getDefaultConfig(appName, packageName);
   return {
     ...base,
+    // Media3 1.6.1's AAR metadata requires compileSdk 35 — proven by
+    // the first genuine CI run (45649089150), where the Phase 17
+    // default of 34 failed at :app:checkDebugAarMetadata because
+    // media3-datasource / media3-database 1.6.1 demand a newer API
+    // level. targetSdk stays 34.
+    compileSdk: 35,
     // The photo picker and the system document picker grant access
     // to exactly what the user picks, so the editor needs no storage
     // permission at all. INTERNET is only for the optional SquadForge
@@ -66,6 +72,12 @@ export function generateVideoEditorProject(
   const files = AndroidProjectGenerator.generateProjectFiles(config);
   const pkg = config.packageName;
   const root = `app/src/main/java/${packagePath(config)}`;
+
+  // AGP 8.5.1 predates compileSdk 35 and warns about it; the warning
+  // is harmless but noisy, so the generated project suppresses it.
+  if (files['gradle.properties'] && !files['gradle.properties'].includes('android.suppressUnsupportedCompileSdk')) {
+    files['gradle.properties'] += 'android.suppressUnsupportedCompileSdk=35\n';
+  }
 
   // Media3 + test dependencies into the app module.
   const gradleKey = 'app/build.gradle.kts';
@@ -744,6 +756,7 @@ class ProjectStore(context: Context) {
 function squadForgeApiKt(pkg: string): string {
   return `package ${pkg}.editor
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -756,6 +769,14 @@ import java.net.URL
  * stored only in the app's private preferences and sent only to
  * that server. All calls are plain HTTPS/HTTP via HttpURLConnection
  * on a background thread (callers use coroutines).
+ *
+ * Wire format: the server speaks the SerializedVideoProject
+ * envelope — { format: "squadforge-video-project", version: 1,
+ * project: {...}, media: [...] } — with media OUTSIDE the project
+ * object, while this app's model (and its on-device files) keep
+ * media inside VideoProject.toJson(). load/save translate between
+ * the two shapes; feeding the envelope straight to
+ * VideoProject.fromJson would silently yield an empty project.
  */
 class SquadForgeApi(
     private val baseUrl: String,
@@ -784,17 +805,32 @@ class SquadForgeApi(
             throw IllegalStateException("Server load failed (HTTP " + code + "): " + body.take(200))
         }
         val json = JSONObject(body)
-        val projectJson = json.optJSONObject("project")
+        val envelope = json.optJSONObject("project")
             ?: throw IllegalStateException("Server response did not contain a project")
-        return VideoProject.fromJson(projectJson)
+        val inner = envelope.optJSONObject("project")
+            ?: throw IllegalStateException("Server project envelope did not contain a project")
+        // Translate the envelope into the model's shape: media lives
+        // outside the project object on the wire, inside it on device.
+        val merged = JSONObject(inner.toString())
+        merged.put("media", envelope.optJSONArray("media") ?: JSONArray())
+        return VideoProject.fromJson(merged)
     }
 
     fun saveProject(project: VideoProject) {
         val conn = connect("/project/save", "POST")
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
+        // Translate the model into the server's envelope: media moves
+        // out of the project object into the envelope's media array,
+        // which is what deserializeVideoProject on the server expects.
+        val projectJson = project.toJson()
+        val media = projectJson.optJSONArray("media") ?: JSONArray()
+        projectJson.remove("media")
         val payload = JSONObject()
-        payload.put("project", project.toJson())
+        payload.put("format", "squadforge-video-project")
+        payload.put("version", 1)
+        payload.put("project", projectJson)
+        payload.put("media", media)
         conn.outputStream.use { it.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         val code = conn.responseCode
         if (code !in 200..299) {
