@@ -5,6 +5,7 @@
 
 import express, { Router, Request, Response } from 'express';
 import { db } from '../store.js';
+import { auditLog } from '../auditLog.js';
 import { DeploymentService } from './deploymentService.js';
 import { PreDeploymentValidator } from './preDeploymentValidator.js';
 import { DeploymentSecretManager } from './secretManager.js';
@@ -84,7 +85,12 @@ export function createDeploymentRouter(requireAuth: express.RequestHandler): Rou
       const { id } = req.params;
       if (!verifyBuildOwnership(req, res, id)) return;
 
-      const { provider = 'static_host', environment = 'production', config = {}, commitSha, skipApprovalGate } = req.body;
+      // Phase 33 security fix: `skipApprovalGate` is no longer read
+      // from the request body. Any client could previously send it to
+      // bypass the production deployment approval gate entirely. The
+      // service parameter remains for internal/test use only; over
+      // HTTP, production deployments always require approval.
+      const { provider = 'static_host', environment = 'production', config = {}, commitSha } = req.body;
 
       const result = await DeploymentService.createDeployment({
         userId: req.user!.id,
@@ -92,8 +98,14 @@ export function createDeploymentRouter(requireAuth: express.RequestHandler): Rou
         provider,
         environment,
         config,
-        commitSha,
-        skipApprovalGate
+        commitSha
+      });
+
+      auditLog('deployment.create', {
+        actorId: req.user!.id,
+        buildId: id,
+        outcome: result.requiresApproval ? 'pending_approval' : 'created',
+        details: { deploymentId: result.deployment.id, environment, provider }
       });
 
       if (result.requiresApproval) {

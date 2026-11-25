@@ -190,12 +190,18 @@ describe('SquadForge Phase 15: Deployment HTTP Routes & Security Integration', (
       headers,
       body: JSON.stringify({
         provider: 'static_host',
-        environment: 'production',
-        skipApprovalGate: true
+        environment: 'production'
       })
     });
     const initData = await initRes.json();
     const deploymentId = initData.deployment.id;
+    // Phase 33: the skipApprovalGate body flag no longer bypasses the
+    // production approval gate, so release through the real gate.
+    const approveRes = await fetch(`${baseUrl}/api/deployments/${deploymentId}/approve`, {
+      method: 'POST',
+      headers
+    });
+    assert.equal(approveRes.status, 200);
 
     await new Promise(r => setTimeout(r, 400));
 
@@ -212,12 +218,18 @@ describe('SquadForge Phase 15: Deployment HTTP Routes & Security Integration', (
       headers,
       body: JSON.stringify({
         provider: 'static_host',
-        environment: 'production',
-        skipApprovalGate: true
+        environment: 'production'
       })
     });
     const initData = await initRes.json();
     const deploymentId = initData.deployment.id;
+    // Phase 33: the skipApprovalGate body flag no longer bypasses the
+    // production approval gate, so release through the real gate.
+    const approveRes = await fetch(`${baseUrl}/api/deployments/${deploymentId}/approve`, {
+      method: 'POST',
+      headers
+    });
+    assert.equal(approveRes.status, 200);
 
     await new Promise(r => setTimeout(r, 400));
 
@@ -266,12 +278,18 @@ describe('SquadForge Phase 15: Deployment HTTP Routes & Security Integration', (
       headers,
       body: JSON.stringify({
         provider: 'static_host',
-        environment: 'production',
-        skipApprovalGate: true
+        environment: 'production'
       })
     });
     const initData = await initRes.json();
     const deploymentId = initData.deployment.id;
+    // Phase 33: the skipApprovalGate body flag no longer bypasses the
+    // production approval gate, so release through the real gate.
+    const approveRes = await fetch(`${baseUrl}/api/deployments/${deploymentId}/approve`, {
+      method: 'POST',
+      headers
+    });
+    assert.equal(approveRes.status, 200);
 
     await new Promise(r => setTimeout(r, 300));
 

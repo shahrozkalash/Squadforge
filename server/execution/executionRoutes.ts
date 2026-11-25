@@ -1,5 +1,6 @@
 import express from 'express';
 import { db } from '../store.js';
+import { auditLog } from '../auditLog.js';
 import { Build } from '../types.js';
 import { planDependencies } from './dependencyService.js';
 import { ExecutionError, ExecutionSessionManager } from './executionSessionManager.js';
@@ -63,8 +64,13 @@ export function createExecutionRouter(deps: RouteDependencies): express.Router {
 
   router.get('/sessions', owned(build => ({ sessions: db.getExecutionSessions(build.id) })));
 
-  router.post('/sessions', owned((build, req) => {
-    return manager.createSession(build, req.user!);
+  router.post('/sessions', owned(async (build, req) => {
+    const session = await manager.createSession(build, req.user!);
+    auditLog('execution.session.create', {
+      actorId: req.user!.id, buildId: build.id, outcome: 'created',
+      details: { sessionId: (session as any)?.id }
+    });
+    return session;
   }));
 
   router.get('/sessions/:sessionId', owned((build, req) => ({
@@ -95,9 +101,23 @@ export function createExecutionRouter(deps: RouteDependencies): express.Router {
     return manager.startScript(build, req.params.sessionId, script);
   }));
 
-  router.post('/sessions/:sessionId/stop', owned((build, req) => manager.stop(build, req.params.sessionId)));
+  router.post('/sessions/:sessionId/stop', owned(async (build, req) => {
+    const result = await manager.stop(build, req.params.sessionId);
+    auditLog('execution.session.stop', {
+      actorId: req.user!.id, buildId: build.id, outcome: 'stopped',
+      details: { sessionId: req.params.sessionId }
+    });
+    return result;
+  }));
   router.post('/sessions/:sessionId/restart', owned((build, req) => manager.restart(build, req.params.sessionId)));
-  router.delete('/sessions/:sessionId', owned((build, req) => manager.destroySession(build.id, req.params.sessionId)));
+  router.delete('/sessions/:sessionId', owned(async (build, req) => {
+    const result = await manager.destroySession(build.id, req.params.sessionId);
+    auditLog('execution.session.destroy', {
+      actorId: req.user!.id, buildId: build.id, outcome: 'destroyed',
+      details: { sessionId: req.params.sessionId }
+    });
+    return result;
+  }));
 
   router.post('/sessions/:sessionId/preview', owned(async (build, req) => {
     const { preview, url } = await previews.open(build, req.params.sessionId);

@@ -25,7 +25,12 @@ export function getGoogleGenAI(): GoogleGenAI | null {
   if (!currentKey) {
     return null;
   }
-  if (!googleGenAIClient || cachedGeminiKey !== currentKey) {
+  // Phase 33: GEMINI_BASE_URL lets deployments route through a proxy
+  // and lets transport tests exercise this client against a local
+  // endpoint. The cache key includes it so a change takes effect.
+  const baseUrl = process.env.GEMINI_BASE_URL || '';
+  const cacheKey = `${currentKey}|${baseUrl}`;
+  if (!googleGenAIClient || cachedGeminiKey !== cacheKey) {
     try {
       googleGenAIClient = new GoogleGenAI({
         apiKey: currentKey,
@@ -33,9 +38,10 @@ export function getGoogleGenAI(): GoogleGenAI | null {
           headers: {
             'User-Agent': 'SquadForge-Parallel-Swarm',
           },
+          ...(baseUrl ? { baseUrl } : {}),
         },
       });
-      cachedGeminiKey = currentKey;
+      cachedGeminiKey = cacheKey;
     } catch (err) {
       console.error('Failed to initialize GoogleGenAI client');
       return null;

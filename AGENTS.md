@@ -80,6 +80,7 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 29 | Audio, Captions and AI Editing Engine. Implemented and verified on 2026-11-25: per-track gain/mute and per-clip audio fades in the real mix (PCM-measured), streamed waveform peaks from actual audio, caption track with SRT/VTT import/export and burn-in + preview rendering, configurable caption provider adapter (default none; offline whisper-cli; failures never fabricate), scene/silence analysis with suggested cuts from real ffmpeg signal detection, voiceover upload route (10/10 phase tests; 61/61 with Phase 20/26/27/28 regression). See `PHASE_29_ACCEPTANCE_REPORT.md`. |
 | Phase 30 | Rendering and Export Engine. Implemented and verified on 2026-11-25: export presets (source/480p/720p/1080p/4K — real 720p and 4K renders probed), real progress via ffmpeg's -progress channel, cancellation that deletes partial output, background render jobs with persisted state and interrupted-job recovery + retry, probe-verified hardware encoder detection with automatic software fallback (no GPU on this host — detection says so, nothing faked), export history and output management routes (10/10 phase tests; 71/71 with Phase 20/26/27/28/29 regression). See `PHASE_30_ACCEPTANCE_REPORT.md`. |
 | Phase 31 | Cross-Platform Professional Video Editor. Implemented and verified on 2026-11-25: web-based editor served per build (media library, real-frame preview player, multitrack timeline, properties panel, export screen — every control wired to the real API), project create/save/load with journal-based recovery and debounced autosave, keyboard shortcuts, responsive layout, ClipForge desktop app gained caption burn-in and recompiled genuinely, complete end-to-end workflow verified over real HTTP with an ffprobe-validated export (1/1 E2E test; 72/72 with Phase 20/26–30 regression). Android/iOS editor NOT claimed. See `PHASE_31_ACCEPTANCE_REPORT.md`. |
+| Phase 33 | AI Reliability and Production Security. Implemented and verified on 2026-11-25: provider timeout policy (was a hard-coded 8 s; now `PROVIDER_TIMEOUT_MS`, default 120 s) with genuine request abortion, bounded retries for transient failures only (`PROVIDER_MAX_RETRIES`, default 2), `OPENROUTER_BASE_URL`/`GEMINI_BASE_URL` overrides, a client-side bypass of the production deployment approval gate (`skipApprovalGate` in the request body) found and removed with the Phase 15 route tests moved to the real approval flow, and a redacting structured audit log wired into approvals, deployments, execution sessions, rollbacks and GitHub connections (13/13 phase tests over real HTTP transport stubs; full suite 1,121/1,127 with only the 2 known pre-existing failures plus load flakes that pass in isolation). NOT demonstrated: a successful live cloud repair generation — four genuine attempts via the owner's AI Studio credential returned real 503/404 responses or egress timeouts; the gated live test (`LIVE_PROVIDER_TEST=1`) stands ready. See `PHASE_33_ACCEPTANCE_REPORT.md`. |
 
 Later roadmap:
 
@@ -93,12 +94,12 @@ The lockfile was added and deleted repeatedly on `main` before Phase 10, and the
 
 ## Open work
 
-1. Test cancellation against a real provider.
+1. Test cancellation against a real provider. (Phase 33: cancellation, timeout and retry behaviour are proven against real HTTP transports for all three provider paths; a live-provider cancellation run is still open.)
 2. Run the sandbox tests on a real worker, with TLS and gVisor.
 3. Decide on guest execution, the worker, and the preview domain.
 4. Have `invariant-reviewer` check the fixes listed under "Fixed after acceptance" in `PHASE_9_ACCEPTANCE_REPORT.md`, and the relay token.
 5. Expire approval requests the owner never answers. Repairs already close when theirs expire.
-6. Test Phase 11 repairs with a real cloud provider. Only a local model has run so far.
+6. Test Phase 11 repairs with a real cloud provider. Only a local model has run so far. (Phase 33: four genuine Gemini attempts via the owner's AI Studio credential returned real 503/404 responses or egress timeouts — reachability proven, a successful generation still not demonstrated. Run `LIVE_PROVIDER_TEST=1` with a real `GEMINI_API_KEY` to close this.)
 7. Decide whether the older `/rollback-checkpoint` and `/rollback-file` routes need conflict checks.
 8. Decide whether non-sensitive repair rollbacks need approval, and whether to set `REPAIR_AUTO_START`.
 

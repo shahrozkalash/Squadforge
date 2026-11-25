@@ -1,4 +1,5 @@
 import express from 'express';
+import { auditLog } from '../auditLog.js';
 import { db } from '../store.js';
 import { Build, RepairRun } from '../types.js';
 import { requireSameOrigin } from '../execution/executionRoutes.js';
@@ -100,7 +101,13 @@ export function createDebuggingRouter(deps: RouteDependencies): express.Router {
 
   router.post('/repairs/:repairId/rollback', owned(async (build, req) => {
     const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
-    return { repair: publicRun(await coordinator.rollback(build, req.params.repairId, reason)) };
+    const run = await coordinator.rollback(build, req.params.repairId, reason);
+    auditLog('repair.rollback', {
+      actorId: req.user!.id, buildId: build.id,
+      outcome: run.rollback?.state || run.status,
+      details: { repairId: req.params.repairId }
+    });
+    return { repair: publicRun(run) };
   }));
 
   router.post('/repairs/:repairId/verify', owned((build, req) => ({

@@ -14,6 +14,14 @@ import { safeResultCache } from './cache.js';
 import { tokenOptimizer } from './tokenOptimizer.js';
 import { getGoogleGenAI, SILENT_WORKER_SYSTEM_PROMPT, extractAndParseJson } from './gateway.js';
 import { db } from './store.js';
+import {
+  providerTimeoutMs,
+  providerMaxRetries,
+  isRetryableStatus,
+  isRetryableErrorCode,
+  backoffSleep,
+  openRouterBaseUrl
+} from './providerReliability.js';
 
 export interface RouteDecision {
   selectedModel: ModelConfig;
@@ -485,28 +493,45 @@ export class SmartModelRouter {
       }
 
       try {
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          signal: params.signal
-            ? AbortSignal.any([params.signal, AbortSignal.timeout(8000)])
-            : AbortSignal.timeout(8000),
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${openRouterKey}`,
-            'HTTP-Referer': 'https://squadforge.dev',
-            'X-Title': 'SquadForge Swarm'
-          },
-          body: JSON.stringify({
-            model: model.providerModel,
-            messages: [
-              { role: 'system', content: params.systemInstruction },
-              { role: 'user', content: params.prompt }
-            ],
-            temperature: params.temperature ?? 0.2,
-            max_tokens: params.maxTokens ?? 3000,
-            response_format: { type: 'json_object' }
-          })
-        });
+        // Phase 33: configurable timeout (was a hard-coded 8 s, far
+        // shorter than a real generation) and bounded retries for
+        // transient statuses / network failures. A caller abort or a
+        // non-retryable status ends the loop immediately.
+        const maxRetries = providerMaxRetries();
+        let response!: Response;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            response = await fetch(`${openRouterBaseUrl()}/chat/completions`, {
+              method: 'POST',
+              signal: params.signal
+                ? AbortSignal.any([params.signal, AbortSignal.timeout(providerTimeoutMs())])
+                : AbortSignal.timeout(providerTimeoutMs()),
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${openRouterKey}`,
+                'HTTP-Referer': 'https://squadforge.dev',
+                'X-Title': 'SquadForge Swarm'
+              },
+              body: JSON.stringify({
+                model: model.providerModel,
+                messages: [
+                  { role: 'system', content: params.systemInstruction },
+                  { role: 'user', content: params.prompt }
+                ],
+                temperature: params.temperature ?? 0.2,
+                max_tokens: params.maxTokens ?? 3000,
+                response_format: { type: 'json_object' }
+              })
+            });
+          } catch (fetchErr) {
+            if (params.signal?.aborted || attempt >= maxRetries) throw fetchErr;
+            if (!await backoffSleep(attempt, params.signal)) throw fetchErr;
+            continue;
+          }
+          if (response.ok || !isRetryableStatus(response.status) || attempt >= maxRetries || params.signal?.aborted) break;
+          await response.text().catch(() => '');
+          if (!await backoffSleep(attempt, params.signal)) break;
+        }
 
         // Headers for rate limit tracking
         const headers: Record<string, string> = {};
@@ -688,7 +713,32 @@ export class SmartModelRouter {
   /**
    * Direct Gemini 3.8 Flash call via official SDK
    */
+  /**
+   * Phase 33: retry wrapper — transient Gemini failures (rate limit,
+   * network, timeout, 5xx) are retried a bounded number of times with
+   * backoff; caller aborts, auth failures, quota exhaustion and
+   * malformed output are never retried.
+   */
   private async executeGeminiCall(params: {
+    model: ModelConfig;
+    prompt: string;
+    systemInstruction: string;
+    temperature?: number;
+    isFallbackRun: boolean;
+    fallbackReason?: string;
+    signal?: AbortSignal;
+  }): Promise<GatewayResult> {
+    const maxRetries = providerMaxRetries();
+    let result = await this.executeGeminiAttempt(params);
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      if (result.success || params.signal?.aborted || !isRetryableErrorCode(result.errorCode)) break;
+      if (!await backoffSleep(attempt, params.signal)) break;
+      result = await this.executeGeminiAttempt(params);
+    }
+    return result;
+  }
+
+  private async executeGeminiAttempt(params: {
     model: ModelConfig;
     prompt: string;
     systemInstruction: string;
@@ -729,6 +779,22 @@ export class SmartModelRouter {
       ? 'gemini-3.8-flash'
       : (params.model.providerModel ? params.model.providerModel.replace(/^google\//, '') : 'gemini-3.8-flash');
 
+    // Phase 33: the SDK receives an abort signal that genuinely
+    // cancels the request. When the caller supplied a signal it is
+    // passed through unchanged (the Phase 9 contract: the caller's
+    // exact signal reaches the provider). When there is no caller
+    // signal, an internal controller carries the configured timeout
+    // into the SDK, so a timeout aborts the request itself — the
+    // previous code raced an 8 s timer against the request and left
+    // the request running after the "timeout" won.
+    const timeoutMs = providerTimeoutMs();
+    const internal = params.signal ? null : new AbortController();
+    const sdkSignal = params.signal ?? internal!.signal;
+    const timer = internal
+      ? setTimeout(() => internal.abort(new Error(`Gateway timeout (${timeoutMs}ms)`)), timeoutMs)
+      : undefined;
+    timer?.unref?.();
+
     try {
       const genAiCall = genAI.models.generateContent({
         model: targetModel,
@@ -737,30 +803,38 @@ export class SmartModelRouter {
           systemInstruction: specializedSys,
           temperature: params.temperature ?? 0.2,
           responseMimeType: 'application/json',
-          abortSignal: params.signal,
+          abortSignal: sdkSignal,
         }
       });
 
-      let timer: NodeJS.Timeout | undefined;
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Gateway timeout (8000ms)')), 8000);
-        timer?.unref?.();
-      });
-
-      // abortSignal stops the SDK client side, and this race returns control immediately
+      // The race returns control immediately on caller abort or (when
+      // an internal controller is in play) on timeout.
       let onAbort: (() => void) | undefined;
       const abortPromise = new Promise<never>((_, reject) => {
-        onAbort = () => reject(new Error('Model request cancelled'));
-        if (params.signal?.aborted) onAbort();
-        else params.signal?.addEventListener('abort', onAbort, { once: true });
+        onAbort = () => reject(sdkSignal.reason ?? new Error('Model request cancelled'));
+        if (sdkSignal.aborted) onAbort();
+        else sdkSignal.addEventListener('abort', onAbort, { once: true });
       });
+      // With a caller signal, a timeout race still returns control at
+      // the deadline; the caller's own lifecycle owns the request.
+      let timeoutPromise: Promise<never> | undefined;
+      let raceTimer: NodeJS.Timeout | undefined;
+      if (!internal) {
+        timeoutPromise = new Promise<never>((_, reject) => {
+          raceTimer = setTimeout(() => reject(new Error(`Gateway timeout (${timeoutMs}ms)`)), timeoutMs);
+          raceTimer?.unref?.();
+        });
+      }
 
       let response: any;
       try {
-        response = await Promise.race([genAiCall, timeoutPromise, abortPromise]);
+        response = await Promise.race(
+          timeoutPromise ? [genAiCall, abortPromise, timeoutPromise] : [genAiCall, abortPromise]
+        );
       } finally {
         if (timer) clearTimeout(timer);
-        if (onAbort) params.signal?.removeEventListener('abort', onAbort);
+        if (raceTimer) clearTimeout(raceTimer);
+        if (onAbort) sdkSignal.removeEventListener('abort', onAbort);
       }
       const text = response?.text || '';
       const parsed = extractAndParseJson(text);

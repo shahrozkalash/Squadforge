@@ -7,6 +7,7 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import cookieParser from 'cookie-parser';
 import { db } from './server/store.js';
+import { auditLog } from './server/auditLog.js';
 import { modelRegistry } from './server/modelRegistry.js';
 import { SwarmOrchestrator } from './server/swarm/swarmOrchestrator.js';
 import { GitHubService } from './server/github.js';
@@ -865,6 +866,7 @@ const handleOAuthCallback = async (req: express.Request, res: express.Response) 
 
   // 7. Securely store encrypted token with authentic username
   db.setGithubToken(user.id, exchange.token, exchange.username);
+  auditLog('github.connect', { actorId: user.id, outcome: 'oauth', details: { username: exchange.username } });
 
   // 8. Render success page with restricted postMessage target origin (NO wildcard '*')
   return res.send(renderOAuthSuccessHtml(trustedOrigin, exchange.username));
@@ -887,11 +889,13 @@ app.post('/api/auth/github/connect-pat', requireAuth, async (req, res) => {
 
   // Real verified username from GitHub API
   db.setGithubToken(req.user!.id, cleanToken, validUsername);
+  auditLog('github.connect', { actorId: req.user!.id, outcome: 'pat', details: { username: validUsername } });
   res.json({ success: true, username: validUsername });
 });
 
 app.post('/api/auth/github/disconnect', requireAuth, (req, res) => {
   db.disconnectGithub(req.user!.id);
+  auditLog('github.disconnect', { actorId: req.user!.id, outcome: 'disconnected' });
   res.json({ success: true });
 });
 
@@ -1064,6 +1068,10 @@ app.post('/api/builds/:id/rollback-checkpoint', requireAuth, async (req, res) =>
   const { checkpointId } = req.body;
   if (!checkpointId) return res.status(400).json({ error: 'checkpointId is required' });
   const success = await MergeManager.revertToCheckpoint(req.params.id, checkpointId);
+  auditLog('build.rollback_checkpoint', {
+    actorId: req.user!.id, buildId: build.id, outcome: success ? 'reverted' : 'failed',
+    details: { checkpointId }
+  });
   res.json({ success });
 });
 
@@ -1079,6 +1087,10 @@ app.post('/api/builds/:id/rollback-file', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'filePath and version are required' });
   }
   const success = await MergeManager.revertFileVersion(req.params.id, filePath, version);
+  auditLog('build.rollback_file', {
+    actorId: req.user!.id, buildId: build.id, outcome: success ? 'reverted' : 'failed',
+    details: { filePath, version }
+  });
   res.json({ success });
 });
 
@@ -2145,6 +2157,13 @@ app.post('/api/builds/:id/collaboration/approvals/:approvalId/respond', requireA
     repairCoordinator.handleApprovalDecision(decided, req.user!)
       .catch(err => console.error('Repair could not continue:', err.message));
   }
+
+  auditLog('approval.respond', {
+    actorId: req.user!.id,
+    buildId: build.id,
+    outcome: result.success ? (approved ? 'approved' : 'rejected') : 'error',
+    details: { approvalId: req.params.approvalId, status: decided?.status, error: result.success ? undefined : result.error }
+  });
 
   if (!result.success) {
     return res.status(400).json({ error: result.error });
