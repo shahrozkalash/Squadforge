@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
 import Docker from 'dockerode';
 import tar from 'tar-stream';
+import { auditLog } from '../auditLog.js';
 import {
   BackendCapabilities,
   EnvironmentRecord,
@@ -14,8 +15,19 @@ import {
   ProcessHandle,
   ProcessSpec,
   ResourceUsage,
+  WorkerDiagnostics,
+  WorkerHealthSnapshot,
   parseListeningPorts
 } from './executionBackend.js';
+import {
+  DockerConnectionResolution,
+  StorageQuotaDecision,
+  backingFilesystemOf,
+  resolveDockerConnection,
+  storageOptEnforced,
+  storageOptSizeBytes,
+  storageQuotaDecision
+} from './workerConfig.js';
 
 const LABEL_MANAGED = 'squadforge.managed';
 const LABEL_SESSION = 'squadforge.session';
@@ -50,26 +62,34 @@ export function dockerConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Docke
   };
 }
 
+/**
+ * Builds a Docker client from the environment, failing closed: a remote
+ * endpoint is only ever reached over TLS with client certificates, and
+ * any configuration problem throws instead of silently falling back to
+ * a plaintext or local connection (Phase 32).
+ */
 export function dockerClientFromEnv(env: NodeJS.ProcessEnv = process.env): Docker {
-  const { DOCKER_HOST: host, DOCKER_TLS_CA: ca, DOCKER_TLS_CERT: cert, DOCKER_TLS_KEY: key } = env;
-  if (host && ca && cert && key) {
-    const url = new URL(host.replace(/^tcp:/, 'https:'));
+  const connection = resolveDockerConnection(env);
+  if (connection.mode === 'invalid') {
+    throw new Error(`Docker worker configuration is invalid: ${connection.errors.join(' ')}`);
+  }
+  if (connection.mode === 'tls') {
     return new Docker({
-      host: url.hostname,
-      port: Number(url.port || 2376),
+      host: connection.host,
+      port: connection.port,
       protocol: 'https',
-      ca: fs.readFileSync(ca),
-      cert: fs.readFileSync(cert),
-      key: fs.readFileSync(key)
+      ca: fs.readFileSync(connection.caPath),
+      cert: fs.readFileSync(connection.certPath),
+      key: fs.readFileSync(connection.keyPath)
     });
   }
-  return new Docker();
+  return connection.socketPath ? new Docker({ socketPath: connection.socketPath }) : new Docker();
 }
 
 /** Host settings shared by every container, including relays and the egress proxy. */
 export function hardenedHostConfig(
   config: Pick<DockerBackendConfig, 'runtime'>,
-  limits: { memoryMb: number; cpus: number; pids: number; tmpfsMb: number }
+  limits: { memoryMb: number; cpus: number; pids: number; tmpfsMb: number; storageOptSizeBytes?: number }
 ): Docker.HostConfig {
   const memory = limits.memoryMb * 1024 * 1024;
   return {
@@ -83,19 +103,78 @@ export function hardenedHostConfig(
     PidsLimit: limits.pids,
     Tmpfs: { '/tmp': `rw,noexec,nosuid,size=${limits.tmpfsMb}m` },
     LogConfig: { Type: 'json-file', Config: { 'max-size': '10m', 'max-file': '1' } },
+    // Only set when the daemon is known to enforce the size storage
+    // option (see storageQuotaDecision); never passed blindly.
+    ...(limits.storageOptSizeBytes ? { StorageOpt: { size: String(limits.storageOptSizeBytes) } } : {}),
     ...(config.runtime ? { Runtime: config.runtime } : {})
   };
 }
 
 const SERVICE_LIMITS = { memoryMb: 128, cpus: 0.25, pids: 32, tmpfsMb: 8 };
 
+const INFO_CACHE_MS = 15000;
+
 export class DockerBackend implements ExecutionBackend {
   readonly name = 'docker';
 
+  private readonly docker: Docker;
+  private readonly connection: DockerConnectionResolution;
+  /** Set when the worker connection is misconfigured; every operation then fails closed. */
+  private readonly configError?: string;
+  private daemonInfo: any = null;
+  private daemonInfoAt = 0;
+  private healthSnapshot: WorkerHealthSnapshot = { state: 'unknown', consecutiveFailures: 0 };
+
   constructor(
-    private readonly docker: Docker = dockerClientFromEnv(),
-    private readonly config: DockerBackendConfig = dockerConfigFromEnv()
-  ) {}
+    docker?: Docker,
+    private readonly config: DockerBackendConfig = dockerConfigFromEnv(),
+    env: NodeJS.ProcessEnv = process.env
+  ) {
+    const connection = resolveDockerConnection(env);
+    this.connection = connection;
+    if (docker) {
+      // An explicitly provided client (tests, embeddings) is the
+      // caller's responsibility; env resolution is then only used to
+      // label diagnostics.
+      this.docker = docker;
+    } else if (connection.mode !== 'invalid') {
+      this.docker = dockerClientFromEnv(env);
+    } else {
+      this.configError = `Docker worker configuration is invalid: ${connection.errors.join(' ')}`;
+      // Never used: assertConfigured() refuses every operation first.
+      this.docker = new Docker();
+    }
+  }
+
+  /** The configuration error that disables this backend, if any. */
+  configurationError(): string | undefined {
+    return this.configError;
+  }
+
+  private assertConfigured(): void {
+    if (this.configError) throw new Error(this.configError);
+  }
+
+  /** Daemon info, cached briefly; null when the daemon cannot be read. */
+  private async refreshInfo(force = false): Promise<any | null> {
+    if (!force && this.daemonInfo && Date.now() - this.daemonInfoAt < INFO_CACHE_MS) return this.daemonInfo;
+    try {
+      this.daemonInfo = await this.docker.info();
+      this.daemonInfoAt = Date.now();
+      return this.daemonInfo;
+    } catch {
+      return null;
+    }
+  }
+
+  private runtimeVerified(info: any): boolean {
+    if (!this.config.runtime) return true;
+    return Boolean(info?.Runtimes && Object.prototype.hasOwnProperty.call(info.Runtimes, this.config.runtime));
+  }
+
+  private quotaDecision(): StorageQuotaDecision | null {
+    return this.daemonInfo ? storageQuotaDecision(this.daemonInfo) : null;
+  }
 
   private networkName(sessionId: string) { return `sf-net-${sessionId}`; }
   private volumeName(sessionId: string) { return `sf-ws-${sessionId}`; }
@@ -108,20 +187,179 @@ export class DockerBackend implements ExecutionBackend {
   }
 
   async capabilities(): Promise<BackendCapabilities> {
+    if (this.configError) {
+      auditLog('execution.backend.fail_closed', {
+        outcome: 'disabled',
+        details: { reason: this.configError }
+      });
+      return { available: false, backend: this.name, reason: this.configError };
+    }
     try {
       await this.docker.ping();
     } catch (err: any) {
       return { available: false, backend: this.name, reason: `Docker worker is unreachable: ${err.message}` };
+    }
+    const info = await this.refreshInfo();
+    if (this.config.runtime && info && !this.runtimeVerified(info)) {
+      // A configured sandbox runtime the daemon does not have must
+      // never degrade silently to the default runtime.
+      const reason =
+        `SANDBOX_RUNTIME is set to "${this.config.runtime}" but the Docker worker does not list it ` +
+        'among its runtimes. Execution stays disabled rather than falling back to another runtime.';
+      auditLog('execution.backend.fail_closed', {
+        outcome: 'disabled',
+        details: { reason, configuredRuntime: this.config.runtime }
+      });
+      return { available: false, backend: this.name, reason };
     }
     try {
       await this.docker.getImage(this.config.image).inspect();
     } catch {
       return { available: false, backend: this.name, reason: `Sandbox image ${this.config.image} is not on the worker.` };
     }
-    return { available: true, backend: this.name, runtime: this.config.runtime || 'runc' };
+    return { available: true, backend: this.name, runtime: this.config.runtime || info?.DefaultRuntime || 'runc' };
+  }
+
+  /**
+   * Phase 32 health probe: ping + daemon info + configured-runtime
+   * verification. Throws on any failure; updates the health snapshot
+   * either way.
+   */
+  async checkWorker(): Promise<void> {
+    try {
+      this.assertConfigured();
+      await this.docker.ping();
+      const info = await this.refreshInfo(true);
+      if (!info) throw new Error('The Docker worker did not return daemon info');
+      if (!this.runtimeVerified(info)) {
+        throw new Error(`The Docker worker does not list the configured runtime "${this.config.runtime}"`);
+      }
+      this.healthSnapshot = { state: 'healthy', lastCheckedAt: Date.now(), consecutiveFailures: 0 };
+    } catch (err: any) {
+      this.healthSnapshot = {
+        state: 'unhealthy',
+        lastCheckedAt: Date.now(),
+        lastError: err.message || 'Worker check failed',
+        consecutiveFailures: this.healthSnapshot.consecutiveFailures + 1
+      };
+      throw err;
+    }
+  }
+
+  /** Phase 32: redacted worker diagnostics. Never includes certificate contents. */
+  async diagnostics(): Promise<WorkerDiagnostics> {
+    const diagnostics: WorkerDiagnostics = {
+      backend: this.name,
+      available: false,
+      checkedAt: Date.now(),
+      health: { ...this.healthSnapshot }
+    };
+    const connection = this.connection;
+    diagnostics.endpoint = connection.endpoint;
+    diagnostics.tls = connection.mode === 'tls'
+      ? {
+          enabled: true,
+          caFile: connection.caPath,
+          certFile: connection.certPath,
+          keyFile: connection.keyPath,
+          filesPresent: {
+            ca: fs.existsSync(connection.caPath),
+            cert: fs.existsSync(connection.certPath),
+            key: fs.existsSync(connection.keyPath)
+          }
+        }
+      : { enabled: false };
+    if (this.configError) {
+      diagnostics.configError = this.configError;
+      diagnostics.daemon = { reachable: false, workspaceQuota: 'soft-polling' };
+      return diagnostics;
+    }
+
+    let reachable = false;
+    try {
+      await this.docker.ping();
+      reachable = true;
+    } catch {
+      reachable = false;
+    }
+    const info = reachable ? await this.refreshInfo() : null;
+    const version: any = reachable ? await this.docker.version().catch(() => null) : null;
+    const decision = info ? storageQuotaDecision(info) : null;
+    const runtimeOk = info ? this.runtimeVerified(info) : false;
+    diagnostics.daemon = {
+      reachable,
+      version: version?.Version,
+      apiVersion: version?.ApiVersion,
+      os: version?.Os,
+      arch: version?.Arch,
+      runtimes: info?.Runtimes ? Object.keys(info.Runtimes) : undefined,
+      configuredRuntime: this.config.runtime,
+      runtimeVerified: this.config.runtime ? runtimeOk : undefined,
+      storageDriver: info?.Driver,
+      backingFilesystem: info ? backingFilesystemOf(info) : undefined,
+      containerLayerQuota: decision?.mode,
+      workspaceQuota: 'soft-polling'
+    };
+    let imagePresent: boolean | undefined;
+    if (reachable) {
+      imagePresent = await this.docker.getImage(this.config.image).inspect().then(() => true).catch(() => false);
+    }
+    diagnostics.image = { name: this.config.image, present: imagePresent };
+    diagnostics.available = reachable && runtimeOk && imagePresent === true;
+    return diagnostics;
+  }
+
+  /**
+   * Phase 32 recovery sweep: removes SquadForge-managed containers,
+   * volumes and networks whose session is not live. Resources without a
+   * session label (the shared edge network, per-build dependency
+   * caches) are never touched here.
+   */
+  async sweepOrphans(liveSessionIds: ReadonlySet<string>): Promise<{ containers: number; volumes: number; networks: number }> {
+    this.assertConfigured();
+    let containers = 0;
+    let volumes = 0;
+    let networks = 0;
+
+    const containerList = await this.docker.listContainers({
+      all: true,
+      filters: { label: [`${LABEL_MANAGED}=true`] }
+    }).catch(() => []);
+    for (const entry of containerList) {
+      const sessionId = entry.Labels?.[LABEL_SESSION];
+      if (sessionId && !liveSessionIds.has(sessionId)) {
+        await this.docker.getContainer(entry.Id).remove({ force: true, v: true }).catch(() => undefined);
+        containers++;
+      }
+    }
+
+    const { Volumes } = await this.docker.listVolumes({
+      filters: { label: [`${LABEL_MANAGED}=true`] }
+    }).catch(() => ({ Volumes: [] as any[] }));
+    for (const volume of Volumes || []) {
+      const sessionId = volume.Labels?.[LABEL_SESSION];
+      if (sessionId && !liveSessionIds.has(sessionId)) {
+        await this.docker.getVolume(volume.Name).remove().catch(() => undefined);
+        volumes++;
+      }
+    }
+
+    const networkList = await this.docker.listNetworks({
+      filters: { label: [`${LABEL_MANAGED}=true`] }
+    }).catch(() => []);
+    for (const network of networkList) {
+      const sessionId = (network as any).Labels?.[LABEL_SESSION];
+      if (sessionId && !liveSessionIds.has(sessionId)) {
+        await this.docker.getNetwork((network as any).Id || (network as any).Name).remove().catch(() => undefined);
+        networks++;
+      }
+    }
+
+    return { containers, volumes, networks };
   }
 
   async createEnvironment(spec: EnvironmentSpec): Promise<void> {
+    this.assertConfigured();
     const labels = this.labels(spec.sessionId, spec.buildId, 'environment');
     await this.docker.createNetwork({
       Name: this.networkName(spec.sessionId),
@@ -158,7 +396,7 @@ export class DockerBackend implements ExecutionBackend {
       const { StatusCode } = await container.wait();
       if (StatusCode !== 0) throw new Error(`Volume preparation failed with exit code ${StatusCode}`);
     } finally {
-      await container.remove({ force: true }).catch(() => undefined);
+      await container.remove({ force: true, v: true }).catch(() => undefined);
     }
   }
 
@@ -177,11 +415,12 @@ export class DockerBackend implements ExecutionBackend {
     try {
       return await action(container);
     } finally {
-      await container.remove({ force: true }).catch(() => undefined);
+      await container.remove({ force: true, v: true }).catch(() => undefined);
     }
   }
 
   async uploadWorkspace(sessionId: string, archive: Buffer): Promise<void> {
+    this.assertConfigured();
     await this.withVolumeHelper(sessionId, container =>
       container.putArchive(Readable.from([archive]), { path: WORKSPACE })
     );
@@ -201,7 +440,17 @@ export class DockerBackend implements ExecutionBackend {
   }
 
   async startProcess(sessionId: string, spec: ProcessSpec, onOutput: OutputListener): Promise<ProcessHandle> {
+    this.assertConfigured();
     const buildId = await this.buildIdForSession(sessionId);
+
+    // The size storage option is only passed when this daemon is known
+    // to enforce it; on other daemons the workspace limit stays the
+    // explicitly soft polled limit in the session manager.
+    await this.refreshInfo();
+    const decision = this.quotaDecision();
+    const storageBytes = decision && storageOptEnforced(decision)
+      ? storageOptSizeBytes(spec.limits.workspaceMb)
+      : undefined;
 
     const binds = [`${this.volumeName(sessionId)}:${WORKSPACE}`];
     if (spec.mountDependencyCache) binds.push(`${this.cacheName(buildId)}:/cache`);
@@ -224,7 +473,7 @@ export class DockerBackend implements ExecutionBackend {
         Env: env,
         Labels: this.labels(sessionId, buildId, 'process'),
         HostConfig: {
-          ...hardenedHostConfig(this.config, spec.limits),
+          ...hardenedHostConfig(this.config, { ...spec.limits, storageOptSizeBytes: storageBytes }),
           Binds: binds,
           NetworkMode: this.networkName(sessionId)
         }
@@ -267,7 +516,7 @@ export class DockerBackend implements ExecutionBackend {
     await Promise.race([outputEnded, new Promise(resolve => { timer = setTimeout(resolve, 1000); })]);
     clearTimeout(timer);
     const details = await container.inspect().catch(() => null);
-    await container.remove({ force: true }).catch(() => undefined);
+    await container.remove({ force: true, v: true }).catch(() => undefined);
     return { exitCode: status.StatusCode, oomKilled: Boolean(details?.State?.OOMKilled) };
   }
 
@@ -309,7 +558,7 @@ export class DockerBackend implements ExecutionBackend {
   }
 
   private async stopEgressProxy(sessionId: string): Promise<void> {
-    await this.docker.getContainer(this.egressName(sessionId)).remove({ force: true }).catch(() => undefined);
+    await this.docker.getContainer(this.egressName(sessionId)).remove({ force: true, v: true }).catch(() => undefined);
   }
 
   private async ensureEdgeNetwork(): Promise<void> {
@@ -371,6 +620,7 @@ export class DockerBackend implements ExecutionBackend {
   }
 
   async openPreview(sessionId: string, processId: string, port: number): Promise<PreviewEndpoint> {
+    this.assertConfigured();
     await this.closePreview(sessionId);
     await this.ensureEdgeNetwork();
 
@@ -405,7 +655,7 @@ export class DockerBackend implements ExecutionBackend {
   }
 
   async closePreview(sessionId: string): Promise<void> {
-    await this.docker.getContainer(this.relayName(sessionId)).remove({ force: true }).catch(() => undefined);
+    await this.docker.getContainer(this.relayName(sessionId)).remove({ force: true, v: true }).catch(() => undefined);
   }
 
   async destroyEnvironment(sessionId: string): Promise<void> {
@@ -414,7 +664,7 @@ export class DockerBackend implements ExecutionBackend {
       filters: { label: [`${LABEL_SESSION}=${sessionId}`] }
     });
     await Promise.all(containers.map(c =>
-      this.docker.getContainer(c.Id).remove({ force: true }).catch(() => undefined)
+      this.docker.getContainer(c.Id).remove({ force: true, v: true }).catch(() => undefined)
     ));
     await this.docker.getNetwork(this.networkName(sessionId)).remove().catch(() => undefined);
     await this.docker.getVolume(this.volumeName(sessionId)).remove().catch(() => undefined);

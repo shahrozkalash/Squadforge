@@ -529,7 +529,11 @@ export class SmartModelRouter {
             continue;
           }
           if (response.ok || !isRetryableStatus(response.status) || attempt >= maxRetries || params.signal?.aborted) break;
-          await response.text().catch(() => '');
+          // Drain the body before retrying. A body-read failure here
+          // (including a caller abort landing mid-read) must not
+          // escape as a network error: the abort and status checks
+          // below classify the attempt correctly.
+          try { await response.text(); } catch (_) {}
           if (!await backoffSleep(attempt, params.signal)) break;
         }
 

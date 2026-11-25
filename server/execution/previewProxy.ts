@@ -1,4 +1,6 @@
+import fs from 'node:fs';
 import http from 'node:http';
+import https from 'node:https';
 import net from 'node:net';
 import { Duplex } from 'node:stream';
 import { PreviewSession } from '../types.js';
@@ -57,7 +59,7 @@ function connectRelay(preview: PreviewSession, onConnect?: () => void): net.Sock
   return socket;
 }
 
-export function createPreviewServer(service: PreviewSessionService): http.Server {
+export function createPreviewServer(service: PreviewSessionService): http.Server | https.Server {
   const { config } = service;
   const hostPattern = new RegExp(`^(pv[0-9a-f]{24})\\.${escapeForRegExp(config.baseDomain || '')}(?::\\d+)?$`, 'i');
   const frameAncestors = `frame-ancestors ${new URL(config.appOrigin).origin}`;
@@ -65,7 +67,7 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
   const previewIdFor = (req: http.IncomingMessage) =>
     hostPattern.exec(req.headers.host || '')?.[1]?.toLowerCase() ?? null;
 
-  const server = http.createServer((req, res) => {
+  const handler = (req: http.IncomingMessage, res: http.ServerResponse) => {
     const previewId = previewIdFor(req);
     if (!previewId) {
       res.writeHead(404).end('Not found');
@@ -135,7 +137,23 @@ export function createPreviewServer(service: PreviewSessionService): http.Server
       res.end('The project is not responding.');
     });
     req.pipe(upstream);
-  });
+  };
+
+  // Phase 32: when PREVIEW_TLS_CERT and PREVIEW_TLS_KEY are configured
+  // the preview listener terminates TLS itself. A half-configured or
+  // unreadable pair is a startup error, never a silent HTTP fallback.
+  let server: http.Server | https.Server;
+  if (config.tlsCertPath || config.tlsKeyPath) {
+    if (!config.tlsCertPath || !config.tlsKeyPath) {
+      throw new Error('PREVIEW_TLS_CERT and PREVIEW_TLS_KEY must be configured together.');
+    }
+    server = https.createServer(
+      { cert: fs.readFileSync(config.tlsCertPath), key: fs.readFileSync(config.tlsKeyPath) },
+      handler
+    );
+  } else {
+    server = http.createServer(handler);
+  }
 
   // WebSocket upgrades carry the same authorization as HTTP, for dev server hot reload
   server.on('upgrade', (req, socket: Duplex, head) => {

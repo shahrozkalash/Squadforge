@@ -62,6 +62,21 @@ export function createExecutionRouter(deps: RouteDependencies): express.Router {
     project: planDependencies(db.getAllFiles(build.id))
   })));
 
+  /**
+   * Phase 32: worker connection diagnostics. Build ownership is checked
+   * like every route here, and on top of that only server
+   * administrators (MODEL_ADMIN_USER_IDS) may see worker details. The
+   * payload is redacted by construction: endpoints, certificate paths
+   * and presence — never certificate contents or keys.
+   */
+  router.get('/worker/diagnostics', owned(async (build, req) => {
+    const admins = (process.env.MODEL_ADMIN_USER_IDS || '').split(',').map(id => id.trim()).filter(Boolean);
+    if (!req.user || !admins.includes(req.user.id)) {
+      throw new ExecutionError('Worker diagnostics are restricted to server administrators', 403);
+    }
+    return { diagnostics: await manager.workerDiagnostics() };
+  }));
+
   router.get('/sessions', owned(build => ({ sessions: db.getExecutionSessions(build.id) })));
 
   router.post('/sessions', owned(async (build, req) => {

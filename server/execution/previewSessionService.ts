@@ -17,6 +17,11 @@ export interface PreviewConfig {
   idleTimeoutMs: number;
   portWaitMs: number;
   portPollMs: number;
+  /** Phase 32: HMAC secret for signed preview link tokens. Falls back to ENCRYPTION_SECRET, then an ephemeral per-process secret. */
+  tokenSecret?: string;
+  /** Phase 32: when both are set, the preview listener terminates TLS itself. */
+  tlsCertPath?: string;
+  tlsKeyPath?: string;
 }
 
 export function previewConfigFromEnv(env: NodeJS.ProcessEnv = process.env): PreviewConfig {
@@ -31,9 +36,58 @@ export function previewConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Prev
     appOrigin: env.APP_URL || `http://localhost:${env.PORT || 3000}`,
     idleTimeoutMs: (Number(env.PREVIEW_IDLE_MINUTES) || 15) * 60 * 1000,
     portWaitMs: 30000,
-    portPollMs: 500
+    portPollMs: 500,
+    tokenSecret: env.PREVIEW_TOKEN_SECRET || env.ENCRYPTION_SECRET || undefined,
+    tlsCertPath: env.PREVIEW_TLS_CERT || undefined,
+    tlsKeyPath: env.PREVIEW_TLS_KEY || undefined
   };
 }
+
+/**
+ * Phase 32: preview link tokens are HMAC-signed and bound to one
+ * preview, one execution session and one owner, with the expiry inside
+ * the signature so it cannot be extended by editing the token. The
+ * stored one-time hash in the preview record still applies on top:
+ * a token redeems exactly once, within its lifetime.
+ */
+export interface PreviewTokenPayload {
+  pid: string;
+  sid: string;
+  uid: string;
+  exp: number;
+}
+
+export function signPreviewToken(secret: string, payload: PreviewTokenPayload): string {
+  const body = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
+  const signature = crypto.createHmac('sha256', secret).update(body).digest('base64url');
+  return `${body}.${signature}`;
+}
+
+export function verifyPreviewToken(secret: string, token: string): PreviewTokenPayload | null {
+  const dot = token.indexOf('.');
+  if (dot <= 0) return null;
+  const body = token.slice(0, dot);
+  const signature = Buffer.from(token.slice(dot + 1), 'base64url');
+  const expected = crypto.createHmac('sha256', secret).update(body).digest();
+  if (signature.length !== expected.length || !crypto.timingSafeEqual(signature, expected)) return null;
+  let payload: PreviewTokenPayload;
+  try {
+    payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf-8'));
+  } catch {
+    return null;
+  }
+  if (
+    typeof payload?.pid !== 'string' || typeof payload?.sid !== 'string' ||
+    typeof payload?.uid !== 'string' || typeof payload?.exp !== 'number'
+  ) {
+    return null;
+  }
+  if (Date.now() > payload.exp) return null;
+  return payload;
+}
+
+/** Used only when no PREVIEW_TOKEN_SECRET/ENCRYPTION_SECRET is configured; links then die with the process. */
+const EPHEMERAL_TOKEN_SECRET = crypto.randomBytes(32).toString('hex');
 
 function hashSecret(secret: string): string {
   return crypto.createHash('sha256').update(secret).digest('hex');
@@ -47,8 +101,24 @@ function matches(secret: string, expectedHash: string | undefined): boolean {
 }
 
 export class PreviewSessionService {
+  private readonly tokenSecret: string;
+
   constructor(private readonly manager: ExecutionSessionManager, readonly config: PreviewConfig) {
     manager.onProcessEnded = session => this.closeForSession(session);
+    this.tokenSecret =
+      config.tokenSecret || process.env.PREVIEW_TOKEN_SECRET || process.env.ENCRYPTION_SECRET || EPHEMERAL_TOKEN_SECRET;
+  }
+
+  /** A signed, expiring, one-time link token bound to this preview, its session and its owner. */
+  private issueToken(preview: Pick<PreviewSession, 'id' | 'sessionId' | 'userId'>): { token: string; expiresAt: number } {
+    const expiresAt = Date.now() + TOKEN_TTL_MS;
+    const token = signPreviewToken(this.tokenSecret, {
+      pid: preview.id,
+      sid: preview.sessionId,
+      uid: preview.userId,
+      exp: expiresAt
+    });
+    return { token, expiresAt };
   }
 
   private urlFor(previewId: string, path: string): string {
@@ -119,10 +189,11 @@ export class PreviewSessionService {
       throw new ExecutionError('The project stopped while the preview was opening.', 409);
     }
 
-    const token = crypto.randomBytes(32).toString('hex');
     const now = Date.now();
+    const previewId = `pv${crypto.randomBytes(12).toString('hex')}`;
+    const { token, expiresAt } = this.issueToken({ id: previewId, sessionId: session.id, userId: build.userId });
     const preview = db.savePreviewSession({
-      id: `pv${crypto.randomBytes(12).toString('hex')}`,
+      id: previewId,
       sessionId: session.id,
       buildId: build.id,
       userId: build.userId,
@@ -132,7 +203,7 @@ export class PreviewSessionService {
       relayPort: endpoint.port,
       relayToken: endpoint.token,
       tokenHash: hashSecret(token),
-      tokenExpiresAt: now + TOKEN_TTL_MS,
+      tokenExpiresAt: expiresAt,
       createdAt: now,
       lastAccessAt: now
     });
@@ -146,8 +217,8 @@ export class PreviewSessionService {
     if (!preview || preview.buildId !== build.id || preview.status !== 'active') {
       throw new ExecutionError('Preview not found', 404);
     }
-    const token = crypto.randomBytes(32).toString('hex');
-    db.savePreviewSession({ ...preview, tokenHash: hashSecret(token), tokenExpiresAt: Date.now() + TOKEN_TTL_MS });
+    const { token, expiresAt } = this.issueToken(preview);
+    db.savePreviewSession({ ...preview, tokenHash: hashSecret(token), tokenExpiresAt: expiresAt });
     return this.urlFor(preview.id, `/__squadforge/auth?token=${token}`);
   }
 
@@ -155,6 +226,11 @@ export class PreviewSessionService {
   redeem(previewId: string, token: string): string | null {
     const preview = db.getPreviewSession(previewId);
     if (!preview || preview.status !== 'active') return null;
+    // The signature must verify and bind the token to this preview,
+    // its session and its owner, before the one-time hash is consulted.
+    const payload = verifyPreviewToken(this.tokenSecret, token);
+    if (!payload || payload.pid !== previewId) return null;
+    if (payload.sid !== preview.sessionId || payload.uid !== preview.userId) return null;
     if (!preview.tokenExpiresAt || Date.now() > preview.tokenExpiresAt) return null;
     if (!matches(token, preview.tokenHash)) return null;
 

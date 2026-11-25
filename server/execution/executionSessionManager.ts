@@ -21,7 +21,9 @@ import {
   detectMissingModules,
   planDependencies
 } from './dependencyService.js';
-import { BackendCapabilities, ExecutionBackend, PreviewEndpoint, ProcessHandle, SandboxLimits, relayGet } from './executionBackend.js';
+import { auditLog } from '../auditLog.js';
+import { BackendCapabilities, ExecutionBackend, PreviewEndpoint, ProcessHandle, SandboxLimits, WorkerDiagnostics, relayGet } from './executionBackend.js';
+import { WorkerHealthMonitor } from './workerHealth.js';
 import { hashWorkspace, materializeWorkspace } from './workspaceMaterializer.js';
 
 export class ExecutionError extends Error {
@@ -93,6 +95,58 @@ export class ExecutionSessionManager {
 
   capabilities(): Promise<BackendCapabilities> {
     return this.backend.capabilities();
+  }
+
+  private healthMonitor: WorkerHealthMonitor | null = null;
+
+  /** Phase 32: the health monitor started by the service bootstrap, if any. */
+  attachHealthMonitor(monitor: WorkerHealthMonitor): void {
+    this.healthMonitor = monitor;
+  }
+
+  /** Phase 32: redacted worker diagnostics for the admin diagnostics route. */
+  async workerDiagnostics(): Promise<WorkerDiagnostics> {
+    const diagnostics = this.backend.diagnostics
+      ? await this.backend.diagnostics()
+      : {
+          backend: this.backend.name,
+          available: (await this.backend.capabilities()).available,
+          checkedAt: Date.now()
+        };
+    if (this.healthMonitor) diagnostics.health = this.healthMonitor.snapshot();
+    return diagnostics;
+  }
+
+  /** Phase 32: one worker health probe, for the health monitor. Throws when unhealthy. */
+  async checkWorkerHealth(): Promise<void> {
+    const backend = this.backend as ExecutionBackend & { checkWorker?: () => Promise<void> };
+    if (typeof backend.checkWorker === 'function') {
+      await backend.checkWorker();
+      return;
+    }
+    const capabilities = await this.backend.capabilities();
+    if (!capabilities.available) throw new Error(capabilities.reason || 'Execution backend is unavailable');
+  }
+
+  /**
+   * Phase 32: removes worker resources whose session is no longer live
+   * in the database (orphans of crashes and lost records). Returns null
+   * when the backend cannot sweep.
+   */
+  async sweepOrphanedResources(): Promise<{ containers: number; volumes: number; networks: number } | null> {
+    const backend = this.backend as ExecutionBackend & {
+      sweepOrphans?: (live: ReadonlySet<string>) => Promise<{ containers: number; volumes: number; networks: number }>;
+    };
+    if (typeof backend.sweepOrphans !== 'function') return null;
+    const live = new Set(db.getLiveExecutionSessions().map(session => session.id));
+    const removed = await backend.sweepOrphans(live);
+    if (removed.containers + removed.volumes + removed.networks > 0) {
+      auditLog('execution.worker.orphan_cleanup', {
+        outcome: 'cleaned',
+        details: { ...removed }
+      });
+    }
+    return removed;
   }
 
   private log(session: ExecutionSession, stream: 'stdout' | 'stderr' | 'system', raw: string): void {

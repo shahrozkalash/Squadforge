@@ -66,6 +66,50 @@ export interface EnvironmentRecord {
   buildId: string;
 }
 
+export interface WorkerHealthSnapshot {
+  state: 'unknown' | 'healthy' | 'unhealthy';
+  lastCheckedAt?: number;
+  lastError?: string;
+  consecutiveFailures: number;
+}
+
+/**
+ * Phase 32: redacted worker diagnostics. Certificate *paths* and
+ * presence are reported; certificate contents and keys never are.
+ */
+export interface WorkerDiagnostics {
+  backend: string;
+  available: boolean;
+  checkedAt: number;
+  endpoint?: string;
+  configError?: string;
+  tls?: {
+    enabled: boolean;
+    caFile?: string;
+    certFile?: string;
+    keyFile?: string;
+    filesPresent?: { ca: boolean; cert: boolean; key: boolean };
+  };
+  daemon?: {
+    reachable: boolean;
+    version?: string;
+    apiVersion?: string;
+    os?: string;
+    arch?: string;
+    runtimes?: string[];
+    configuredRuntime?: string;
+    runtimeVerified?: boolean;
+    storageDriver?: string;
+    backingFilesystem?: string;
+    /** Enforceability of the per-container `size` storage option. */
+    containerLayerQuota?: 'hard' | 'conditional' | 'soft';
+    /** The workspace lives on a named volume; Docker has no per-volume quota API. */
+    workspaceQuota: 'soft-polling';
+  };
+  image?: { name: string; present?: boolean };
+  health?: WorkerHealthSnapshot;
+}
+
 export type OutputListener = (stream: 'stdout' | 'stderr', text: string) => void;
 
 /**
@@ -86,6 +130,8 @@ export interface ExecutionBackend {
   destroyEnvironment(sessionId: string): Promise<void>;
   removeDependencyCache(buildId: string): Promise<void>;
   listEnvironments(): Promise<EnvironmentRecord[]>;
+  /** Phase 32: redacted connection/daemon diagnostics, where the backend can provide them. */
+  diagnostics?(): Promise<WorkerDiagnostics>;
 }
 
 const RELAY_REQUEST_TIMEOUT_MS = 3000;
