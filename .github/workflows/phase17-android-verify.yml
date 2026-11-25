@@ -1,0 +1,116 @@
+name: Phase 17 Android Genuine Build Verification
+
+# Proves Phase 17's genuine Android compilation on a host with a real
+# toolchain (this workflow's runner), because some deployment hosts lack
+# JDK/Android SDK or restrict the local TCP the Gradle daemon needs.
+# Runs SquadForge's own generator + build pipeline unmodified, then
+# re-verifies the produced artifacts directly with Google's apksigner
+# and bundletool, and finally checks that a broken Kotlin source fails
+# honestly instead of producing a fake artifact.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/phase17-android-verify.yml'
+      - 'scripts/phase17-genuine-build.ts'
+      - 'server/android/**'
+
+permissions:
+  contents: read
+
+jobs:
+  genuine-android-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Android SDK packages (platform 34, build-tools 34.0.0)
+        run: |
+          set -e
+          SDK_ROOT="${ANDROID_HOME:-$HOME/Android/Sdk}"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            mkdir -p "$SDK_ROOT/cmdline-tools"
+            curl -sL -o /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/cmdtools.zip -d "$SDK_ROOT/cmdline-tools"
+            mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+            SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "$SDK_ROOT/build-tools/34.0.0" >> "$GITHUB_PATH"
+          echo "$SDK_ROOT/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Install Google bundletool 1.17.2
+        run: |
+          set -e
+          mkdir -p "$HOME/bundletool-bin"
+          curl -sL -o "$HOME/bundletool-bin/bundletool.jar" https://github.com/google/bundletool/releases/download/1.17.2/bundletool-all-1.17.2.jar
+          printf '#!/bin/sh\nexec java -jar %s/bundletool.jar "$@"\n' "$HOME/bundletool-bin" > "$HOME/bundletool-bin/bundletool"
+          chmod +x "$HOME/bundletool-bin/bundletool"
+          echo "$HOME/bundletool-bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain versions
+        run: |
+          java -version
+          apksigner version
+          bundletool version
+          ls "$ANDROID_HOME/platforms"
+          ls "$ANDROID_HOME/build-tools"
+
+      - name: Install SquadForge dependencies
+        run: npm ci
+
+      - name: Run genuine SquadForge Android build (Gradle assembleDebug + bundleDebug)
+        run: npx tsx scripts/phase17-genuine-build.ts build | tee phase17-build-output.txt
+
+      - name: Verify harvested APK directly with Google apksigner
+        run: |
+          set -e
+          APK=$(ls .android_artifacts/*/fittrack-debug.apk | head -1)
+          echo "APK: $APK"
+          ls -lh "$APK"
+          sha256sum "$APK"
+          apksigner verify --verbose --print-certs "$APK"
+
+      - name: Validate harvested AAB directly with Google bundletool
+        run: |
+          set -e
+          AAB=$(ls .android_artifacts/*/fittrack-debug.aab | head -1)
+          echo "AAB: $AAB"
+          ls -lh "$AAB"
+          sha256sum "$AAB"
+          bundletool validate --bundle "$AAB"
+          echo "bundletool validate: OK"
+
+      - name: Negative test - broken Kotlin source must fail honestly
+        run: npx tsx scripts/phase17-genuine-build.ts broken | tee phase17-broken-output.txt
+
+      - name: Upload genuine artifacts and build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase17-genuine-artifacts
+          path: |
+            .android_artifacts/**/fittrack-debug.apk
+            .android_artifacts/**/fittrack-debug.aab
+            phase17-build-output.txt
+            phase17-broken-output.txt
+          if-no-files-found: warn
