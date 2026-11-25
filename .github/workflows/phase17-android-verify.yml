@@ -78,13 +78,19 @@ jobs:
       - name: Install SquadForge dependencies
         run: npm ci
 
-      - name: Run genuine SquadForge Android build (Gradle assembleDebug + bundleDebug)
-        run: npx tsx scripts/phase17-genuine-build.ts build | tee phase17-build-output.txt
+      - name: Run genuine SquadForge Android build
+        id: build
+        run: |
+          set -o pipefail
+          npx tsx scripts/phase17-genuine-build.ts build | tee build-output.txt
+          BID=$(grep -o '"buildId":"[^"]*"' build-output.txt | tail -1 | cut -d'"' -f4)
+          echo "build_id=$BID" >> "$GITHUB_OUTPUT"
+          echo "Fresh buildId: $BID"
 
       - name: Verify harvested APK directly with Google apksigner
         run: |
           set -e
-          APK=$(ls .android_artifacts/*/fittrack-debug.apk | head -1)
+          APK=".android_artifacts/${{ steps.build.outputs.build_id }}/fittrack-debug.apk"
           echo "APK: $APK"
           ls -lh "$APK"
           sha256sum "$APK"
@@ -93,7 +99,7 @@ jobs:
       - name: Validate harvested AAB directly with Google bundletool
         run: |
           set -e
-          AAB=$(ls .android_artifacts/*/fittrack-debug.aab | head -1)
+          AAB=".android_artifacts/${{ steps.build.outputs.build_id }}/fittrack-debug.aab"
           echo "AAB: $AAB"
           ls -lh "$AAB"
           sha256sum "$AAB"
@@ -109,8 +115,6 @@ jobs:
         with:
           name: phase17-genuine-artifacts
           path: |
-            .android_artifacts/**/fittrack-debug.apk
-            .android_artifacts/**/fittrack-debug.aab
-            phase17-build-output.txt
-            phase17-broken-output.txt
+            .android_artifacts/${{ steps.build.outputs.build_id }}/
+            build-output.txt
           if-no-files-found: warn
