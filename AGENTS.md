@@ -67,10 +67,11 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 15 | Deployment and Distribution. Implemented and verified on 2026-11-06. See `PHASE_15_ACCEPTANCE_REPORT.md`. |
 | Phase 16 | Production Readiness and Intelligence. Implemented and verified on 2026-11-06. See `PHASE_16_ACCEPTANCE_REPORT.md`. |
 | Phase 17 | Native Android Development Engine. Implemented and verified on 2026-11-06. See `PHASE_17_ACCEPTANCE_REPORT.md`. |
+| Phase 18 | Desktop Development Engine (Windows first). Implemented and verified on 2026-11-25, including a genuine local `dotnet build` of a generated project producing a PE-verified Windows `.exe`. See `PHASE_18_ACCEPTANCE_REPORT.md`. |
 
 Later roadmap:
 
-- Phase 18: Multi-Platform Native Extensions (iOS / Desktop)
+- Phase 18: Multi-Platform Native Extensions (iOS / Desktop) — desktop half delivered as the Desktop Development Engine above; iOS remains future work.
 
 Do not present GitHub integration or deployment as complete until they are implemented and tested, even where the README lists them. The "production ready" wording in the Phase 8 report does not describe the whole product.
 

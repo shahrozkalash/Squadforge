@@ -456,6 +456,8 @@ export interface Build {
   connectedValidation?: ConnectedValidationReport;
   androidConfig?: any;
   androidBuilds?: any[];
+  desktopConfig?: any;
+  desktopBuilds?: any[];
 }
 
 export type CanonicalProjectType = 
