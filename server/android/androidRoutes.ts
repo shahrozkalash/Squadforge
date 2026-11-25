@@ -13,6 +13,7 @@ import {
   SENSITIVE_ANDROID_PERMISSIONS 
 } from './types.js';
 import { AndroidProjectGenerator } from './androidProjectGenerator.js';
+import { generateVideoEditorProject, getVideoEditorConfig } from './videoEditorGenerator.js';
 import { AndroidBuildPipeline } from './androidBuildPipeline.js';
 import { ApkInspector } from './apkInspector.js';
 import { AndroidEmulatorService } from './androidEmulatorService.js';
@@ -177,6 +178,46 @@ export function createAndroidRouter(deps: AndroidRouteDependencies): Router {
       success: true,
       config,
       generatedFilesCount: Object.keys(files).length
+    });
+  }));
+
+  // 1b. Phase 34: Generate the native Android video editor (ClipForge)
+  router.post('/video-editor/generate', requireAuth, owned(async (build, req, res) => {
+    const { appName, packageName } = req.body || {};
+    const config = getVideoEditorConfig(
+      appName || 'ClipForge',
+      packageName || 'com.squadforge.clipforge'
+    );
+    const files = generateVideoEditorProject(config);
+    const now = Date.now();
+
+    for (const [filePath, content] of Object.entries(files)) {
+      db.setFile(build.id, {
+        path: filePath,
+        content,
+        version: 1,
+        ownerModel: req.user?.name || 'Android Swarm'
+      });
+    }
+
+    build.androidConfig = config;
+    build.projectType = 'android_application';
+    db.saveBuild(build);
+
+    db.addEvent({
+      id: `evt_${now}_${crypto.randomBytes(3).toString('hex')}`,
+      buildId: build.id,
+      timestamp: now,
+      type: 'file_created',
+      modelId: 'android_specialist',
+      details: `Generated native Android video editor (ClipForge, ${Object.keys(files).length} files) with Media3 playback/export`
+    });
+
+    res.json({
+      success: true,
+      config,
+      generatedFilesCount: Object.keys(files).length,
+      editor: 'clipforge'
     });
   }));
 
