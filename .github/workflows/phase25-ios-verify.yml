@@ -1,0 +1,74 @@
+name: Phase 25 iOS Genuine Build Verification
+
+# Proves Phase 25's genuine iOS compilation on a macOS runner with real
+# Xcode, because native iOS apps can only be built on macOS — Linux and
+# Windows hosts (including the SquadForge dev VM) report
+# environment-unavailable instead, by design. Runs SquadForge's own
+# generator + build pipeline unmodified: a plain project, a project
+# with a Swift Package Manager dependency, and a broken-Swift negative
+# test that must fail honestly.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/phase25-ios-verify.yml'
+      - 'scripts/phase25-genuine-build.ts'
+      - 'server/ios/**'
+
+permissions:
+  contents: read
+
+jobs:
+  genuine-ios-build:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Show Xcode toolchain
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version --sdk iphonesimulator || true
+          swift --version
+
+      - name: Install SquadForge dependencies
+        run: npm ci
+
+      - name: Genuine SquadForge iOS build (xcodebuild, unsigned simulator)
+        run: npx tsx scripts/phase25-genuine-build.ts build | tee phase25-build-output.txt
+
+      - name: Verify the harvested .app directly
+        run: |
+          set -e
+          APP=$(ls -d .ios_artifacts/*/FitTrack.app | head -1)
+          echo "APP: $APP"
+          ls -la "$APP"
+          file "$APP/FitTrack"
+          shasum -a 256 "$APP/FitTrack"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" || true
+
+      - name: Genuine build with an SPM dependency (swift-algorithms)
+        run: npx tsx scripts/phase25-genuine-build.ts deps | tee phase25-deps-output.txt
+
+      - name: Negative test - broken Swift source must fail honestly
+        run: npx tsx scripts/phase25-genuine-build.ts broken | tee phase25-broken-output.txt
+
+      - name: Upload genuine artifacts and build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase25-genuine-artifacts
+          path: |
+            .ios_artifacts/**/FitTrack.app/**
+            phase25-build-output.txt
+            phase25-deps-output.txt
+            phase25-broken-output.txt
+          if-no-files-found: warn
