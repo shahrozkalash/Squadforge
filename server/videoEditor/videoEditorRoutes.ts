@@ -5,6 +5,7 @@ import { db } from '../store.js';
 import { Build } from '../types.js';
 import { VideoProjectGenerator } from './videoProjectGenerator.js';
 import { deserializeVideoProject, serializeVideoProject } from './timeline.js';
+import { applyEditOperation, type EditOperation } from './editingOps.js';
 import { defaultExportSettings, exportVideo } from './videoExporter.js';
 import { detectFfmpeg, detectFfprobe, importMedia } from './mediaProbe.js';
 import type { ExportSettings, SerializedVideoProject } from './types.js';
@@ -64,6 +65,19 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
     const abs = assertSafeWorkspacePath(baseDir, rel);
     const asset = await importMedia(abs);
     return res.json({ success: true, asset });
+  }));
+
+  // 3b. Phase 26: apply ONE validated, non-destructive edit operation
+  // to a submitted project and return the updated project. Source
+  // media files are never touched by editing operations.
+  router.post('/operations', requireAuth, owned(async (_build, req, res) => {
+    const data = req.body?.project as SerializedVideoProject;
+    const op = req.body?.operation as EditOperation;
+    if (!data) return res.status(400).json({ error: 'project is required' });
+    if (!op || typeof op.type !== 'string') return res.status(400).json({ error: 'operation with a type is required' });
+    const { project, mediaAssets } = deserializeVideoProject(data);
+    const result = applyEditOperation(project, mediaAssets, op);
+    return res.json({ success: true, result, project: serializeVideoProject(project, mediaAssets) });
   }));
 
   // 4. Real export: project JSON -> ffmpeg -> ffprobe-validated MP4

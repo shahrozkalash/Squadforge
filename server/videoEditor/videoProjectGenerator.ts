@@ -32,7 +32,7 @@ export class VideoProjectGenerator {
     delete files[`${root}/MainForm.Designer.cs`];
 
     files[`${root}/VideoDocument.cs`] =
-      `using System.Diagnostics;\nusing System.Text.Json;\n\nnamespace ${asm};\n\n` +
+      `using System.Diagnostics;\nusing System.Globalization;\nusing System.Text.Json;\n\nnamespace ${asm};\n\n` +
       `public sealed class VideoClip\n{\n` +
       `    public string MediaPath { get; set; } = "";\n` +
       `    public double TrackStart { get; set; }\n` +
@@ -40,8 +40,27 @@ export class VideoProjectGenerator {
       `    public double SourceOut { get; set; }\n` +
       `    public double Volume { get; set; } = 1.0;\n` +
       `    public string? Title { get; set; }\n` +
-      `    public double Duration => SourceOut - SourceIn;\n` +
+      `    // Phase 26: professional editing properties (overlay tracks)\n` +
+      `    public double X { get; set; }\n` +
+      `    public double Y { get; set; }\n` +
+      `    public double Scale { get; set; } = 1.0;\n` +
+      `    public double RotationDeg { get; set; }\n` +
+      `    public double Opacity { get; set; } = 1.0;\n` +
+      `    public double Speed { get; set; } = 1.0;\n` +
+      `    public double CropLeft { get; set; }\n` +
+      `    public double CropTop { get; set; }\n` +
+      `    public double CropRight { get; set; }\n` +
+      `    public double CropBottom { get; set; }\n` +
+      `    public double Duration => (SourceOut - SourceIn) / (Speed > 0 ? Speed : 1.0);\n` +
       `    public double TrackEnd => TrackStart + Duration;\n}\n\n` +
+      `public sealed class VideoText\n{\n` +
+      `    public string Text { get; set; } = "";\n` +
+      `    public double TrackStart { get; set; }\n` +
+      `    public double DurationSec { get; set; } = 3;\n` +
+      `    public double X { get; set; }\n` +
+      `    public double Y { get; set; }\n` +
+      `    public int FontSize { get; set; } = 36;\n` +
+      `    public string Color { get; set; } = "#FFFFFF";\n}\n\n` +
       `public sealed class VideoTrack\n{\n` +
       `    public string Kind { get; set; } = "video"; // video | audio\n` +
       `    public string Name { get; set; } = "";\n` +
@@ -57,7 +76,8 @@ export class VideoProjectGenerator {
       `    public int Width { get; set; } = 1280;\n` +
       `    public int Height { get; set; } = 720;\n` +
       `    public int Fps { get; set; } = 30;\n` +
-      `    public List<VideoTrack> Tracks { get; } = new();\n\n` +
+      `    public List<VideoTrack> Tracks { get; } = new();\n` +
+      `    public List<VideoText> Texts { get; } = new();\n\n` +
       `    public VideoDocument()\n    {\n` +
       `        Tracks.Add(new VideoTrack { Kind = "video", Name = "Video 1" });\n` +
       `        Tracks.Add(new VideoTrack { Kind = "audio", Name = "Audio 1" });\n    }\n\n` +
@@ -87,7 +107,17 @@ export class VideoProjectGenerator {
       `            var candidate = Path.Combine(dir, "ffmpeg.exe");\n` +
       `            if (File.Exists(candidate)) return candidate;\n        }\n` +
       `        return null;\n    }\n\n` +
-      `    /// <summary>Builds the ffmpeg argument list for the base video track + mixed audio.</summary>\n` +
+      `    private static string F(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);\n\n` +
+      `    private static string TransformChain(VideoClip c)\n    {\n` +
+      `        var parts = new List<string>();\n` +
+      `        if (c.CropLeft + c.CropRight > 0 || c.CropTop + c.CropBottom > 0)\n` +
+      `            parts.Add($"crop=w=iw-{F(c.CropLeft + c.CropRight)}:h=ih-{F(c.CropTop + c.CropBottom)}:x={F(c.CropLeft)}:y={F(c.CropTop)}");\n` +
+      `        if (Math.Abs(c.Scale - 1.0) > 0.001) parts.Add($"scale=iw*{F(c.Scale)}:ih*{F(c.Scale)}");\n` +
+      `        parts.Add("format=rgba");\n` +
+      `        if (Math.Abs(c.RotationDeg) > 0.001) parts.Add($"rotate={F(c.RotationDeg * Math.PI / 180.0)}:ow='hypot(iw,ih)':oh='hypot(iw,ih)':c=none");\n` +
+      `        if (c.Opacity < 0.999) parts.Add($"colorchannelmixer=aa={F(c.Opacity)}");\n` +
+      `        return string.Join(",", parts);\n    }\n\n` +
+      `    /// <summary>Builds the ffmpeg argument list: base track concat, Phase 26 overlay compositing (PiP) for extra video tracks, text layers via drawtext when a font exists, mixed audio.</summary>\n` +
       `    public List<string> BuildExportArgs(string outputPath)\n    {\n` +
       `        var baseTrack = Tracks.First(t => t.Kind == "video");\n` +
       `        var clips = baseTrack.Clips.OrderBy(c => c.TrackStart).ToList();\n` +
@@ -99,13 +129,32 @@ export class VideoProjectGenerator {
       `        var vLabels = new List<string>();\n` +
       `        for (int i = 0; i < clips.Count; i++)\n        {\n` +
       `            var c = clips[i];\n` +
-      `            graph.Add($"[{InputIndex(c.MediaPath)}:v]trim=start={c.SourceIn}:end={c.SourceOut},setpts=PTS-STARTPTS,scale={Width}:{Height}:force_original_aspect_ratio=decrease,pad={Width}:{Height}:(ow-iw)/2:(oh-ih)/2,fps={Fps},format=yuv420p[v{i}]");\n` +
+      `            var speed = c.Speed > 0 && Math.Abs(c.Speed - 1.0) > 0.001 ? $",setpts=PTS/{F(c.Speed)}" : "";\n` +
+      `            graph.Add($"[{InputIndex(c.MediaPath)}:v]trim=start={F(c.SourceIn)}:end={F(c.SourceOut)},setpts=PTS-STARTPTS{speed},scale={Width}:{Height}:force_original_aspect_ratio=decrease,pad={Width}:{Height}:(ow-iw)/2:(oh-ih)/2,fps={Fps},format=yuv420p[v{i}]");\n` +
       `            vLabels.Add($"[v{i}]");\n        }\n` +
-      `        graph.Add($"{string.Concat(vLabels)}concat=n={clips.Count}:v=1:a=0[vout]");\n` +
+      `        graph.Add($"{string.Concat(vLabels)}concat=n={clips.Count}:v=1:a=0[vmain]");\n` +
+      `        var mainLabel = "vmain";\n` +
+      `        int ovl = 0;\n` +
+      `        foreach (var track in Tracks.Where(t => t.Kind == "video" && t != baseTrack))\n` +
+      `        foreach (var c in track.Clips.OrderBy(c => c.TrackStart))\n        {\n` +
+      `            var speed = c.Speed > 0 && Math.Abs(c.Speed - 1.0) > 0.001 ? $",setpts=PTS/{F(c.Speed)}" : "";\n` +
+      `            graph.Add($"[{InputIndex(c.MediaPath)}:v]trim=start={F(c.SourceIn)}:end={F(c.SourceOut)},setpts=PTS-STARTPTS{speed},{TransformChain(c)},setsar=1,setpts=PTS+{F(c.TrackStart)}/TB[ovl{ovl}]");\n` +
+      `            graph.Add($"[{mainLabel}][ovl{ovl}]overlay=x={F(c.X)}:y={F(c.Y)}:eof_action=pass:enable='between(t,{F(c.TrackStart)},{F(c.TrackEnd)})'[vc{ovl}]");\n` +
+      `            mainLabel = $"vc{ovl}"; ovl++;\n        }\n` +
+      `        var fontPath = @"C:\\Windows\\Fonts\\arial.ttf";\n` +
+      `        if (Texts.Count > 0 && File.Exists(fontPath))\n        {\n` +
+      `            int ti = 0;\n` +
+      `            foreach (var t in Texts)\n            {\n` +
+      `                var text = t.Text.Replace("'", "").Replace(":", " ");\n` +
+      `                var color = "0x" + t.Color.TrimStart('#');\n` +
+      `                graph.Add($"[{mainLabel}]drawtext=fontfile='{fontPath.Replace(":", "\\\\:")}':text='{text}':fontsize={t.FontSize}:fontcolor={color}:x={F(t.X)}:y={F(t.Y)}:enable='between(t,{F(t.TrackStart)},{F(t.TrackStart + t.DurationSec)})'[vtx{ti}]");\n` +
+      `                mainLabel = $"vtx{ti}"; ti++;\n            }\n        }\n` +
+      `        graph.Add($"[{mainLabel}]null[vout]");\n` +
       `        var aLabels = new List<string>();\n` +
       `        int ai = 0;\n` +
       `        foreach (var track in Tracks)\n        foreach (var c in track.Clips.OrderBy(c => c.TrackStart))\n        {\n` +
-      `            graph.Add($"[{InputIndex(c.MediaPath)}:a]atrim=start={c.SourceIn}:end={c.SourceOut},asetpts=PTS-STARTPTS,volume={c.Volume},adelay={(int)(c.TrackStart * 1000)}:all=1[a{ai}]");\n` +
+      `            var tempo = c.Speed > 0 && Math.Abs(c.Speed - 1.0) > 0.001 ? $"atempo={F(c.Speed)}," : "";\n` +
+      `            graph.Add($"[{InputIndex(c.MediaPath)}:a]atrim=start={F(c.SourceIn)}:end={F(c.SourceOut)},asetpts=PTS-STARTPTS,{tempo}volume={F(c.Volume)},adelay={(int)(c.TrackStart * 1000)}:all=1[a{ai}]");\n` +
       `            aLabels.Add($"[a{ai++}]");\n        }\n` +
       `        string audioMap;\n` +
       `        if (aLabels.Count > 1) { graph.Add($"{string.Concat(aLabels)}amix=inputs={aLabels.Count}:duration=longest:normalize=0[aout]"); audioMap = "[aout]"; }\n` +
@@ -143,6 +192,10 @@ export class VideoProjectGenerator {
       `    private readonly NumericUpDown _widthBox = new() { Minimum = 16, Maximum = 7680, Value = 1280 };\n` +
       `    private readonly NumericUpDown _heightBox = new() { Minimum = 16, Maximum = 4320, Value = 720 };\n` +
       `    private readonly NumericUpDown _fpsBox = new() { Minimum = 1, Maximum = 240, Value = 30 };\n` +
+      `    private readonly NumericUpDown _xBox = new() { Minimum = -4000, Maximum = 4000, Value = 0 };\n` +
+      `    private readonly NumericUpDown _yBox = new() { Minimum = -4000, Maximum = 4000, Value = 0 };\n` +
+      `    private readonly NumericUpDown _scaleBox = new() { Minimum = 5, Maximum = 400, Value = 100 };\n` +
+      `    private readonly NumericUpDown _opacityBox = new() { Minimum = 0, Maximum = 100, Value = 100 };\n` +
       `    private readonly Label _status = new() { Dock = DockStyle.Bottom, Height = 24 };\n\n` +
       `    public MainForm()\n    {\n` +
       `        Text = "${config.appName} — Video Editor";\n` +
@@ -162,7 +215,14 @@ export class VideoProjectGenerator {
       `        buttons.Controls.Add(splitBtn); buttons.Controls.Add(removeBtn);\n` +
       `        buttons.Controls.Add(new Label { Text = "W:", AutoSize = true, Margin = new Padding(12, 8, 0, 0) }); buttons.Controls.Add(_widthBox);\n` +
       `        buttons.Controls.Add(new Label { Text = "H:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_heightBox);\n` +
-      `        buttons.Controls.Add(new Label { Text = "FPS:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_fpsBox);\n\n` +
+      `        buttons.Controls.Add(new Label { Text = "FPS:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_fpsBox);\n` +
+      `        var transformBtn = new Button { Text = "Apply transform to selected", AutoSize = true };\n` +
+      `        transformBtn.Click += (_, _) => ApplyTransform();\n` +
+      `        buttons.Controls.Add(new Label { Text = "X:", AutoSize = true, Margin = new Padding(12, 8, 0, 0) }); buttons.Controls.Add(_xBox);\n` +
+      `        buttons.Controls.Add(new Label { Text = "Y:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_yBox);\n` +
+      `        buttons.Controls.Add(new Label { Text = "Scale %:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_scaleBox);\n` +
+      `        buttons.Controls.Add(new Label { Text = "Opacity %:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_opacityBox);\n` +
+      `        buttons.Controls.Add(transformBtn);\n\n` +
       `        Controls.Add(_timeline); Controls.Add(buttons); Controls.Add(_preview); Controls.Add(menu); Controls.Add(_status);\n` +
       `        MainMenuStrip = menu;\n` +
       `        RefreshTimeline();\n    }\n\n` +
@@ -182,6 +242,13 @@ export class VideoProjectGenerator {
       `            _doc.AddClip(track, new VideoClip { MediaPath = d.FileName, TrackStart = start, SourceIn = 0, SourceOut = 5 });\n` +
       `            _status.Text = $"Imported {Path.GetFileName(d.FileName)} at {start:0.0}s (default 5s trim — adjust in code or split/trim).";\n        }\n` +
       `        catch (Exception ex) { _status.Text = ex.Message; }\n` +
+      `        RefreshTimeline();\n    }\n\n` +
+      `    private void ApplyTransform()\n    {\n` +
+      `        var sel = Selected(); if (sel == null) { _status.Text = "Select a clip first."; return; }\n` +
+      `        var clip = sel.Value.clip;\n` +
+      `        clip.X = (double)_xBox.Value; clip.Y = (double)_yBox.Value;\n` +
+      `        clip.Scale = (double)_scaleBox.Value / 100.0; clip.Opacity = (double)_opacityBox.Value / 100.0;\n` +
+      `        _status.Text = "Transform applied (position/scale/opacity render on overlay tracks at export).";\n` +
       `        RefreshTimeline();\n    }\n\n` +
       `    private void SplitSelected()\n    {\n` +
       `        var sel = Selected(); if (sel == null) return;\n` +
@@ -205,7 +272,7 @@ export class VideoProjectGenerator {
       `    private void RefreshTimeline()\n    {\n` +
       `        _timeline.Items.Clear();\n` +
       `        foreach (var track in _doc.Tracks)\n            foreach (var clip in track.Clips)\n` +
-      `                _timeline.Items.Add($"[{track.Name}] {Path.GetFileName(clip.MediaPath)} @ {clip.TrackStart:0.00}s ({clip.Duration:0.00}s, vol {clip.Volume:0.0})");\n` +
+      `                _timeline.Items.Add($"[{track.Name}] {Path.GetFileName(clip.MediaPath)} @ {clip.TrackStart:0.00}s ({clip.Duration:0.00}s, vol {clip.Volume:0.0}, x {clip.X:0} y {clip.Y:0} scale {clip.Scale:0.00} opacity {clip.Opacity:0.00} speed {clip.Speed:0.00})");\n` +
       `        _status.Text = $"Timeline duration: {_doc.TotalDuration:0.00}s";\n    }\n}\n`;
 
     files['README.md'] =

@@ -41,7 +41,11 @@ export interface ProbeResult {
   width?: number;
   height?: number;
   fps?: number;
+  /** Phase 26: probed video codec name (drives image-kind detection). */
+  videoCodec?: string;
 }
+
+const IMAGE_CODECS = new Set(['png', 'mjpeg', 'bmp', 'webp', 'gif', 'tiff', 'jpeg2000', 'avif', 'heic', 'heif']);
 
 export async function probeMedia(filePath: string): Promise<ProbeResult> {
   const ffprobe = detectFfprobe();
@@ -61,20 +65,26 @@ export async function probeMedia(filePath: string): Promise<ProbeResult> {
     const [n, d] = video.avg_frame_rate.split('/').map(Number);
     if (d) fps = Math.round((n / d) * 100) / 100;
   }
-  const durationSec = parseFloat(parsed.format?.duration || video?.duration || audio?.duration || '0');
-  if (!durationSec || Number.isNaN(durationSec)) throw new Error(`Could not determine duration of ${filePath}`);
+  let durationSec = parseFloat(parsed.format?.duration || video?.duration || audio?.duration || '0');
+  // Still images carry no intrinsic duration — that is not an error;
+  // the clip's source span defines how long they show (they loop).
+  const isImage = Boolean(video?.codec_name && IMAGE_CODECS.has(video.codec_name) && !audio);
+  if (isImage && (Number.isNaN(durationSec) || durationSec <= 0)) durationSec = 0;
+  if (Number.isNaN(durationSec) || (!isImage && !durationSec)) throw new Error(`Could not determine duration of ${filePath}`);
   return {
     durationSec,
     hasVideo: Boolean(video),
     hasAudio: Boolean(audio),
     width: video?.width,
     height: video?.height,
-    fps
+    fps,
+    videoCodec: video?.codec_name
   };
 }
 
 export async function importMedia(filePath: string): Promise<MediaAsset> {
   const probe = await probeMedia(filePath);
+  const isImage = Boolean(probe.videoCodec && IMAGE_CODECS.has(probe.videoCodec) && !probe.hasAudio);
   return {
     id: crypto.randomUUID(),
     path: filePath,
@@ -83,6 +93,8 @@ export async function importMedia(filePath: string): Promise<MediaAsset> {
     hasAudio: probe.hasAudio,
     width: probe.width,
     height: probe.height,
-    fps: probe.fps
+    fps: probe.fps,
+    // Phase 26: still images are first-class media (they loop in the exporter).
+    kind: isImage ? 'image' : probe.hasVideo ? 'video' : 'audio'
   };
 }

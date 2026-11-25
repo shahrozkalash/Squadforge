@@ -3,12 +3,14 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import type {
+  ClipTransform,
   MediaAsset,
   SerializedVideoProject,
   TimelineClip,
   TimelineTrack,
   VideoProject
 } from './types.js';
+import { mediaKind } from './types.js';
 
 /**
  * Phase 20: timeline model operations — pure, validated, and honest.
@@ -18,8 +20,18 @@ import type {
  * trimming keep source offsets consistent with the media.
  */
 
-export function clipDuration(clip: TimelineClip): number {
+/** Source span consumed by the clip (seconds of media). */
+export function clipSourceDuration(clip: TimelineClip): number {
   return clip.sourceOut - clip.sourceIn;
+}
+
+/** Phase 26: timeline duration = source span / speed (speed defaults to 1). */
+export function clipDuration(clip: TimelineClip): number {
+  return clipSourceDuration(clip) / (clip.speed && clip.speed > 0 ? clip.speed : 1);
+}
+
+export function clipSpeed(clip: TimelineClip): number {
+  return clip.speed && clip.speed > 0 ? clip.speed : 1;
 }
 
 export function clipEnd(clip: TimelineClip): number {
@@ -37,7 +49,8 @@ export function createProject(name: string, width: number = 1280, height: number
       { id: crypto.randomUUID(), kind: 'video', name: 'Video 1', clips: [] },
       { id: crypto.randomUUID(), kind: 'audio', name: 'Audio 1', clips: [] }
     ],
-    transitions: []
+    transitions: [],
+    texts: []
   };
 }
 
@@ -75,11 +88,30 @@ export function baseVideoTrack(project: VideoProject): TimelineTrack {
 function validateClipAgainstMedia(clip: TimelineClip, media: MediaAsset): void {
   if (clip.sourceIn < 0) throw new Error('sourceIn cannot be negative');
   if (clip.sourceOut <= clip.sourceIn) throw new Error('sourceOut must be after sourceIn');
-  if (clip.sourceOut > media.durationSec + 0.05) {
+  // Images loop indefinitely in the exporter, so the media-duration bound does not apply.
+  if (mediaKind(media) !== 'image' && clip.sourceOut > media.durationSec + 0.05) {
     throw new Error(`Clip extends past media duration (${clip.sourceOut}s > ${media.durationSec}s)`);
   }
   if (clip.trackStart < 0) throw new Error('trackStart cannot be negative');
   if (clip.volume < 0 || clip.volume > 1) throw new Error('volume must be between 0 and 1');
+  if (clip.speed !== undefined && (clip.speed < 0.25 || clip.speed > 4)) {
+    throw new Error('speed must be between 0.25 and 4');
+  }
+  if (clip.transform) validateTransform(clip.transform, media);
+}
+
+/** Phase 26: shared transform validation (also used by the editing operations). */
+export function validateTransform(t: ClipTransform, media?: MediaAsset): void {
+  if (!Number.isFinite(t.x) || !Number.isFinite(t.y)) throw new Error('transform position must be finite');
+  if (t.scale < 0.05 || t.scale > 4) throw new Error('transform scale must be between 0.05 and 4');
+  if (t.rotationDeg < -360 || t.rotationDeg > 360) throw new Error('transform rotation must be between -360 and 360 degrees');
+  if (t.opacity < 0 || t.opacity > 1) throw new Error('transform opacity must be between 0 and 1');
+  if (t.crop) {
+    const { left, top, right, bottom } = t.crop;
+    if ([left, top, right, bottom].some((v) => v < 0)) throw new Error('crop values cannot be negative');
+    if (media?.width && left + right >= media.width) throw new Error('crop left+right must be smaller than the source width');
+    if (media?.height && top + bottom >= media.height) throw new Error('crop top+bottom must be smaller than the source height');
+  }
 }
 
 /** Overlap allowance for a clip pair on the base track = crossfade on the earlier clip. */
@@ -140,7 +172,7 @@ export function trimClip(
   if (!media) throw new Error(`Media asset not found: ${clip.mediaId}`);
   const updated: TimelineClip = { ...clip, sourceIn: newIn, sourceOut: newOut };
   if (keepEndFixed) {
-    updated.trackStart = clipEnd(clip) - (newOut - newIn);
+    updated.trackStart = clipEnd(clip) - clipDuration(updated);
   }
   validateClipAgainstMedia(updated, media);
   assertNoOverlap(project, track, updated, clipId);
@@ -155,7 +187,7 @@ export function splitClip(project: VideoProject, clipId: string, atTimelineSec: 
   if (atTimelineSec <= clip.trackStart || atTimelineSec >= clipEnd(clip)) {
     throw new Error(`Split point ${atTimelineSec}s is outside clip span ${clip.trackStart}s–${clipEnd(clip)}s`);
   }
-  const offset = atTimelineSec - clip.trackStart;
+  const offset = (atTimelineSec - clip.trackStart) * clipSpeed(clip); // timeline offset → source offset
   const right: TimelineClip = {
     ...clip,
     id: crypto.randomUUID(),
@@ -218,6 +250,7 @@ export function timelineDuration(project: VideoProject): number {
   for (const track of project.tracks) {
     for (const clip of track.clips) end = Math.max(end, clipEnd(clip));
   }
+  for (const text of project.texts ?? []) end = Math.max(end, text.trackStart + text.durationSec);
   let transitionsTotal = 0;
   for (const t of project.transitions) transitionsTotal += t.durationSec;
   return Math.max(0, end - transitionsTotal);
@@ -252,6 +285,16 @@ export function validateProject(project: VideoProject, mediaAssets: Map<string, 
       errors.push(e.message);
     }
   }
+  for (const text of project.texts ?? []) {
+    if (!text.text || !text.text.trim()) errors.push(`Text element ${text.id}: text must not be empty`);
+    if (text.trackStart < 0) errors.push(`Text element ${text.id}: trackStart cannot be negative`);
+    if (text.durationSec <= 0) errors.push(`Text element ${text.id}: durationSec must be positive`);
+    if (text.fontSize <= 0) errors.push(`Text element ${text.id}: fontSize must be positive`);
+    if (!/^#[0-9A-Fa-f]{6}$/.test(text.color)) errors.push(`Text element ${text.id}: color must be #RRGGBB`);
+    if (text.opacity !== undefined && (text.opacity < 0 || text.opacity > 1)) {
+      errors.push(`Text element ${text.id}: opacity must be between 0 and 1`);
+    }
+  }
   return errors;
 }
 
@@ -272,6 +315,7 @@ export function deserializeVideoProject(data: SerializedVideoProject): { project
   }
   const mediaAssets = new Map<string, MediaAsset>();
   for (const m of data.media || []) mediaAssets.set(m.id, m);
+  if (!Array.isArray(data.project.texts)) data.project.texts = []; // Phase 20 files predate text layers
   const errors = validateProject(data.project, mediaAssets);
   if (errors.length > 0) throw new Error(`Invalid video project: ${errors.join('; ')}`);
   return { project: data.project, mediaAssets };

@@ -8,7 +8,8 @@ import type {
   TimelineClip,
   VideoProject
 } from './types.js';
-import { baseVideoTrack, clipDuration, timelineDuration, validateProject, writeJournal } from './timeline.js';
+import { mediaKind } from './types.js';
+import { baseVideoTrack, clipDuration, clipSpeed, timelineDuration, validateProject, writeJournal } from './timeline.js';
 import { detectFfmpeg, probeMedia } from './mediaProbe.js';
 
 /**
@@ -51,6 +52,24 @@ function escapeDrawtext(text: string): string {
   return text.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/:/g, '\\:').replace(/%/g, '\\%');
 }
 
+/**
+ * Phase 26: rotate filter with an EXACT bounding box computed in JS.
+ * (ffmpeg's hypot(iw,ih) cannot be used here — the comma inside the
+ * expression is a filtergraph separator.) When the source dimensions
+ * are unknown the filter keeps the input frame size and corners crop.
+ */
+function rotateFilter(rotationDeg: number, media: MediaAsset): string {
+  const rad = (rotationDeg * Math.PI) / 180;
+  if (media.width && media.height) {
+    const cos = Math.abs(Math.cos(rad));
+    const sin = Math.abs(Math.sin(rad));
+    const ow = Math.ceil(media.width * cos + media.height * sin);
+    const oh = Math.ceil(media.width * sin + media.height * cos);
+    return `rotate=${rad.toFixed(6)}:ow=${ow}:oh=${oh}:c=none`;
+  }
+  return `rotate=${rad.toFixed(6)}:c=none`;
+}
+
 function runFfmpeg(ffmpeg: string, args: string[], timeoutMs: number): Promise<{ code: number; log: string }> {
   return new Promise((resolve) => {
     const child = spawn(ffmpeg, args, { shell: false });
@@ -89,6 +108,7 @@ export async function exportVideo(
   options: { journalDir?: string; timeoutMs?: number } = {}
 ): Promise<ExportResult> {
   const expectedDurationSec = timelineDuration(project);
+  const notes: string[] = [];
   const fail = async (error: string, logTail: string = ''): Promise<ExportResult> => {
     if (options.journalDir) {
       await writeJournal(options.journalDir, 'export-failed', error).catch(() => undefined);
@@ -97,7 +117,8 @@ export async function exportVideo(
       status: 'failed',
       expectedDurationSec,
       ffmpegLogTail: logTail.slice(-1500),
-      error
+      error,
+      notes
     };
   };
 
@@ -119,15 +140,35 @@ export async function exportVideo(
     if (!fs.existsSync(asset.path)) return fail(`Media file missing at export time: ${asset.path}`);
   }
 
-  // Unique inputs in first-use order
+  // Unique inputs in first-use order. Phase 26: inputs carry optional
+  // pre-input args — still images get a dedicated looped input per clip
+  // so trim/speed semantics match video clips.
   const inputIndex = new Map<string, number>();
-  const inputs: string[] = [];
+  const inputs: { path: string; preArgs: string[] }[] = [];
   const useMedia = (mediaId: string): number => {
     if (!inputIndex.has(mediaId)) {
       inputIndex.set(mediaId, inputs.length);
-      inputs.push(mediaAssets.get(mediaId)!.path);
+      inputs.push({ path: mediaAssets.get(mediaId)!.path, preArgs: [] });
     }
     return inputIndex.get(mediaId)!;
+  };
+  const useLoopedImage = (mediaId: string, loopSeconds: number): number => {
+    inputs.push({ path: mediaAssets.get(mediaId)!.path, preArgs: ['-loop', '1', '-t', loopSeconds.toFixed(3)] });
+    return inputs.length - 1;
+  };
+  const inputForClip = (clip: TimelineClip): number => {
+    const media = mediaAssets.get(clip.mediaId)!;
+    return mediaKind(media) === 'image' ? useLoopedImage(clip.mediaId, Math.max(clip.sourceOut, 0.1)) : useMedia(clip.mediaId);
+  };
+  /** atempo only accepts 0.5..2 per instance on older ffmpeg; chain factors. */
+  const atempoChain = (speed: number): string => {
+    if (speed === 1) return '';
+    const parts: string[] = [];
+    let remaining = speed;
+    while (remaining > 2) { parts.push('atempo=2'); remaining /= 2; }
+    while (remaining < 0.5) { parts.push('atempo=0.5'); remaining /= 0.5; }
+    parts.push(`atempo=${remaining.toFixed(4)}`);
+    return parts.join(',');
   };
 
   const transitionAfter = new Map(project.transitions.map((t) => [t.afterClipId, t.durationSec]));
@@ -144,12 +185,21 @@ export async function exportVideo(
   const filters: string[] = [];
   let segCount = 0;
   const segLabel = (clip: TimelineClip): string => {
-    const idx = useMedia(clip.mediaId);
+    const idx = inputForClip(clip);
     const label = `vseg${segCount++}`;
     const effect = clip.effect !== 'none' ? `,${EFFECT_FILTERS[clip.effect]}` : '';
+    // Phase 26: crop (source edges) applies on the base track too; speed via setpts.
+    const crop = clip.transform?.crop
+      ? `crop=w=iw-${clip.transform.crop.left + clip.transform.crop.right}:h=ih-${clip.transform.crop.top + clip.transform.crop.bottom}:x=${clip.transform.crop.left}:y=${clip.transform.crop.top},`
+      : '';
+    const speed = clipSpeed(clip);
+    const speedFilter = speed !== 1 ? `,setpts=PTS/${speed}` : '';
+    if (clip.transform && (clip.transform.x !== 0 || clip.transform.y !== 0 || clip.transform.rotationDeg !== 0 || clip.transform.opacity !== 1 || clip.transform.scale !== 1)) {
+      notes.push(`Base clip ${clip.id}: position/scale/rotation/opacity are overlay-track properties and were not applied to the base canvas (crop and speed were).`);
+    }
     filters.push(
-      `[${idx}:v]trim=start=${clip.sourceIn}:end=${clip.sourceOut},setpts=PTS-STARTPTS,` +
-        `scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease,` +
+      `[${idx}:v]trim=start=${clip.sourceIn}:end=${clip.sourceOut},setpts=PTS-STARTPTS${speedFilter},` +
+        `${crop}scale=${settings.width}:${settings.height}:force_original_aspect_ratio=decrease,` +
         `pad=${settings.width}:${settings.height}:(ow-iw)/2:(oh-ih)/2,setsar=1,` +
         `fps=${settings.fps},format=yuv420p${effect}[${label}]`
     );
@@ -193,6 +243,59 @@ export async function exportVideo(
     videoLabel = outLabel;
   }
 
+  // Phase 26: if overlays or texts extend past the base track's end,
+  // extend the canvas with black frames so they have something to
+  // composite onto (the expected duration already accounts for them).
+  const padSeconds = expectedDurationSec - accDuration;
+  if (padSeconds > 0.05) {
+    const outLabel = `vpad`;
+    filters.push(`[${videoLabel}]tpad=stop_mode=add:stop_duration=${padSeconds.toFixed(3)},fps=${settings.fps}[${outLabel}]`);
+    videoLabel = outLabel;
+    notes.push(`Canvas extended by ${padSeconds.toFixed(2)}s of black so overlays/texts past the base track remain visible.`);
+  }
+
+  // Phase 26: overlay tracks (every video track after the base) are
+  // composited in project order — later tracks sit on top. Each clip
+  // is trimmed, speed-adjusted, cropped, effected, scaled, rotated,
+  // faded by its opacity, timestamp-shifted to its timeline position,
+  // and overlaid only during its window.
+  const overlayTracks = project.tracks.filter((t) => t.kind === 'video' && t.id !== base.id);
+  let overlayCount = 0;
+  for (const track of overlayTracks) {
+    for (const clip of [...track.clips].sort((a, b) => a.trackStart - b.trackStart)) {
+      const media = mediaAssets.get(clip.mediaId)!;
+      if (!media.hasVideo) continue;
+      const idx = inputForClip(clip);
+      const t = clip.transform ?? { x: 0, y: 0, scale: 1, rotationDeg: 0, opacity: 1 };
+      const speed = clipSpeed(clip);
+      const chain: string[] = [
+        `trim=start=${clip.sourceIn}:end=${clip.sourceOut}`,
+        'setpts=PTS-STARTPTS',
+        ...(speed !== 1 ? [`setpts=PTS/${speed}`] : []),
+        ...(t.crop
+          ? [`crop=w=iw-${t.crop.left + t.crop.right}:h=ih-${t.crop.top + t.crop.bottom}:x=${t.crop.left}:y=${t.crop.top}`]
+          : []),
+        ...(clip.effect !== 'none' ? [EFFECT_FILTERS[clip.effect]] : []),
+        ...(t.scale !== 1 ? [`scale=iw*${t.scale}:ih*${t.scale}`] : []),
+        'format=rgba',
+        ...(t.rotationDeg !== 0 ? [rotateFilter(t.rotationDeg, media)] : []),
+        ...(t.opacity !== 1 ? [`colorchannelmixer=aa=${t.opacity}`] : []),
+        'setsar=1',
+        `setpts=PTS+${clip.trackStart.toFixed(3)}/TB`
+      ];
+      const srcLabel = `ovl${overlayCount}`;
+      filters.push(`[${idx}:v]${chain.join(',')}[${srcLabel}]`);
+      const outLabel = `vc${overlayCount}`;
+      const end = clip.trackStart + clipDuration(clip);
+      filters.push(
+        `[${videoLabel}][${srcLabel}]overlay=x=${Math.round(t.x)}:y=${Math.round(t.y)}:eof_action=pass:enable='between(t,${clip.trackStart.toFixed(3)},${end.toFixed(3)})'[${outLabel}]`
+      );
+      videoLabel = outLabel;
+      overlayCount++;
+    }
+  }
+  if (overlayCount > 0) notes.push(`Composited ${overlayCount} overlay clip(s) from ${overlayTracks.length} overlay track(s).`);
+
   // Titles (drawtext) over the joined video.
   const titledClips = baseClips.filter((c) => c.title && c.title.trim());
   if (titledClips.length > 0) {
@@ -212,7 +315,29 @@ export async function exportVideo(
     }
   }
 
-  // Audio: base-clip audio + audio-track clips, each placed on the output timeline.
+  // Phase 26: text layer elements (drawtext), in layer order.
+  const textElements = (project.texts ?? []).filter((t) => t.text && t.text.trim());
+  if (textElements.length > 0) {
+    const font = findFontFile();
+    if (!font) return fail('Text elements are present but no usable font file was found on this host for drawtext.');
+    const fontEscaped = font.replace(/\\/g, '/').replace(/:/g, '\\:');
+    for (const el of textElements) {
+      const outLabel = `vtx${videoLabel}`;
+      const hex = el.color.replace('#', '');
+      const color = `0x${hex}`;
+      const alpha = el.opacity !== undefined && el.opacity < 1 ? `@${el.opacity}` : '';
+      filters.push(
+        `[${videoLabel}]drawtext=fontfile='${fontEscaped}':text='${escapeDrawtext(el.text)}':fontsize=${Math.round(el.fontSize)}:` +
+          `fontcolor=${color}${alpha}:borderw=2:box=1:boxcolor=black@0.35:boxborderw=6:x=${Math.round(el.x)}:y=${Math.round(el.y)}:` +
+          `enable='between(t,${el.trackStart.toFixed(3)},${(el.trackStart + el.durationSec).toFixed(3)})'[${outLabel}]`
+      );
+      videoLabel = outLabel;
+    }
+    notes.push(`Rendered ${textElements.length} text element(s).`);
+  }
+
+  // Audio: base-clip audio + overlay-clip audio + audio-track clips,
+  // each placed on the output timeline. Phase 26: speed uses atempo.
   const audioLabels: string[] = [];
   let audioCount = 0;
   const addAudio = (clip: TimelineClip, atSec: number) => {
@@ -221,13 +346,19 @@ export async function exportVideo(
     const idx = useMedia(clip.mediaId);
     const label = `a${audioCount++}`;
     const delayMs = Math.max(0, Math.round(atSec * 1000));
+    const tempo = atempoChain(clipSpeed(clip));
     filters.push(
       `[${idx}:a]atrim=start=${clip.sourceIn}:end=${clip.sourceOut},asetpts=PTS-STARTPTS,` +
-        `volume=${clip.volume},adelay=${delayMs}:all=1[${label}]`
+        `${tempo ? `${tempo},` : ''}volume=${clip.volume},adelay=${delayMs}:all=1[${label}]`
     );
     audioLabels.push(label);
   };
   for (const clip of baseClips) addAudio(clip, outputStartOf(clip));
+  for (const track of overlayTracks) {
+    for (const clip of [...track.clips].sort((a, b) => a.trackStart - b.trackStart)) {
+      addAudio(clip, clip.trackStart);
+    }
+  }
   for (const track of project.tracks) {
     if (track.kind !== 'audio') continue;
     for (const clip of [...track.clips].sort((a, b) => a.trackStart - b.trackStart)) {
@@ -243,7 +374,7 @@ export async function exportVideo(
   }
 
   const args: string[] = ['-y'];
-  for (const input of inputs) args.push('-i', input);
+  for (const input of inputs) args.push(...input.preArgs, '-i', input.path);
   args.push('-filter_complex', filters.join(';'));
   args.push('-map', `[${videoLabel}]`);
   if (audioLabel) args.push('-map', `[${audioLabel}]`);
@@ -283,6 +414,7 @@ export async function exportVideo(
       outputBytes: fs.statSync(outputPath).size,
       durationSec: probe.durationSec,
       expectedDurationSec,
+      notes,
       ffmpegLogTail: log.slice(-1500),
       probe: {
         durationSec: probe.durationSec,
