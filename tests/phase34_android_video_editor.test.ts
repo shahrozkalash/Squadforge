@@ -84,6 +84,26 @@ describe('Phase 34: generated project completeness', () => {
     assert.ok(files['gradle.properties'].includes('android.suppressUnsupportedCompileSdk=35'));
   });
 
+  test('generated Kotlin has no broken multi-line string literals', () => {
+    // Regression guard for CI runs 45665260288: single-backslash
+    // escapes in the generator's TS templates turned "\n" inside
+    // Kotlin string literals into real line breaks (EditorOps.kt
+    // captionsToSrt and EditorViewModel.kt export notes), which the
+    // Kotlin compiler rejects. Every generated string literal must
+    // open and close on the same line.
+    for (const [path, content] of Object.entries(files)) {
+      if (!path.endsWith('.kt')) continue;
+      content.split('\n').forEach((line, i) => {
+        const quotes = (line.replace(/\\"/g, '').match(/"/g) || []).length;
+        assert.equal(quotes % 2, 0, `${path}:${i + 1} has an unterminated string literal`);
+      });
+    }
+    const ops = kt('/editor/EditorOps.kt');
+    assert.ok(ops.includes('out.append(cue.text).append("\\n\\n")'));
+    const vm = kt('/ui/EditorViewModel.kt');
+    assert.ok(vm.includes('"\\nNotes: "'));
+  });
+
   test('manifest needs no storage permission (picker-based import)', () => {
     const manifest = files['app/src/main/AndroidManifest.xml'];
     assert.ok(manifest.includes('android.permission.INTERNET'));
