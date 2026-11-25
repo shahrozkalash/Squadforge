@@ -1,0 +1,78 @@
+name: Phase 35 iOS Video Editor Genuine Build Verification
+
+# Proves Phase 35's generated native iOS video editor (ClipForge:
+# Swift + SwiftUI + AVFoundation) compiles with a real Xcode
+# toolchain, that the editor's pure-Foundation operations
+# (EditorModels + EditorOps) compile under swiftc and pass their
+# behavioural checks, and that broken Swift fails honestly. Native
+# iOS apps can only be built on macOS, so this runs on a macOS
+# runner — the SquadForge dev VM reports environment-unavailable
+# instead, by design (Phase 25). Runs SquadForge's own generator +
+# build pipeline unmodified.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/phase35-ios-video-editor.yml'
+      - 'scripts/phase35-genuine-build.ts'
+      - 'server/ios/**'
+
+permissions:
+  contents: read
+
+jobs:
+  genuine-ios-video-editor-build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Show Xcode toolchain
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version --sdk iphonesimulator || true
+          swift --version
+
+      - name: Install SquadForge dependencies
+        run: npm ci
+
+      - name: Genuine ClipForge iOS build (xcodebuild, unsigned simulator)
+        run: npx tsx scripts/phase35-genuine-build.ts build | tee phase35-build-output.txt
+
+      - name: Verify the harvested .app directly
+        run: |
+          set -e
+          APP=$(ls -d .ios_artifacts/*/ClipForge.app | head -1)
+          echo "APP: $APP"
+          ls -la "$APP"
+          file "$APP/ClipForge"
+          shasum -a 256 "$APP/ClipForge"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist" || true
+
+      - name: Editor ops checks (swiftc compile + run)
+        if: always()
+        run: npx tsx scripts/phase35-genuine-build.ts ops | tee phase35-ops-output.txt
+
+      - name: Negative test - broken Swift source must fail honestly
+        if: always()
+        run: npx tsx scripts/phase35-genuine-build.ts broken | tee phase35-broken-output.txt
+
+      - name: Upload genuine artifacts and build outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase35-genuine-artifacts
+          path: |
+            .ios_artifacts/**/ClipForge.app/**
+            phase35-build-output.txt
+            phase35-ops-output.txt
+            phase35-broken-output.txt
+          if-no-files-found: warn
