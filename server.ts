@@ -64,6 +64,7 @@ import { createScene3dRouter } from './server/scene3d/index.js';
 import { createIdeRouter } from './server/ide/index.js';
 import { createReleaseRouter } from './server/release/index.js';
 import { createGameRouter } from './server/gameEngine/index.js';
+import { createIosRouter } from './server/ios/index.js';
 
 
 dotenv.config();
@@ -2650,6 +2651,12 @@ app.use('/api/builds/:id/release', createReleaseRouter({
 
 // Game Development Engine (Phase 24)
 app.use('/api/builds/:id/games', createGameRouter({
+  requireAuth,
+  verifyBuildOwnership
+}));
+
+// Native iOS Development Engine (Phase 25)
+app.use('/api/builds/:id/ios', createIosRouter({
   requireAuth,
   verifyBuildOwnership
 }));
