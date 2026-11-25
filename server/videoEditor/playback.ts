@@ -10,12 +10,12 @@ import {
   validateProject
 } from './timeline.js';
 import {
-  EFFECT_FILTERS,
   escapeDrawtext,
   findFontFile,
   overlayTransformChain,
   runFfmpeg
 } from './videoExporter.js';
+import { effectChainFor, sampleKeyframes } from './effects.js';
 import { detectFfmpeg } from './mediaProbe.js';
 
 /**
@@ -386,7 +386,8 @@ export function buildPreviewArgs(
     const crop = baseEntry.clip.transform?.crop
       ? `crop=w=iw-${baseEntry.clip.transform.crop.left + baseEntry.clip.transform.crop.right}:h=ih-${baseEntry.clip.transform.crop.top + baseEntry.clip.transform.crop.bottom}:x=${baseEntry.clip.transform.crop.left}:y=${baseEntry.clip.transform.crop.top},`
       : '';
-    const effect = baseEntry.clip.effect !== 'none' ? `,${EFFECT_FILTERS[baseEntry.clip.effect]}` : '';
+    const bChain = effectChainFor(baseEntry.clip);
+    const effect = bChain.length > 0 ? `,${bChain.join(',')}` : '';
     filters.push(
       `[${idx}:v]${crop}scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
         `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,format=yuv420p${effect}[vbase]`
@@ -406,7 +407,8 @@ export function buildPreviewArgs(
     const crop = fadeEntry.clip.transform?.crop
       ? `crop=w=iw-${fadeEntry.clip.transform.crop.left + fadeEntry.clip.transform.crop.right}:h=ih-${fadeEntry.clip.transform.crop.top + fadeEntry.clip.transform.crop.bottom}:x=${fadeEntry.clip.transform.crop.left}:y=${fadeEntry.clip.transform.crop.top},`
       : '';
-    const effect = fadeEntry.clip.effect !== 'none' ? `,${EFFECT_FILTERS[fadeEntry.clip.effect]}` : '';
+    const fChain = effectChainFor(fadeEntry.clip);
+    const effect = fChain.length > 0 ? `,${fChain.join(',')}` : '';
     const progress = (fadeEntry.transitionProgress ?? 0).toFixed(3);
     filters.push(
       `[${idx}:v]${crop}scale=${width}:${height}:force_original_aspect_ratio=decrease,` +
@@ -419,11 +421,17 @@ export function buildPreviewArgs(
   overlays.forEach((entry, i) => {
     const media = mediaAssets.get(entry.clip.mediaId)!;
     const idx = inputFor(entry);
-    const t = entry.clip.transform ?? { x: 0, y: 0, scale: 1, rotationDeg: 0, opacity: 1 };
+    const baseTransform = entry.clip.transform ?? { x: 0, y: 0, scale: 1, rotationDeg: 0, opacity: 1 };
+    // Phase 28: keyframed clips are sampled at this instant with the
+    // same interpolation the exporter compiles — preview == export.
+    const localT = Math.max(0, timeSec - entry.clip.trackStart);
+    const t = entry.clip.keyframes?.length
+      ? sampleKeyframes(entry.clip.keyframes, baseTransform, localT)
+      : baseTransform;
     // Scale transform coordinates when the preview size differs from the project size.
     const sx = width / project.width;
     const sy = height / project.height;
-    const chain = overlayTransformChain(entry.clip, media);
+    const chain = overlayTransformChain({ ...entry.clip, transform: t }, media);
     filters.push(`[${idx}:v]${chain.join(',')}[povl${i}]`);
     filters.push(
       `[${videoLabel}][povl${i}]overlay=x=${Math.round(t.x * sx)}:y=${Math.round(t.y * sy)}[pvc${i}]`
@@ -439,10 +447,22 @@ export function buildPreviewArgs(
     if (timeSec >= el.trackStart && timeSec < el.trackStart + el.durationSec && el.text.trim()) {
       const sx = width / project.width;
       const sy = height / project.height;
+      // Phase 28: sample text position keyframes at this instant.
+      let ex = el.x;
+      let ey = el.y;
+      if (el.keyframes?.length) {
+        const sampled = sampleKeyframes(
+          el.keyframes,
+          { x: el.x, y: el.y, scale: 1, rotationDeg: 0, opacity: el.opacity ?? 1 },
+          timeSec - el.trackStart
+        );
+        ex = sampled.x;
+        ey = sampled.y;
+      }
       drawtexts.push({
         text: el.text,
-        x: Math.round(el.x * sx),
-        y: Math.round(el.y * sy),
+        x: Math.round(ex * sx),
+        y: Math.round(ey * sy),
         fontSize: Math.max(8, Math.round(el.fontSize * sy)),
         color: `0x${el.color.replace('#', '')}`,
         opacity: el.opacity

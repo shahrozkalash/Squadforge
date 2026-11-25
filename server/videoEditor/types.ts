@@ -34,6 +34,37 @@ export function mediaKind(asset: MediaAsset): 'video' | 'audio' | 'image' {
 export type ClipEffect = 'none' | 'grayscale' | 'blur' | 'sharpen' | 'invert';
 
 /**
+ * Phase 28: modular, ordered effect stack. Each instance is one
+ * adjustable control; the stack renders in array order after the
+ * legacy single `effect` preset. Values are validated against
+ * EFFECT_DEFS in effects.ts.
+ */
+export type EffectType = 'brightness' | 'contrast' | 'saturation' | 'temperature' | 'blur' | 'sharpen';
+
+export interface ClipEffectInstance {
+  id: string;
+  type: EffectType;
+  value: number;
+}
+
+/**
+ * Phase 28: a keyframe on a clip's transform. `timeSec` is CLIP-LOCAL
+ * (seconds from the clip's timeline start, 0..clipDuration). Only the
+ * properties present are animated; others keep the base transform.
+ * `easing` applies to the segment STARTING at this keyframe.
+ */
+export interface Keyframe {
+  id: string;
+  timeSec: number;
+  x?: number;
+  y?: number;
+  scale?: number;
+  rotationDeg?: number;
+  opacity?: number;
+  easing?: 'linear' | 'smooth';
+}
+
+/**
  * Phase 26: spatial transform for a clip. Applies to overlay-track
  * clips (picture-in-picture / compositing). On the base video track
  * only crop and speed are applied (the base fills the canvas by
@@ -73,7 +104,22 @@ export interface TimelineClip {
   speed?: number;
   /** Phase 26: spatial transform (overlay tracks). Absent = DEFAULT_TRANSFORM. */
   transform?: ClipTransform;
+  /** Phase 28: ordered adjustable effect stack (rendered after the legacy `effect`). */
+  effects?: ClipEffectInstance[];
+  /** Phase 28: transform keyframes (clip-local time). */
+  keyframes?: Keyframe[];
 }
+
+/** Phase 28: transition kinds, mapped to ffmpeg xfade names in effects.ts. */
+export type TransitionType =
+  | 'crossfade'
+  | 'fade-black'
+  | 'fade-white'
+  | 'wipe-left'
+  | 'wipe-right'
+  | 'slide-left'
+  | 'slide-right'
+  | 'zoom-in';
 
 /**
  * Phase 26: a text layer element, rendered over the composited video
@@ -93,6 +139,12 @@ export interface TextElement {
   color: string;
   /** 0..1, default 1 */
   opacity?: number;
+  /**
+   * Phase 28: position keyframes (x/y only — validated; drawtext
+   * cannot animate alpha, so opacity keyframes on text are rejected
+   * rather than silently preview-only). Times are element-local.
+   */
+  keyframes?: Keyframe[];
 }
 
 export interface TimelineTrack {
@@ -105,7 +157,8 @@ export interface TimelineTrack {
 export interface Transition {
   /** Id of the outgoing clip on the base video track. */
   afterClipId: string;
-  type: 'crossfade';
+  /** Phase 28: widened from the Phase 20 literal 'crossfade'. Absent = 'crossfade'. */
+  type: TransitionType;
   durationSec: number;
 }
 

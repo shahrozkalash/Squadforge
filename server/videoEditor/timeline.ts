@@ -8,9 +8,11 @@ import type {
   SerializedVideoProject,
   TimelineClip,
   TimelineTrack,
+  TransitionType,
   VideoProject
 } from './types.js';
 import { mediaKind } from './types.js';
+import { validateEffectInstance, validateKeyframes, validateTransitionType } from './effects.js';
 
 /**
  * Phase 20: timeline model operations — pure, validated, and honest.
@@ -229,7 +231,13 @@ export function setClipVolume(project: VideoProject, clipId: string, volume: num
   getClip(project, clipId).clip.volume = volume;
 }
 
-export function addTransition(project: VideoProject, afterClipId: string, durationSec: number): void {
+export function addTransition(
+  project: VideoProject,
+  afterClipId: string,
+  durationSec: number,
+  type: TransitionType = 'crossfade'
+): void {
+  validateTransitionType(type);
   const base = baseVideoTrack(project);
   const idx = base.clips.findIndex((c) => c.id === afterClipId);
   if (idx === -1) throw new Error('Transitions can only be added after a clip on the base video track');
@@ -241,7 +249,14 @@ export function addTransition(project: VideoProject, afterClipId: string, durati
     throw new Error('Transition must be shorter than both neighbouring clips');
   }
   project.transitions = project.transitions.filter((t) => t.afterClipId !== afterClipId);
-  project.transitions.push({ afterClipId, type: 'crossfade', durationSec });
+  project.transitions.push({ afterClipId, type, durationSec });
+}
+
+/** Phase 28: remove the transition after a base clip (no-op-free: throws when absent). */
+export function removeTransition(project: VideoProject, afterClipId: string): void {
+  const before = project.transitions.length;
+  project.transitions = project.transitions.filter((t) => t.afterClipId !== afterClipId);
+  if (project.transitions.length === before) throw new Error(`No transition after clip ${afterClipId}`);
 }
 
 /** Total timeline duration accounting for crossfade overlaps on the base track. */
@@ -269,6 +284,11 @@ export function validateProject(project: VideoProject, mediaAssets: Map<string, 
       }
       try {
         validateClipAgainstMedia(clip, media);
+        // Phase 28: effect stack + keyframes validate with the clip.
+        for (const instance of clip.effects ?? []) validateEffectInstance(instance);
+        if (clip.keyframes?.length) {
+          validateKeyframes(clip.keyframes, clipDuration(clip), { owner: `Clip ${clip.id}` });
+        }
       } catch (e: any) {
         errors.push(`Clip ${clip.id}: ${e.message}`);
       }
@@ -293,6 +313,24 @@ export function validateProject(project: VideoProject, mediaAssets: Map<string, 
     if (!/^#[0-9A-Fa-f]{6}$/.test(text.color)) errors.push(`Text element ${text.id}: color must be #RRGGBB`);
     if (text.opacity !== undefined && (text.opacity < 0 || text.opacity > 1)) {
       errors.push(`Text element ${text.id}: opacity must be between 0 and 1`);
+    }
+    // Phase 28: text keyframes animate x/y only, within the element's span.
+    if (text.keyframes?.length) {
+      try {
+        validateKeyframes(text.keyframes, text.durationSec, {
+          owner: `Text element ${text.id}`,
+          allowedProperties: ['x', 'y']
+        });
+      } catch (e: any) {
+        errors.push(e.message);
+      }
+    }
+  }
+  for (const transition of project.transitions) {
+    try {
+      validateTransitionType(transition.type ?? 'crossfade');
+    } catch (e: any) {
+      errors.push(e.message);
     }
   }
   return errors;

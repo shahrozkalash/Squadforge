@@ -26,12 +26,18 @@ import { detectFfmpeg, probeMedia } from './mediaProbe.js';
  * failure; a success is only reported for a real, validated file.
  */
 
-export const EFFECT_FILTERS: Record<string, string> = {
-  grayscale: 'hue=s=0',
-  blur: 'boxblur=5',
-  sharpen: 'unsharp=5:5:1.0',
-  invert: 'negate'
-};
+import {
+  LEGACY_EFFECT_FILTERS,
+  buildTimeExpression,
+  effectChainFor,
+  hasKeyframedProperty,
+  sampleKeyframes,
+  sortedKeyframes,
+  xfadeName
+} from './effects.js';
+
+/** Kept as a re-export: the registry lives in effects.ts (Phase 28). */
+export const EFFECT_FILTERS: Record<string, string> = LEGACY_EFFECT_FILTERS;
 
 export function findFontFile(): string | null {
   const candidates =
@@ -100,7 +106,7 @@ export function overlayTransformChain(clip: TimelineClip, media: MediaAsset): st
     ...(t.crop
       ? [`crop=w=iw-${t.crop.left + t.crop.right}:h=ih-${t.crop.top + t.crop.bottom}:x=${t.crop.left}:y=${t.crop.top}`]
       : []),
-    ...(clip.effect !== 'none' ? [EFFECT_FILTERS[clip.effect]] : []),
+    ...effectChainFor(clip),
     ...(t.scale !== 1 ? [`scale=iw*${t.scale}:ih*${t.scale}`] : []),
     'format=rgba',
     ...(t.rotationDeg !== 0 ? [rotateFilter(t.rotationDeg, media)] : []),
@@ -209,7 +215,8 @@ export async function exportVideo(
   const segLabel = (clip: TimelineClip): string => {
     const idx = inputForClip(clip);
     const label = `vseg${segCount++}`;
-    const effect = clip.effect !== 'none' ? `,${EFFECT_FILTERS[clip.effect]}` : '';
+    const chain = effectChainFor(clip);
+    const effect = chain.length > 0 ? `,${chain.join(',')}` : '';
     // Phase 26: crop (source edges) applies on the base track too; speed via setpts.
     const crop = clip.transform?.crop
       ? `crop=w=iw-${clip.transform.crop.left + clip.transform.crop.right}:h=ih-${clip.transform.crop.top + clip.transform.crop.bottom}:x=${clip.transform.crop.left}:y=${clip.transform.crop.top},`
@@ -259,8 +266,9 @@ export async function exportVideo(
   for (let gi = 1; gi < groups.length; gi++) {
     const junctionClip = baseClips.filter((c) => transitionAfter.has(c.id))[gi - 1];
     const d = transitionAfter.get(junctionClip.id)!;
+    const junction = project.transitions.find((t) => t.afterClipId === junctionClip.id);
     const outLabel = `vx${gi}`;
-    filters.push(`[${videoLabel}][${groupLabels[gi]}]xfade=transition=fade:duration=${d}:offset=${(accDuration - d).toFixed(3)}[${outLabel}]`);
+    filters.push(`[${videoLabel}][${groupLabels[gi]}]xfade=transition=${xfadeName(junction?.type)}:duration=${d}:offset=${(accDuration - d).toFixed(3)}[${outLabel}]`);
     accDuration = accDuration + groups[gi].duration - d;
     videoLabel = outLabel;
   }
@@ -283,6 +291,17 @@ export async function exportVideo(
   // and overlaid only during its window.
   const overlayTracks = project.tracks.filter((t) => t.kind === 'video' && t.id !== base.id);
   let overlayCount = 0;
+  /** Emit one overlay pass: a prepared stream composited over the current canvas. */
+  const emitPass = (idx: number, chain: string[], x: string, y: string, windowStart: number, windowEnd: number): void => {
+    const srcLabel = `ovl${overlayCount}`;
+    filters.push(`[${idx}:v]${chain.join(',')}[${srcLabel}]`);
+    const outLabel = `vc${overlayCount}`;
+    filters.push(
+      `[${videoLabel}][${srcLabel}]overlay=x=${x}:y=${y}:eof_action=pass:enable='between(t,${windowStart.toFixed(3)},${windowEnd.toFixed(3)})'[${outLabel}]`
+    );
+    videoLabel = outLabel;
+    overlayCount++;
+  };
   for (const track of overlayTracks) {
     for (const clip of [...track.clips].sort((a, b) => a.trackStart - b.trackStart)) {
       const media = mediaAssets.get(clip.mediaId)!;
@@ -290,22 +309,108 @@ export async function exportVideo(
       const idx = inputForClip(clip);
       const t = clip.transform ?? { x: 0, y: 0, scale: 1, rotationDeg: 0, opacity: 1 };
       const speed = clipSpeed(clip);
-      const chain: string[] = [
-        `trim=start=${clip.sourceIn}:end=${clip.sourceOut}`,
-        'setpts=PTS-STARTPTS',
-        ...(speed !== 1 ? [`setpts=PTS/${speed}`] : []),
-        ...overlayTransformChain(clip, media),
-        `setpts=PTS+${clip.trackStart.toFixed(3)}/TB`
-      ];
-      const srcLabel = `ovl${overlayCount}`;
-      filters.push(`[${idx}:v]${chain.join(',')}[${srcLabel}]`);
-      const outLabel = `vc${overlayCount}`;
+      const kfs = clip.keyframes ?? [];
       const end = clip.trackStart + clipDuration(clip);
-      filters.push(
-        `[${videoLabel}][${srcLabel}]overlay=x=${Math.round(t.x)}:y=${Math.round(t.y)}:eof_action=pass:enable='between(t,${clip.trackStart.toFixed(3)},${end.toFixed(3)})'[${outLabel}]`
+      if (kfs.length === 0) {
+        emitPass(
+          idx,
+          [
+            `trim=start=${clip.sourceIn}:end=${clip.sourceOut}`,
+            'setpts=PTS-STARTPTS',
+            ...(speed !== 1 ? [`setpts=PTS/${speed}`] : []),
+            ...overlayTransformChain(clip, media),
+            `setpts=PTS+${clip.trackStart.toFixed(3)}/TB`
+          ],
+          String(Math.round(t.x)),
+          String(Math.round(t.y)),
+          clip.trackStart,
+          end
+        );
+        continue;
+      }
+      // Phase 28: keyframed clip. Position compiles into the overlay
+      // filter over OUTPUT time; rotation/opacity compile into stream
+      // expressions — all implementing sampleKeyframes' interpolation.
+      // SCALE is the exception: ffmpeg's scale filter negotiates its
+      // output size once and cannot resize mid-stream (verified), so
+      // scale keyframes render as per-segment steps — the clip is
+      // split at keyframe times (each interval subdivided into steps
+      // of at most ~0.75s) and each segment is scaled statically to
+      // the value sampled at its midpoint. All other properties stay
+      // exact within every segment.
+      const overlayX = hasKeyframedProperty(kfs, 'x') ? `'${buildTimeExpression(kfs, 'x', t.x, clip.trackStart)}'` : String(Math.round(t.x));
+      const overlayY = hasKeyframedProperty(kfs, 'y') ? `'${buildTimeExpression(kfs, 'y', t.y, clip.trackStart)}'` : String(Math.round(t.y));
+      const dur = clipDuration(clip);
+      const boundaries = new Set<number>([0, dur]);
+      if (hasKeyframedProperty(kfs, 'scale')) {
+        for (const kf of sortedKeyframes(kfs)) if (kf.scale !== undefined) boundaries.add(Math.min(Math.max(kf.timeSec, 0), dur));
+      }
+      const sortedBounds = [...boundaries].sort((a, b) => a - b);
+      const scaleKeyframed = hasKeyframedProperty(kfs, 'scale');
+      const segments: { a: number; b: number }[] = [];
+      for (let i = 0; i < sortedBounds.length - 1; i++) {
+        const a = sortedBounds[i];
+        const b = sortedBounds[i + 1];
+        // Only scale needs steps; other properties are exact expressions.
+        const steps = scaleKeyframed ? Math.min(4, Math.max(1, Math.ceil((b - a) / 0.75))) : 1;
+        for (let s = 0; s < steps; s++) {
+          segments.push({ a: a + ((b - a) * s) / steps, b: a + ((b - a) * (s + 1)) / steps });
+        }
+      }
+      if (segments.length > 32) {
+        notes.push(`Clip ${clip.id}: scale animation used ${segments.length} segments.`);
+      }
+      // Union rotation canvas for the whole clip (centre-anchored).
+      let rotationBbox = '';
+      if (media.width && media.height && (hasKeyframedProperty(kfs, 'rotationDeg') || t.rotationDeg !== 0)) {
+        const angles = [t.rotationDeg, ...kfs.map((k) => k.rotationDeg).filter((v): v is number => v !== undefined)];
+        const scales = [t.scale, ...kfs.map((k) => k.scale).filter((v): v is number => v !== undefined)];
+        const maxScale = Math.max(...scales);
+        let ow = 0;
+        let oh = 0;
+        for (const deg of angles) {
+          const rad = (deg * Math.PI) / 180;
+          ow = Math.max(ow, Math.ceil(maxScale * (media.width * Math.abs(Math.cos(rad)) + media.height * Math.abs(Math.sin(rad)))));
+          oh = Math.max(oh, Math.ceil(maxScale * (media.width * Math.abs(Math.sin(rad)) + media.height * Math.abs(Math.cos(rad)))));
+        }
+        rotationBbox = `:ow=${ow}:oh=${oh}`;
+      }
+      for (const seg of segments) {
+        const segIdx = inputForClip(clip);
+        const mid = (seg.a + seg.b) / 2;
+        const segScale = sampleKeyframes(kfs, t, mid).scale;
+        const chain: string[] = [
+          `trim=start=${(clip.sourceIn + seg.a * speed).toFixed(3)}:end=${(clip.sourceIn + seg.b * speed).toFixed(3)}`,
+          'setpts=PTS-STARTPTS',
+          ...(speed !== 1 ? [`setpts=PTS/${speed}`] : []),
+          ...(t.crop
+            ? [`crop=w=iw-${t.crop.left + t.crop.right}:h=ih-${t.crop.top + t.crop.bottom}:x=${t.crop.left}:y=${t.crop.top}`]
+            : []),
+          ...effectChainFor(clip)
+        ];
+        if (segScale !== 1) chain.push(`scale=iw*${segScale}:ih*${segScale}`);
+        chain.push('format=rgba');
+        if (hasKeyframedProperty(kfs, 'rotationDeg')) {
+          // Stream t is segment-local here: shift keyframe times by -seg.a.
+          const degExpr = buildTimeExpression(kfs, 'rotationDeg', t.rotationDeg, -seg.a);
+          chain.push(`rotate=a='((${degExpr})*PI/180)'${rotationBbox}:c=none`);
+        } else if (t.rotationDeg !== 0) {
+          chain.push(rotateFilter(t.rotationDeg, media));
+        }
+        if (hasKeyframedProperty(kfs, 'opacity')) {
+          // NOTE: geq names the timestamp constant T, not t.
+          const expr = buildTimeExpression(kfs, 'opacity', t.opacity, -seg.a, 'T');
+          chain.push(`geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='alpha(X,Y)*(${expr})'`);
+        } else if (t.opacity !== 1) {
+          chain.push(`colorchannelmixer=aa=${t.opacity}`);
+        }
+        chain.push('setsar=1', `setpts=PTS+${(clip.trackStart + seg.a).toFixed(3)}/TB`);
+        emitPass(segIdx, chain, overlayX, overlayY, clip.trackStart + seg.a, clip.trackStart + seg.b);
+      }
+      notes.push(
+        `Clip ${clip.id}: rendered with ${kfs.length} keyframe(s) in ${segments.length} segment(s)` +
+          (hasKeyframedProperty(kfs, 'scale') ? ' (scale animates in per-segment steps; other properties are exact).' : ' (animated transform).')
       );
-      videoLabel = outLabel;
-      overlayCount++;
     }
   }
   if (overlayCount > 0) notes.push(`Composited ${overlayCount} overlay clip(s) from ${overlayTracks.length} overlay track(s).`);
@@ -340,9 +445,14 @@ export async function exportVideo(
       const hex = el.color.replace('#', '');
       const color = `0x${hex}`;
       const alpha = el.opacity !== undefined && el.opacity < 1 ? `@${el.opacity}` : '';
+      // Phase 28: text position keyframes compile to drawtext time
+      // expressions over output time (drawtext evaluates per frame).
+      const kfs = el.keyframes ?? [];
+      const xExpr = hasKeyframedProperty(kfs, 'x') ? `'${buildTimeExpression(kfs, 'x', el.x, el.trackStart)}'` : String(Math.round(el.x));
+      const yExpr = hasKeyframedProperty(kfs, 'y') ? `'${buildTimeExpression(kfs, 'y', el.y, el.trackStart)}'` : String(Math.round(el.y));
       filters.push(
         `[${videoLabel}]drawtext=fontfile='${fontEscaped}':text='${escapeDrawtext(el.text)}':fontsize=${Math.round(el.fontSize)}:` +
-          `fontcolor=${color}${alpha}:borderw=2:box=1:boxcolor=black@0.35:boxborderw=6:x=${Math.round(el.x)}:y=${Math.round(el.y)}:` +
+          `fontcolor=${color}${alpha}:borderw=2:box=1:boxcolor=black@0.35:boxborderw=6:x=${xExpr}:y=${yExpr}:` +
           `enable='between(t,${el.trackStart.toFixed(3)},${(el.trackStart + el.durationSec).toFixed(3)})'[${outLabel}]`
       );
       videoLabel = outLabel;

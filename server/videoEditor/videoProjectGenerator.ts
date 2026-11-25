@@ -51,8 +51,13 @@ export class VideoProjectGenerator {
       `    public double CropTop { get; set; }\n` +
       `    public double CropRight { get; set; }\n` +
       `    public double CropBottom { get; set; }\n` +
+      `    // Phase 28: ordered adjustable effect stack (mirrors the server registry)\n` +
+      `    public List<VideoEffect> Effects { get; set; } = new();\n` +
       `    public double Duration => (SourceOut - SourceIn) / (Speed > 0 ? Speed : 1.0);\n` +
       `    public double TrackEnd => TrackStart + Duration;\n}\n\n` +
+      `public sealed class VideoEffect\n{\n` +
+      `    public string Type { get; set; } = "brightness";\n` +
+      `    public double Value { get; set; }\n}\n\n` +
       `public sealed class VideoText\n{\n` +
       `    public string Text { get; set; } = "";\n` +
       `    public double TrackStart { get; set; }\n` +
@@ -108,10 +113,23 @@ export class VideoProjectGenerator {
       `            if (File.Exists(candidate)) return candidate;\n        }\n` +
       `        return null;\n    }\n\n` +
       `    private static string F(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);\n\n` +
+      `    // Phase 28: same registry semantics as the server effects module.\n` +
+      `    private static string? EffectFilter(VideoEffect e)\n    {\n` +
+      `        return e.Type switch\n        {\n` +
+      `            "brightness" => e.Value == 0 ? null : $"eq=brightness={F(e.Value)}",\n` +
+      `            "contrast" => e.Value == 1 ? null : $"eq=contrast={F(e.Value)}",\n` +
+      `            "saturation" => e.Value == 1 ? null : $"eq=saturation={F(e.Value)}",\n` +
+      `            "temperature" => e.Value == 0 ? null : $"colortemperature=temperature={Math.Round(6500 - e.Value * 3000)}",\n` +
+      `            "blur" => e.Value == 0 ? null : $"boxblur={F(e.Value)}",\n` +
+      `            "sharpen" => e.Value == 0 ? null : $"unsharp=5:5:{F(e.Value)}",\n` +
+      `            _ => throw new InvalidOperationException($"Unknown effect type: {e.Type}")\n        };\n    }\n\n` +
+      `    private static IEnumerable<string> EffectChain(VideoClip c)\n    {\n` +
+      `        foreach (var e in c.Effects) { var f = EffectFilter(e); if (f != null) yield return f; }\n    }\n\n` +
       `    private static string TransformChain(VideoClip c)\n    {\n` +
       `        var parts = new List<string>();\n` +
       `        if (c.CropLeft + c.CropRight > 0 || c.CropTop + c.CropBottom > 0)\n` +
       `            parts.Add($"crop=w=iw-{F(c.CropLeft + c.CropRight)}:h=ih-{F(c.CropTop + c.CropBottom)}:x={F(c.CropLeft)}:y={F(c.CropTop)}");\n` +
+      `        parts.AddRange(EffectChain(c));\n` +
       `        if (Math.Abs(c.Scale - 1.0) > 0.001) parts.Add($"scale=iw*{F(c.Scale)}:ih*{F(c.Scale)}");\n` +
       `        parts.Add("format=rgba");\n` +
       `        if (Math.Abs(c.RotationDeg) > 0.001) parts.Add($"rotate={F(c.RotationDeg * Math.PI / 180.0)}:ow='hypot(iw,ih)':oh='hypot(iw,ih)':c=none");\n` +
@@ -130,7 +148,9 @@ export class VideoProjectGenerator {
       `        for (int i = 0; i < clips.Count; i++)\n        {\n` +
       `            var c = clips[i];\n` +
       `            var speed = c.Speed > 0 && Math.Abs(c.Speed - 1.0) > 0.001 ? $",setpts=PTS/{F(c.Speed)}" : "";\n` +
-      `            graph.Add($"[{InputIndex(c.MediaPath)}:v]trim=start={F(c.SourceIn)}:end={F(c.SourceOut)},setpts=PTS-STARTPTS{speed},scale={Width}:{Height}:force_original_aspect_ratio=decrease,pad={Width}:{Height}:(ow-iw)/2:(oh-ih)/2,fps={Fps},format=yuv420p[v{i}]");\n` +
+      `            var fx = EffectChain(c).ToList();\n` +
+      `            var fxSuffix = fx.Count > 0 ? "," + string.Join(",", fx) : "";\n` +
+      `            graph.Add($"[{InputIndex(c.MediaPath)}:v]trim=start={F(c.SourceIn)}:end={F(c.SourceOut)},setpts=PTS-STARTPTS{speed},scale={Width}:{Height}:force_original_aspect_ratio=decrease,pad={Width}:{Height}:(ow-iw)/2:(oh-ih)/2,fps={Fps},format=yuv420p{fxSuffix}[v{i}]");\n` +
       `            vLabels.Add($"[v{i}]");\n        }\n` +
       `        graph.Add($"{string.Concat(vLabels)}concat=n={clips.Count}:v=1:a=0[vmain]");\n` +
       `        var mainLabel = "vmain";\n` +
@@ -196,6 +216,8 @@ export class VideoProjectGenerator {
       `    private readonly NumericUpDown _yBox = new() { Minimum = -4000, Maximum = 4000, Value = 0 };\n` +
       `    private readonly NumericUpDown _scaleBox = new() { Minimum = 5, Maximum = 400, Value = 100 };\n` +
       `    private readonly NumericUpDown _opacityBox = new() { Minimum = 0, Maximum = 100, Value = 100 };\n` +
+      `    private readonly ComboBox _effectTypeBox = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };\n` +
+      `    private readonly NumericUpDown _effectValueBox = new() { Minimum = -100, Maximum = 300, Value = 0 };\n` +
       `    private readonly Label _status = new() { Dock = DockStyle.Bottom, Height = 24 };\n\n` +
       `    public MainForm()\n    {\n` +
       `        Text = "${config.appName} — Video Editor";\n` +
@@ -222,7 +244,14 @@ export class VideoProjectGenerator {
       `        buttons.Controls.Add(new Label { Text = "Y:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_yBox);\n` +
       `        buttons.Controls.Add(new Label { Text = "Scale %:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_scaleBox);\n` +
       `        buttons.Controls.Add(new Label { Text = "Opacity %:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_opacityBox);\n` +
-      `        buttons.Controls.Add(transformBtn);\n\n` +
+      `        buttons.Controls.Add(transformBtn);\n` +
+      `        _effectTypeBox.Items.AddRange(new object[] { "brightness", "contrast", "saturation", "temperature", "blur", "sharpen" });\n` +
+      `        _effectTypeBox.SelectedIndex = 0;\n` +
+      `        var effectBtn = new Button { Text = "Add effect to selected", AutoSize = true };\n` +
+      `        effectBtn.Click += (_, _) => AddEffectToSelected();\n` +
+      `        buttons.Controls.Add(new Label { Text = "Effect:", AutoSize = true, Margin = new Padding(12, 8, 0, 0) }); buttons.Controls.Add(_effectTypeBox);\n` +
+      `        buttons.Controls.Add(new Label { Text = "x100:", AutoSize = true, Margin = new Padding(6, 8, 0, 0) }); buttons.Controls.Add(_effectValueBox);\n` +
+      `        buttons.Controls.Add(effectBtn);\n\n` +
       `        Controls.Add(_timeline); Controls.Add(buttons); Controls.Add(_preview); Controls.Add(menu); Controls.Add(_status);\n` +
       `        MainMenuStrip = menu;\n` +
       `        RefreshTimeline();\n    }\n\n` +
@@ -250,6 +279,12 @@ export class VideoProjectGenerator {
       `        clip.Scale = (double)_scaleBox.Value / 100.0; clip.Opacity = (double)_opacityBox.Value / 100.0;\n` +
       `        _status.Text = "Transform applied (position/scale/opacity render on overlay tracks at export).";\n` +
       `        RefreshTimeline();\n    }\n\n` +
+      `    private void AddEffectToSelected()\n    {\n` +
+      `        var sel = Selected(); if (sel == null) { _status.Text = "Select a clip first."; return; }\n` +
+      `        var type = _effectTypeBox.SelectedItem?.ToString() ?? "brightness";\n` +
+      `        sel.Value.clip.Effects.Add(new VideoEffect { Type = type, Value = (double)_effectValueBox.Value / 100.0 });\n` +
+      `        _status.Text = $"Effect {type} added (renders in export; order = list order).";\n` +
+      `        RefreshTimeline();\n    }\n\n` +
       `    private void SplitSelected()\n    {\n` +
       `        var sel = Selected(); if (sel == null) return;\n` +
       `        var (track, clip) = sel.Value;\n` +
@@ -272,7 +307,7 @@ export class VideoProjectGenerator {
       `    private void RefreshTimeline()\n    {\n` +
       `        _timeline.Items.Clear();\n` +
       `        foreach (var track in _doc.Tracks)\n            foreach (var clip in track.Clips)\n` +
-      `                _timeline.Items.Add($"[{track.Name}] {Path.GetFileName(clip.MediaPath)} @ {clip.TrackStart:0.00}s ({clip.Duration:0.00}s, vol {clip.Volume:0.0}, x {clip.X:0} y {clip.Y:0} scale {clip.Scale:0.00} opacity {clip.Opacity:0.00} speed {clip.Speed:0.00})");\n` +
+      `                _timeline.Items.Add($"[{track.Name}] {Path.GetFileName(clip.MediaPath)} @ {clip.TrackStart:0.00}s ({clip.Duration:0.00}s, vol {clip.Volume:0.0}, x {clip.X:0} y {clip.Y:0} scale {clip.Scale:0.00} opacity {clip.Opacity:0.00} speed {clip.Speed:0.00}, fx {clip.Effects.Count})");\n` +
       `        _status.Text = $"Timeline duration: {_doc.TotalDuration:0.00}s";\n    }\n}\n`;
 
     files['README.md'] =
