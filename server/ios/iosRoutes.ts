@@ -2,6 +2,7 @@ import express, { Router, Request, Response } from 'express';
 import { db } from '../store.js';
 import { Build } from '../types.js';
 import { IosProjectGenerator } from './iosProjectGenerator.js';
+import { generateVideoEditorProject, getVideoEditorConfig } from './videoEditorGenerator.js';
 import { IosProjectValidator } from './iosProjectValidator.js';
 import { IosBuildPipeline } from './iosBuildPipeline.js';
 import { IosProjectConfig } from './types.js';
@@ -66,6 +67,38 @@ export function createIosRouter(deps: IosRouteDependencies): Router {
       ownerModel: 'iOS Swarm'
     });
     return res.json({ success: true, config, validation: projectValidation, fileCount: Object.keys(files).length, files: Object.keys(files) });
+  }));
+
+  // Phase 35: Generate the native iOS video editor (ClipForge)
+  router.post('/video-editor/generate', requireAuth, owned(async (build, req, res) => {
+    const config = getVideoEditorConfig(
+      typeof req.body?.appName === 'string' ? req.body.appName : 'ClipForge',
+      typeof req.body?.bundleId === 'string' ? req.body.bundleId : 'com.squadforge.clipforge'
+    );
+    const validation = IosProjectGenerator.validateConfig(config);
+    if (!validation.valid) return res.status(400).json({ error: 'invalid iOS project config', validation });
+    const files = generateVideoEditorProject(config);
+    const projectValidation = IosProjectValidator.validateProjectFiles(files, config);
+    if (!projectValidation.valid) {
+      return res.status(500).json({ error: 'generated video editor project failed structural validation', validation: projectValidation });
+    }
+    for (const [filePath, content] of Object.entries(files)) {
+      db.setFile(build.id, { path: filePath, content, version: 1, ownerModel: req.user?.name || 'iOS Swarm' });
+    }
+    db.setFile(build.id, {
+      path: '.squadforge/ios-config.json',
+      content: JSON.stringify(config, null, 2),
+      version: 1,
+      ownerModel: 'iOS Swarm'
+    });
+    return res.json({
+      success: true,
+      config,
+      validation: projectValidation,
+      fileCount: Object.keys(files).length,
+      files: Object.keys(files),
+      editor: 'clipforge'
+    });
   }));
 
   router.get('/config', requireAuth, owned(async (build, _req, res) => {

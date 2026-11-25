@@ -3,3 +3,4 @@ export * from './iosProjectGenerator.js';
 export * from './iosProjectValidator.js';
 export * from './iosBuildPipeline.js';
 export * from './iosRoutes.js';
+export * from './videoEditorGenerator.js';
