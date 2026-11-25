@@ -56,6 +56,10 @@ describe('SquadForge Phase 25: Native iOS Development Engine Test Suite', () => 
       // Swift string interpolation must render as \(...), not an escaped literal
       assert.ok(files['FitTrack/ViewModels/ItemListViewModel.swift'].includes('\\(items.count + 1)'));
       assert.ok(!files['FitTrack/ViewModels/ItemListViewModel.swift'].includes('\\\\('));
+      // SDKROOT must pin the project to iOS: without it Xcode defaults
+      // to macOS destinations and no iOS Simulator build is possible
+      // (proven by the first genuine macOS CI run, Phase 25).
+      assert.ok(files['FitTrack.xcodeproj/project.pbxproj'].includes('SDKROOT = iphoneos;'));
       // SWIFT_VERSION in the pbxproj is a language mode, not the toolchain version
       assert.ok(files['FitTrack.xcodeproj/project.pbxproj'].includes('SWIFT_VERSION = 5.0;'));
       assert.equal(IosProjectGenerator.swiftLanguageMode('5.9'), '5.0');

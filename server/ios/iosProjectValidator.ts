@@ -43,6 +43,9 @@ export class IosProjectValidator {
     if (!pbx.includes(`IPHONEOS_DEPLOYMENT_TARGET = ${config.deploymentTarget};`)) {
       errors.push('project.pbxproj does not carry the configured deployment target');
     }
+    if (!pbx.includes('SDKROOT = iphoneos;')) {
+      errors.push('project.pbxproj does not set SDKROOT = iphoneos (Xcode would default the target to macOS and offer no iOS destinations)');
+    }
     // Every swift file in the map must be referenced by the pbxproj, and vice versa.
     for (const path of Object.keys(files)) {
       if (path.endsWith('.swift')) {

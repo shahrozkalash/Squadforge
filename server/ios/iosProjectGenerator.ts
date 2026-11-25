@@ -419,6 +419,10 @@ function buildPbxproj(config: IosProjectConfig): string {
     '\t\t\t\tLOCALIZATION_PREFERS_STRING_CATALOGS = YES;',
     '\t\t\t\tMTL_FAST_MATH = YES;',
     debug ? '\t\t\t\tONLY_ACTIVE_ARCH = YES;' : '',
+    // Without SDKROOT, Xcode defaults the project to the host
+    // platform (macOS) and the scheme offers no iOS destinations —
+    // proven by the first genuine macOS CI run (Phase 25).
+    '\t\t\t\tSDKROOT = iphoneos;',
     debug ? '\t\t\t\tSWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";' : '\t\t\t\tSWIFT_COMPILATION_MODE = wholemodule;',
     debug ? '\t\t\t\tSWIFT_OPTIMIZATION_LEVEL = "-Onone";' : '',
     debug ? '' : '\t\t\t\tVALIDATE_PRODUCT = YES;'
@@ -439,6 +443,7 @@ function buildPbxproj(config: IosProjectConfig): string {
     `\t\t\t\tMARKETING_VERSION = ${config.marketingVersion};`,
     `\t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = ${config.bundleId};`,
     '\t\t\t\tPRODUCT_NAME = "$(TARGET_NAME)";',
+    '\t\t\t\tSDKROOT = iphoneos;',
     '\t\t\t\tSWIFT_EMIT_LOC_STRINGS = YES;',
     `\t\t\t\tSWIFT_VERSION = ${IosProjectGenerator.swiftLanguageMode(config.swiftVersion)};`,
     '\t\t\t\tTARGETED_DEVICE_FAMILY = "1,2";'
