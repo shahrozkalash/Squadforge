@@ -138,7 +138,18 @@ jobs:
           PHASE32_WRONG_CERT: ${{ github.workspace }}/wrong-certs/cert.pem
           PHASE32_WRONG_KEY: ${{ github.workspace }}/wrong-certs/key.pem
           SANDBOX_IMAGE: squadforge-sandbox:1
-        run: npx tsx --test tests/phase32_docker_integration.test.ts 2>&1 | tee phase32-integration-output.txt
+        run: |
+          set -eo pipefail
+          npx tsx --test tests/phase32_docker_integration.test.ts 2>&1 | tee phase32-integration-output.txt
+
+      - name: Validate genuine results (fail the workflow on any failed check)
+        if: always()
+        run: |
+          set -e
+          echo "Validating Phase 32 evidence (a green workflow requires every check below):"
+          grep -Eq '# pass [1-9][0-9]*' phase32-integration-output.txt || { echo "FAIL: integration suite reported no passing tests"; exit 1; }
+          grep -q '# fail 0' phase32-integration-output.txt || { echo "FAIL: integration suite reported failures"; exit 1; }
+          echo "All Phase 32 checks passed."
 
       - name: Upload integration output
         if: always()
