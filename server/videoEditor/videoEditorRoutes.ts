@@ -7,6 +7,7 @@ import { VideoProjectGenerator } from './videoProjectGenerator.js';
 import { deserializeVideoProject, serializeVideoProject } from './timeline.js';
 import { applyEditOperation, type EditOperation } from './editingOps.js';
 import { defaultExportSettings, exportVideo } from './videoExporter.js';
+import { playbackInfo, renderPreviewFrame } from './playback.js';
 import { detectFfmpeg, detectFfprobe, importMedia } from './mediaProbe.js';
 import type { ExportSettings, SerializedVideoProject } from './types.js';
 import { assertSafeWorkspacePath } from '../pathSecurity.js';
@@ -78,6 +79,57 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
     const { project, mediaAssets } = deserializeVideoProject(data);
     const result = applyEditOperation(project, mediaAssets, op);
     return res.json({ success: true, result, project: serializeVideoProject(project, mediaAssets) });
+  }));
+
+  // 3c. Phase 27: playback info for a submitted project (duration,
+  // frame grid) — the numbers the player UI syncs against.
+  router.post('/playback/info', requireAuth, owned(async (_build, req, res) => {
+    const data = req.body?.project as SerializedVideoProject;
+    if (!data) return res.status(400).json({ error: 'project is required' });
+    const { project } = deserializeVideoProject(data);
+    return res.json({ success: true, info: playbackInfo(project) });
+  }));
+
+  // 3d. Phase 27: render ONE real composited preview frame at a
+  // timeline instant (actual decoding via input-seeked ffmpeg, the
+  // exporter's own transform chain). Errors are explicit, never a
+  // placeholder image.
+  router.post('/preview/frame', requireAuth, owned(async (build, req, res) => {
+    const data = req.body?.project as SerializedVideoProject;
+    if (!data) return res.status(400).json({ error: 'project is required' });
+    const timeSec = Number(req.body?.timeSec);
+    if (!Number.isFinite(timeSec)) return res.status(400).json({ error: 'timeSec must be a number' });
+    const { project, mediaAssets } = deserializeVideoProject(data);
+    const hiddenTrackIds = new Set<string>(Array.isArray(req.body?.hiddenTrackIds) ? req.body.hiddenTrackIds : []);
+    const outDir = path.join(process.cwd(), '.video_previews', build.id);
+    fs.mkdirSync(outDir, { recursive: true });
+    const framePath = path.join(outDir, `frame_${Math.round(timeSec * project.fps)}.png`);
+    const result = await renderPreviewFrame(project, mediaAssets, timeSec, framePath, {
+      hiddenTrackIds,
+      width: req.body?.width ? Number(req.body.width) : undefined,
+      height: req.body?.height ? Number(req.body.height) : undefined
+    });
+    if (result.status === 'error') return res.status(422).json({ success: false, error: result.error });
+    return res.json({
+      success: true,
+      frame: {
+        ...result,
+        path: path.relative(process.cwd(), result.framePath),
+        imageUrl: `/api/builds/${build.id}/video-editor/preview/image?path=${encodeURIComponent(path.basename(result.framePath))}`
+      }
+    });
+  }));
+
+  // 3e. Phase 27: serve a previously rendered preview frame (scoped
+  // to this build's preview directory; basename only).
+  router.get('/preview/image', requireAuth, owned(async (build, req, res) => {
+    const name = path.basename(String(req.query?.path || ''));
+    if (!name.endsWith('.png')) return res.status(400).json({ error: 'a preview .png path is required' });
+    const baseDir = path.join(process.cwd(), '.video_previews', build.id);
+    const abs = assertSafeWorkspacePath(baseDir, name);
+    if (!fs.existsSync(abs)) return res.status(404).json({ error: 'preview frame not found' });
+    res.type('png');
+    return res.sendFile(abs);
   }));
 
   // 4. Real export: project JSON -> ffmpeg -> ffprobe-validated MP4

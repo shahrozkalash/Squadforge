@@ -26,14 +26,14 @@ import { detectFfmpeg, probeMedia } from './mediaProbe.js';
  * failure; a success is only reported for a real, validated file.
  */
 
-const EFFECT_FILTERS: Record<string, string> = {
+export const EFFECT_FILTERS: Record<string, string> = {
   grayscale: 'hue=s=0',
   blur: 'boxblur=5',
   sharpen: 'unsharp=5:5:1.0',
   invert: 'negate'
 };
 
-function findFontFile(): string | null {
+export function findFontFile(): string | null {
   const candidates =
     process.platform === 'win32'
       ? ['C:\\Windows\\Fonts\\arial.ttf', 'C:\\Windows\\Fonts\\segoeui.ttf']
@@ -48,7 +48,7 @@ function findFontFile(): string | null {
   return null;
 }
 
-function escapeDrawtext(text: string): string {
+export function escapeDrawtext(text: string): string {
   return text.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/:/g, '\\:').replace(/%/g, '\\%');
 }
 
@@ -58,7 +58,7 @@ function escapeDrawtext(text: string): string {
  * expression is a filtergraph separator.) When the source dimensions
  * are unknown the filter keeps the input frame size and corners crop.
  */
-function rotateFilter(rotationDeg: number, media: MediaAsset): string {
+export function rotateFilter(rotationDeg: number, media: MediaAsset): string {
   const rad = (rotationDeg * Math.PI) / 180;
   if (media.width && media.height) {
     const cos = Math.abs(Math.cos(rad));
@@ -70,7 +70,7 @@ function rotateFilter(rotationDeg: number, media: MediaAsset): string {
   return `rotate=${rad.toFixed(6)}:c=none`;
 }
 
-function runFfmpeg(ffmpeg: string, args: string[], timeoutMs: number): Promise<{ code: number; log: string }> {
+export function runFfmpeg(ffmpeg: string, args: string[], timeoutMs: number): Promise<{ code: number; log: string }> {
   return new Promise((resolve) => {
     const child = spawn(ffmpeg, args, { shell: false });
     let log = '';
@@ -86,6 +86,38 @@ function runFfmpeg(ffmpeg: string, args: string[], timeoutMs: number): Promise<{
       resolve({ code: code ?? -1, log });
     });
   });
+}
+
+/**
+ * Phase 27: the spatial transform chain for one clip (crop → effect →
+ * scale → rgba → rotate → opacity → SAR), shared verbatim between the
+ * stream exporter below and the single-frame preview renderer in
+ * playback.ts — preview and export can never drift apart.
+ */
+export function overlayTransformChain(clip: TimelineClip, media: MediaAsset): string[] {
+  const t = clip.transform ?? { x: 0, y: 0, scale: 1, rotationDeg: 0, opacity: 1 };
+  return [
+    ...(t.crop
+      ? [`crop=w=iw-${t.crop.left + t.crop.right}:h=ih-${t.crop.top + t.crop.bottom}:x=${t.crop.left}:y=${t.crop.top}`]
+      : []),
+    ...(clip.effect !== 'none' ? [EFFECT_FILTERS[clip.effect]] : []),
+    ...(t.scale !== 1 ? [`scale=iw*${t.scale}:ih*${t.scale}`] : []),
+    'format=rgba',
+    ...(t.rotationDeg !== 0 ? [rotateFilter(t.rotationDeg, media)] : []),
+    ...(t.opacity !== 1 ? [`colorchannelmixer=aa=${t.opacity}`] : []),
+    'setsar=1'
+  ];
+}
+
+/** atempo only accepts 0.5..2 per instance on older ffmpeg; chain factors. */
+export function atempoChain(speed: number): string {
+  if (speed === 1) return '';
+  const parts: string[] = [];
+  let remaining = speed;
+  while (remaining > 2) { parts.push('atempo=2'); remaining /= 2; }
+  while (remaining < 0.5) { parts.push('atempo=0.5'); remaining /= 0.5; }
+  parts.push(`atempo=${remaining.toFixed(4)}`);
+  return parts.join(',');
 }
 
 export function defaultExportSettings(project: VideoProject): ExportSettings {
@@ -159,16 +191,6 @@ export async function exportVideo(
   const inputForClip = (clip: TimelineClip): number => {
     const media = mediaAssets.get(clip.mediaId)!;
     return mediaKind(media) === 'image' ? useLoopedImage(clip.mediaId, Math.max(clip.sourceOut, 0.1)) : useMedia(clip.mediaId);
-  };
-  /** atempo only accepts 0.5..2 per instance on older ffmpeg; chain factors. */
-  const atempoChain = (speed: number): string => {
-    if (speed === 1) return '';
-    const parts: string[] = [];
-    let remaining = speed;
-    while (remaining > 2) { parts.push('atempo=2'); remaining /= 2; }
-    while (remaining < 0.5) { parts.push('atempo=0.5'); remaining /= 0.5; }
-    parts.push(`atempo=${remaining.toFixed(4)}`);
-    return parts.join(',');
   };
 
   const transitionAfter = new Map(project.transitions.map((t) => [t.afterClipId, t.durationSec]));
@@ -272,15 +294,7 @@ export async function exportVideo(
         `trim=start=${clip.sourceIn}:end=${clip.sourceOut}`,
         'setpts=PTS-STARTPTS',
         ...(speed !== 1 ? [`setpts=PTS/${speed}`] : []),
-        ...(t.crop
-          ? [`crop=w=iw-${t.crop.left + t.crop.right}:h=ih-${t.crop.top + t.crop.bottom}:x=${t.crop.left}:y=${t.crop.top}`]
-          : []),
-        ...(clip.effect !== 'none' ? [EFFECT_FILTERS[clip.effect]] : []),
-        ...(t.scale !== 1 ? [`scale=iw*${t.scale}:ih*${t.scale}`] : []),
-        'format=rgba',
-        ...(t.rotationDeg !== 0 ? [rotateFilter(t.rotationDeg, media)] : []),
-        ...(t.opacity !== 1 ? [`colorchannelmixer=aa=${t.opacity}`] : []),
-        'setsar=1',
+        ...overlayTransformChain(clip, media),
         `setpts=PTS+${clip.trackStart.toFixed(3)}/TB`
       ];
       const srcLabel = `ovl${overlayCount}`;
