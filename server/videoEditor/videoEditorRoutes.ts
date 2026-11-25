@@ -4,7 +4,8 @@ import path from 'node:path';
 import { db } from '../store.js';
 import { Build } from '../types.js';
 import { VideoProjectGenerator } from './videoProjectGenerator.js';
-import { deserializeVideoProject, serializeVideoProject } from './timeline.js';
+import { createProject, deserializeVideoProject, recoverVideoProject, saveVideoProject, serializeVideoProject } from './timeline.js';
+import { EDITOR_WEB_APP_HTML } from './editorWebApp.js';
 import { applyEditOperation, type EditOperation } from './editingOps.js';
 import { defaultExportSettings, exportVideo } from './videoExporter.js';
 import { playbackInfo, renderPreviewFrame } from './playback.js';
@@ -64,6 +65,49 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
       });
     }
     return res.json({ success: true, config, fileCount: Object.keys(files).length, files: Object.keys(files) });
+  }));
+
+  // 1b. Phase 31: the web-based editor application for this build.
+  // A single self-contained page whose every control calls the real
+  // API routes below — no decorative controls.
+  router.get('/app', requireAuth, owned(async (_build, _req, res) => {
+    res.type('html').send(EDITOR_WEB_APP_HTML);
+  }));
+
+  // 1c. Phase 31: create a fresh serialized project.
+  router.post('/project/create', requireAuth, owned(async (_build, req, res) => {
+    const name = String(req.body?.name || 'Untitled project');
+    const width = Number(req.body?.width || 1280);
+    const height = Number(req.body?.height || 720);
+    const fps = Number(req.body?.fps || 30);
+    if (!(width >= 16 && width <= 7680) || !(height >= 16 && height <= 4320)) {
+      return res.status(400).json({ error: 'width/height out of range' });
+    }
+    if (!(fps >= 1 && fps <= 120)) return res.status(400).json({ error: 'fps out of range' });
+    const project = createProject(name, width, height, fps);
+    return res.json({ success: true, project: serializeVideoProject(project, new Map()) });
+  }));
+
+  // 1d. Phase 31: autosave / save the project (atomic write + journal).
+  router.post('/project/save', requireAuth, owned(async (build, req, res) => {
+    const data = req.body?.project as SerializedVideoProject;
+    if (!data) return res.status(400).json({ error: 'project is required' });
+    const { project, mediaAssets } = deserializeVideoProject(data);
+    const dir = path.join(process.cwd(), '.video_projects', build.id);
+    await saveVideoProject(dir, project, mediaAssets);
+    return res.json({ success: true, savedAt: new Date().toISOString() });
+  }));
+
+  // 1e. Phase 31: load the saved project, with its journal state so
+  // the UI can say honestly whether the last session ended cleanly.
+  router.get('/project/load', requireAuth, owned(async (build, _req, res) => {
+    const dir = path.join(process.cwd(), '.video_projects', build.id);
+    try {
+      const { project, mediaAssets, journalState } = await recoverVideoProject(dir);
+      return res.json({ success: true, journalState, project: serializeVideoProject(project, mediaAssets) });
+    } catch {
+      return res.status(404).json({ success: false, error: 'No saved project for this build yet.' });
+    }
   }));
 
   // 2. Toolchain status (honest detection)
@@ -156,7 +200,7 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
     const filename = path.basename(String(req.body?.filename || ''));
     const dataBase64 = String(req.body?.dataBase64 || '');
     if (!filename || !dataBase64) return res.status(400).json({ error: 'filename and dataBase64 are required' });
-    if (!/\.(mp3|wav|m4a|aac|ogg|opus|flac|mp4|mov|webm)$/i.test(filename)) {
+    if (!/\.(mp3|wav|m4a|aac|ogg|opus|flac|mp4|mov|webm|mkv|png|jpe?g|webp|gif|bmp)$/i.test(filename)) {
       return res.status(400).json({ error: 'unsupported media extension' });
     }
     const data = Buffer.from(dataBase64, 'base64');

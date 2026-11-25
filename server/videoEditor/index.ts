@@ -10,6 +10,7 @@ export * from './captionProviders.js';
 export * from './hwAccel.js';
 export * from './renderEngine.js';
 export * from './renderJobs.js';
+export * from './editorWebApp.js';
 export * from './mediaProbe.js';
 export * from './videoExporter.js';
 export * from './videoProjectGenerator.js';

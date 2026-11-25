@@ -1,8 +1,9 @@
 import * as crypto from 'crypto';
-import type { ClipTransform, MediaAsset, TextElement, TimelineClip, VideoProject } from './types.js';
+import type { ClipTransform, MediaAsset, TextElement, TimelineClip, TimelineTrack, VideoProject } from './types.js';
 import { DEFAULT_TRANSFORM } from './types.js';
 import {
   addClip,
+  addTrack,
   addTransition,
   assertNoOverlap,
   clipDuration,
@@ -205,6 +206,7 @@ export function setTrackMuted(project: VideoProject, trackId: string, muted: boo
 }
 
 export type EditOperation =
+  | { type: 'addTrack'; kind: 'video' | 'audio'; name?: string }
   | { type: 'addClip'; trackId: string; clip: Parameters<typeof addClip>[3] }
   | { type: 'trim'; clipId: string; sourceIn: number; sourceOut: number; keepEndFixed?: boolean }
   | { type: 'split'; clipId: string; atTimelineSec: number }
@@ -238,8 +240,12 @@ export function applyEditOperation(
   project: VideoProject,
   mediaAssets: Map<string, MediaAsset>,
   op: EditOperation
-): { clip?: TimelineClip; text?: TextElement; caption?: CaptionCue } {
+): { clip?: TimelineClip; text?: TextElement; caption?: CaptionCue; track?: TimelineTrack } {
   switch (op.type) {
+    case 'addTrack': {
+      if (op.kind !== 'video' && op.kind !== 'audio') throw new Error(`Track kind must be 'video' or 'audio', got '${op.kind}'`);
+      return { track: addTrack(project, op.kind, op.name) };
+    }
     case 'addClip':
       return { clip: addClip(project, mediaAssets, op.trackId, op.clip) };
     case 'trim':

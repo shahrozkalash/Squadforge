@@ -66,6 +66,10 @@ export class VideoProjectGenerator {
       `    public double Y { get; set; }\n` +
       `    public int FontSize { get; set; } = 36;\n` +
       `    public string Color { get; set; } = "#FFFFFF";\n}\n\n` +
+      `public sealed class VideoCaption\n{\n` +
+      `    public double StartSec { get; set; }\n` +
+      `    public double EndSec { get; set; }\n` +
+      `    public string Text { get; set; } = "";\n}\n\n` +
       `public sealed class VideoTrack\n{\n` +
       `    public string Kind { get; set; } = "video"; // video | audio\n` +
       `    public string Name { get; set; } = "";\n` +
@@ -82,7 +86,8 @@ export class VideoProjectGenerator {
       `    public int Height { get; set; } = 720;\n` +
       `    public int Fps { get; set; } = 30;\n` +
       `    public List<VideoTrack> Tracks { get; } = new();\n` +
-      `    public List<VideoText> Texts { get; } = new();\n\n` +
+      `    public List<VideoText> Texts { get; } = new();\n` +
+      `    public List<VideoCaption> Captions { get; } = new();\n\n` +
       `    public VideoDocument()\n    {\n` +
       `        Tracks.Add(new VideoTrack { Kind = "video", Name = "Video 1" });\n` +
       `        Tracks.Add(new VideoTrack { Kind = "audio", Name = "Audio 1" });\n    }\n\n` +
@@ -169,6 +174,14 @@ export class VideoProjectGenerator {
       `                var color = "0x" + t.Color.TrimStart('#');\n` +
       `                graph.Add($"[{mainLabel}]drawtext=fontfile='{fontPath.Replace(":", "\\\\:")}':text='{text}':fontsize={t.FontSize}:fontcolor={color}:x={F(t.X)}:y={F(t.Y)}:enable='between(t,{F(t.TrackStart)},{F(t.TrackStart + t.DurationSec)})'[vtx{ti}]");\n` +
       `                mainLabel = $"vtx{ti}"; ti++;\n            }\n        }\n` +
+      `        // Phase 31: caption burn-in mirrors the server exporter\n` +
+      `        // (bottom-centre, fontsize 28, boxed, timed enable window).\n` +
+      `        if (Captions.Count > 0 && File.Exists(fontPath))\n        {\n` +
+      `            int ci = 0;\n` +
+      `            foreach (var cap in Captions)\n            {\n` +
+      `                var text = cap.Text.Replace("'", "").Replace(":", " ");\n` +
+      `                graph.Add($"[{mainLabel}]drawtext=fontfile='{fontPath.Replace(":", "\\\\:")}':text='{text}':fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5:x=(w-text_w)/2:y=h-52:enable='between(t,{F(cap.StartSec)},{F(cap.EndSec)})'[vcap{ci}]");\n` +
+      `                mainLabel = $"vcap{ci}"; ci++;\n            }\n        }\n` +
       `        graph.Add($"[{mainLabel}]null[vout]");\n` +
       `        var aLabels = new List<string>();\n` +
       `        int ai = 0;\n` +
