@@ -99,6 +99,19 @@ describe('Phase 35: generated project completeness', () => {
     assert.ok(files['ClipForge/Info.plist'].includes('NSPhotoLibraryUsageDescription'));
   });
 
+  test('generated Swift has no broken multi-line string literals', () => {
+    // Same regression class as the Phase 34 Kotlin failure: a
+    // single-backslash escape in a generator template would turn a
+    // Swift "\n" into a real line break inside a string literal.
+    for (const [path, content] of Object.entries(files)) {
+      if (!path.endsWith('.swift')) continue;
+      content.split('\n').forEach((line, i) => {
+        const quotes = (line.replace(/\\"/g, '').match(/"/g) || []).length;
+        assert.equal(quotes % 2, 0, `${path}:${i + 1} has an unterminated string literal`);
+      });
+    }
+  });
+
   test('no WebView anywhere in the generated app', () => {
     for (const [path, content] of Object.entries(files)) {
       if (path.endsWith('.swift')) {
