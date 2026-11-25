@@ -62,6 +62,7 @@ import { createImageEditorRouter } from './server/imageEditor/index.js';
 import { createVideoEditorRouter } from './server/videoEditor/index.js';
 import { createScene3dRouter } from './server/scene3d/index.js';
 import { createIdeRouter } from './server/ide/index.js';
+import { createReleaseRouter } from './server/release/index.js';
 
 
 dotenv.config();
@@ -2636,6 +2637,12 @@ app.use('/api/builds/:id/scene3d', createScene3dRouter({
 
 // Desktop IDE and Development Tools (Phase 22)
 app.use('/api/builds/:id/ide', createIdeRouter({
+  requireAuth,
+  verifyBuildOwnership
+}));
+
+// Desktop Release and Distribution (Phase 23)
+app.use('/api/builds/:id/release', createReleaseRouter({
   requireAuth,
   verifyBuildOwnership
 }));
