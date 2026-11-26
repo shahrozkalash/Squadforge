@@ -190,9 +190,16 @@ describe('Phase 34: media import, preview, export wiring', () => {
     assert.ok(exporter.includes('getProgress(holder)'));
     assert.ok(exporter.includes('ExportCancelledException'));
     assert.ok(exporter.includes('Composition.Builder'));
-    // Export limitations are stated in code, not hidden.
-    assert.ok(exporter.includes('were not composited into the export'));
-    assert.ok(exporter.includes('render as cuts'));
+    // Phase 37: the exporter is driven by the pure ExportPlanner
+    // plan and composites overlay sequences through Media3's
+    // VideoCompositorSettings; the remaining limitations (non-
+    // crossfade transition types) are stated in the plan's notes,
+    // not hidden.
+    assert.ok(exporter.includes('ExportPlanner.plan'));
+    assert.ok(exporter.includes('setVideoCompositorSettings'));
+    const plan = kt('/export/ExportPlan.kt');
+    assert.ok(plan.includes('render as cuts in the app export'));
+    assert.ok(!exporter.includes('were not composited into the export'));
   });
 
   test('persistence saves atomically and recovers the last project', () => {
