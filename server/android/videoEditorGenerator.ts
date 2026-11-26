@@ -1104,6 +1104,23 @@ object ExportPlanner {
         return out
     }
 
+    /**
+     * Trailing filler for a composited (head/overlay) VIDEO sequence:
+     * the same muted repeats as [preRoll], appended after the real
+     * item so the sequence spans the full composition duration. A
+     * sequence that ends early leaves Media3 holding its last frame:
+     * the compositor keeps drawing that frame for the rest of the
+     * export, consulting the overlay settings with the held frame's
+     * own (in-window) timestamp, so the alpha 0 the settings return
+     * for out-of-window times never applies (Phase 37 CI run #16:
+     * the picture-in-picture stayed green to the end of the file
+     * after its window closed, failing only pipGoneBlueBase). With
+     * filler after the item, the input's current frame advances past
+     * the window and its settings lookup lands outside the window,
+     * where alpha is 0.
+     */
+    private fun postRoll(item: PlanItem, fillSec: Double): List<PlanElement> = preRoll(item, fillSec)
+
     fun plan(project: VideoProject, targetWidth: Int?, targetHeight: Int?): ExportPlan {
         val outW = targetWidth ?: project.width
         val outH = targetHeight ?: project.height
@@ -1382,6 +1399,39 @@ object ExportPlanner {
             }
             if (placed > 0) {
                 sequences.add(elements)
+            }
+        }
+
+        // Pad every composited (non-base) video sequence to the
+        // longest video sequence's duration with muted post-roll (see
+        // postRoll): a composited sequence must span the whole export
+        // or its last frame freezes on screen after its window closes.
+        if (videoSequenceCount > 1) {
+            fun seqLen(seq: List<PlanElement>): Double {
+                var sum = 0.0
+                for (el in seq) {
+                    sum += when (el) {
+                        is PlanElement.Gap -> el.durationSec
+                        is PlanElement.Item -> el.item.segmentDurationSec
+                    }
+                }
+                return sum
+            }
+            var target = 0.0
+            for (i in 0 until videoSequenceCount) {
+                val len = seqLen(sequences[i])
+                if (len > target) target = len
+            }
+            for (i in 1 until videoSequenceCount) {
+                val seq = sequences[i]
+                val fill = target - seqLen(seq)
+                if (fill > 0.001) {
+                    val template = seq.filterIsInstance<PlanElement.Item>().lastOrNull()?.item
+                    val mutable = seq as? MutableList<PlanElement>
+                    if (template != null && mutable != null) {
+                        mutable.addAll(postRoll(template, fill))
+                    }
+                }
             }
         }
 
@@ -2592,11 +2642,13 @@ class ExportPlannerTest {
         // The 3 s leading offset is muted pre-roll, NOT a gap: a leading
         // gap would stop Media3 registering this sequence's video track
         // (see ExportPlanner.preRoll). The head item's own source span is
-        // 1 s, so the pre-roll is 3 repeats of it; the head comes last.
+        // 1 s, so the pre-roll is 3 repeats of it. The head is followed
+        // by 3 s of muted post-roll so the sequence spans the full 7 s
+        // export (see ExportPlanner.postRoll: run #16's frozen frame).
         assertEquals(emptyList<Double>(), gaps(headSeq))
         val headItems = items(headSeq)
-        assertEquals(4, headItems.size)
-        for (pre in headItems.dropLast(1)) {
+        assertEquals(7, headItems.size)
+        for (pre in headItems.subList(0, 3)) {
             assertEquals(1.0, pre.segmentDurationSec, 0.001)
             // Pre-roll mirrors the head's audio presence (the head's
             // clip has audio), silenced by zero gain — a sequence whose
@@ -2604,7 +2656,12 @@ class ExportPlannerTest {
             assertTrue(!pre.removeAudio)
             assertEquals(0.0, pre.gain, 0.001)
         }
-        val head = headItems.last()
+        for (post in headItems.subList(4, 7)) {
+            assertEquals(1.0, post.segmentDurationSec, 0.001)
+            assertTrue(!post.removeAudio)
+            assertEquals(0.0, post.gain, 0.001)
+        }
+        val head = headItems[3]
         assertEquals(0.0, head.sourceIn, 0.001)
         assertEquals(1.0, head.segmentDurationSec, 0.001)
         assertEquals(1.0, head.extraFadeInSec, 0.001)
@@ -2685,13 +2742,18 @@ class ExportPlannerTest {
         // 3 s source span covers it in a single chunk), then the clip.
         assertEquals(emptyList<Double>(), gaps(plan.sequences[1]))
         val seqItems = items(plan.sequences[1])
-        assertEquals(2, seqItems.size)
+        // Pre-roll (2 s) + the clip (3 s) + post-roll (1 s) spanning
+        // the base's full 6 s (see ExportPlanner.postRoll).
+        assertEquals(3, seqItems.size)
         assertEquals(2.0, seqItems[0].segmentDurationSec, 0.001)
         // The clip's asset has audio, so the pre-roll mirrors that
         // (zero gain) instead of removing the track.
         assertTrue(!seqItems[0].removeAudio)
         assertEquals(0.0, seqItems[0].gain, 0.001)
         assertEquals(3.0, seqItems[1].segmentDurationSec, 0.001)
+        assertEquals(1.0, seqItems[2].segmentDurationSec, 0.001)
+        assertTrue(!seqItems[2].removeAudio)
+        assertEquals(0.0, seqItems[2].gain, 0.001)
         val w = plan.windows.single()
         assertEquals(1, w.sequenceIndex)
         assertEquals(2.0, w.startSec, 0.001)
@@ -2727,19 +2789,28 @@ class ExportPlannerTest {
         assertEquals(emptyList<Double>(), gaps(plan.sequences[1]))
         assertEquals(emptyList<Double>(), gaps(plan.sequences[2]))
         val first = items(plan.sequences[1])
-        assertEquals(2, first.size)
+        // Pre-roll (1 s) + the clip (2 s) + post-roll (3 s) spanning
+        // the base's full 6 s (see ExportPlanner.postRoll).
+        assertEquals(3, first.size)
         assertTrue(first[0].isImage)
         assertEquals(1.0, first[0].segmentDurationSec, 0.001)
         assertTrue(first[0].removeAudio)
         assertTrue(first[1].isImage)
         assertEquals(2.0, first[1].segmentDurationSec, 0.001)
+        assertTrue(first[2].isImage)
+        assertEquals(3.0, first[2].segmentDurationSec, 0.001)
+        assertTrue(first[2].removeAudio)
+        assertEquals(0.0, first[2].gain, 0.001)
         val second = items(plan.sequences[2])
-        assertEquals(2, second.size)
+        assertEquals(3, second.size)
         assertTrue(second[0].isImage)
         assertEquals(4.0, second[0].segmentDurationSec, 0.001)
         assertTrue(second[0].removeAudio)
         assertTrue(second[1].isImage)
         assertEquals(1.5, second[1].segmentDurationSec, 0.001)
+        assertTrue(second[2].isImage)
+        assertEquals(0.5, second[2].segmentDurationSec, 0.001)
+        assertTrue(second[2].removeAudio)
     }
 
     @Test
