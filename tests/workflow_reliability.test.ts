@@ -21,10 +21,10 @@ import { describe, test } from 'node:test';
 
 const WORKFLOWS: Record<string, { gateNeedles: string[] }> = {
   '.github/workflows/phase32-execution-verify.yml': {
-    gateNeedles: ['# fail 0', '# pass']
+    gateNeedles: ['# tests 7', '# pass 7', '# fail 0', '# skipped 0']
   },
   '.github/workflows/phase34-android-video-editor.yml': {
-    gateNeedles: ['"ok":true', 'apkBytes', 'UNIT_TESTS', 'apksigner verification strictly PASSED', '.android_artifacts']
+    gateNeedles: ['"ok":true', 'apkBytes', 'UNIT_TESTS tests=8 failures=0 errors=0 skipped=0', 'apksigner verification strictly PASSED', '.android_artifacts']
   },
   '.github/workflows/phase35-ios-video-editor.yml': {
     gateNeedles: ['"ok":true', 'appBytes', 'ClipForge.app']

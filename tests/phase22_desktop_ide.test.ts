@@ -1,6 +1,7 @@
 import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { tokenize, highlightToHtml, languageForPath } from '../server/ide/syntaxHighlighter.js';
 import { WorkspaceFiles } from '../server/ide/workspaceFiles.js';
@@ -12,7 +13,14 @@ import { PROJECT_TEMPLATES, getTemplate } from '../server/ide/templates.js';
 import { reviewCode, explainDiagnostic, AiAssistService } from '../server/ide/aiAssist.js';
 import { IdeProjectGenerator } from '../server/ide/ideProjectGenerator.js';
 
-const BASE = path.join(process.cwd(), '.tmp_ide_tests');
+// The scratch tree must live OUTSIDE any git work tree:
+// GitService.isRepository() runs `git rev-parse --is-inside-work-tree`,
+// which walks up parent directories — a workspace created under the
+// repository checkout therefore reports itself as a repository before
+// `git init`, and test 5.1's not-a-repository assertion fails. That is
+// exactly what happened in CI (real checkout); it passed on hosts
+// whose working copy has no .git directory of its own.
+const BASE = fs.mkdtempSync(path.join(os.tmpdir(), 'squadforge-ide-tests-'));
 
 function freshWorkspace(name: string): string {
   const dir = path.join(BASE, name);
