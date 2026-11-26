@@ -1044,18 +1044,21 @@ object ExportPlanner {
     private data class HeadEntry(val windowStartSec: Double, val item: PlanItem, val durationSec: Double, val mediaWidth: Int)
 
     /**
-     * Leading offset for a non-primary video sequence. A sequence whose
-     * FIRST element is a gap never registers its video track with
-     * Media3's export pipeline (the gap item has no tracks, and track
-     * registration happens per item in order), so Media3 counts only
-     * the base sequence as a video input, picks its single-input video
-     * graph, and then refuses the composition's VideoCompositorSettings
-     * ("SingleInputVideoGraph does not use VideoCompositor") — proven
-     * on device in Phase 37 CI runs #3/#5. The offset is therefore
-     * filled with muted, audio-removed repeats of the item's own source
-     * segment; the compositor settings keep every non-primary sequence
-     * at alpha 0 outside its windows, so the pre-roll is invisible and
-     * inaudible, and the real item still starts at the exact offset.
+     * Offset filler for a VIDEO sequence. Media3's Transformer rejects
+     * gaps in video sequences outright ("Gaps in video sequences are
+     * not supported", Phase 37 CI run #6), and a sequence whose FIRST
+     * element is a gap additionally never registers its video track
+     * (track registration happens per item in order), so Media3 counts
+     * only the base sequence as a video input, picks its single-input
+     * video graph, and refuses the composition's
+     * VideoCompositorSettings ("SingleInputVideoGraph does not use
+     * VideoCompositor", runs #3/#5). Every offset in a video sequence
+     * is therefore filled with muted, audio-removed repeats of the
+     * following item's own source segment; the compositor settings
+     * keep every non-primary sequence at alpha 0 outside its windows,
+     * so the filler is invisible and inaudible, and the real item
+     * still starts at the exact offset. (Audio sequences may use real
+     * gaps: silence needs no track registration.)
      */
     private fun preRoll(item: PlanItem, offsetSec: Double): List<PlanElement> {
         if (offsetSec <= 0.001) return emptyList()
@@ -1231,9 +1234,8 @@ object ExportPlanner {
             for (head in heads.sortedBy { it.windowStartSec }) {
                 val gap = head.windowStartSec - cursor
                 if (gap > 0.001) {
-                    // Leading offsets must be pre-roll, not gaps (see preRoll).
-                    if (elements.isEmpty()) elements.addAll(preRoll(head.item, gap))
-                    else elements.add(PlanElement.Gap(gap))
+                    // Video sequences cannot contain gaps (see preRoll).
+                    elements.addAll(preRoll(head.item, gap))
                 }
                 elements.add(PlanElement.Item(head.item))
                 cursor = max(cursor, head.windowStartSec) + head.durationSec
@@ -1294,9 +1296,8 @@ object ExportPlanner {
                     texts = emptyList()
                 )
                 if (gap > 0.001) {
-                    // Leading offsets must be pre-roll, not gaps (see preRoll).
-                    if (elements.isEmpty()) elements.addAll(preRoll(item, gap))
-                    else elements.add(PlanElement.Gap(gap))
+                    // Video sequences cannot contain gaps (see preRoll).
+                    elements.addAll(preRoll(item, gap))
                 }
                 elements.add(PlanElement.Item(item))
                 windows.add(
@@ -2610,23 +2611,32 @@ class ExportPlannerTest {
     fun imageClipOnOverlayTrackBecomesImageItem() {
         val base = TimelineClip("a", "v1", 0.0, 0.0, 6.0)
         val img = TimelineClip("i", "im", 1.0, 0.0, 2.0)
+        val img2 = TimelineClip("i2", "im", 4.0, 0.0, 1.5)
         val p = project(
             listOf(
                 TimelineTrack("t", "video", "Base", listOf(base)),
-                TimelineTrack("t2", "video", "PiP", listOf(img))
+                TimelineTrack("t2", "video", "PiP", listOf(img, img2))
             ),
             listOf(asset("v1", "video"), asset("im", "image", 200, 100))
         )
         val plan = ExportPlanner.plan(p, null, null)
-        // Image at 1 s: a 1 s muted image pre-roll item, then the clip.
+        // Video sequences never contain gaps: the 1 s leading offset and
+        // the 1 s space between the two image clips are both filled with
+        // muted image pre-roll items (see ExportPlanner.preRoll).
+        assertEquals(emptyList<Double>(), gaps(plan.sequences[1]))
         val imgItems = items(plan.sequences[1])
-        assertEquals(2, imgItems.size)
+        assertEquals(4, imgItems.size)
         assertTrue(imgItems[0].isImage)
         assertEquals(1.0, imgItems[0].segmentDurationSec, 0.001)
         assertTrue(imgItems[0].removeAudio)
         val item = imgItems[1]
         assertTrue(item.isImage)
         assertEquals(2.0, item.segmentDurationSec, 0.001)
+        assertTrue(imgItems[2].isImage)
+        assertEquals(1.0, imgItems[2].segmentDurationSec, 0.001)
+        assertTrue(imgItems[2].removeAudio)
+        assertTrue(imgItems[3].isImage)
+        assertEquals(1.5, imgItems[3].segmentDurationSec, 0.001)
     }
 
     @Test
