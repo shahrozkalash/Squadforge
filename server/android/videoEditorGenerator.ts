@@ -1044,7 +1044,7 @@ object ExportPlanner {
     /** Transition types Media3 renders for real in the app export. */
     val REAL_TRANSITIONS = setOf("crossfade")
 
-    private data class HeadEntry(val windowStartSec: Double, val item: PlanItem, val durationSec: Double, val mediaWidth: Int)
+    private data class HeadEntry(val windowStartSec: Double, val item: PlanItem, val durationSec: Double, val mediaWidth: Int, val mediaHeight: Int)
 
     /**
      * Offset filler for a VIDEO sequence. Media3's Transformer rejects
@@ -1224,7 +1224,7 @@ object ExportPlanner {
                         texts = segTexts
                     )
                     if (isHead) {
-                        heads.add(HeadEntry(exportStart[clip.id] ?: 0.0, item, headD, asset.width ?: project.width))
+                        heads.add(HeadEntry(exportStart[clip.id] ?: 0.0, item, headD, asset.width ?: project.width, asset.height ?: project.height))
                     } else {
                         baseElements.add(PlanElement.Item(item))
                     }
@@ -1253,8 +1253,12 @@ object ExportPlanner {
                         sequenceIndex = seqIndex,
                         startSec = head.windowStartSec,
                         endSec = head.windowStartSec + head.durationSec,
-                        scaleX = 1.0,
-                        scaleY = 1.0,
+                        // Compositor scale is relative to the input's
+                        // own size (Media3 applies it on top of the
+                        // input-to-canvas aspect fit), so covering the
+                        // canvas means scaling by canvas/media.
+                        scaleX = projW / head.mediaWidth,
+                        scaleY = projH / head.mediaHeight,
                         anchorX = 0.0,
                         anchorY = 0.0,
                         alpha = 1.0,
@@ -1312,8 +1316,16 @@ object ExportPlanner {
                         sequenceIndex = seqIndex,
                         startSec = startExp,
                         endSec = startExp + dur,
-                        scaleX = scaledW / projW,
-                        scaleY = scaledH / projH,
+                        // Relative to the media's own size, NOT the
+                        // canvas: Media3's compositor applies this
+                        // scale on top of its aspect fit of the input
+                        // into the canvas, so canvas-relative values
+                        // shrink the overlay a second time (Phase 37
+                        // CI run #15 drew the PiP at 32x32 instead of
+                        // 160x120). With media-relative scale and the
+                        // centre anchors below, placement is exact.
+                        scaleX = scaledW / mw,
+                        scaleY = scaledH / mh,
                         anchorX = (tr.x + scaledW / 2.0) / projW * 2.0 - 1.0,
                         anchorY = 1.0 - (tr.y + scaledH / 2.0) / projH * 2.0,
                         alpha = tr.opacity,
@@ -1766,6 +1778,13 @@ class VideoExporter(private val context: Context) {
             }
             try {
                 val built = Transformer.Builder(context)
+                    // Pin the output codec: with the base sequence no
+                    // longer first in the composition, Media3's default
+                    // encoder choice fell back to this emulator's HEVC
+                    // encoder, whose size cap shrank the export to
+                    // 512x288 (Phase 37 CI run #15). H.264 at the
+                    // project size is the app's established output.
+                    .setVideoMimeType("video/avc")
                     .addListener(object : Transformer.Listener {
                         override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                             progress = 1f
@@ -2677,8 +2696,10 @@ class ExportPlannerTest {
         assertEquals(1, w.sequenceIndex)
         assertEquals(2.0, w.startSec, 0.001)
         assertEquals(5.0, w.endSec, 0.001)
-        assertEquals(0.5, w.scaleX, 0.001)
-        assertEquals(240.0 / 360.0, w.scaleY, 0.001)
+        // Media-relative compositor scale: the 160x120 asset is placed
+        // at 2x (320x240 on the 640x360 canvas), so both scales are 2.
+        assertEquals(2.0, w.scaleX, 0.001)
+        assertEquals(2.0, w.scaleY, 0.001)
         assertEquals(-0.1875, w.anchorX, 0.001)
         assertEquals(1.0 - 170.0 / 360.0 * 2.0, w.anchorY, 0.001)
         assertEquals(0.5, w.alpha, 0.001)
