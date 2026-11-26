@@ -107,3 +107,25 @@ apksigner strictly-PASSED line is present, the negative test is
   is assessed as a transient plugin-repository/runner network
   failure, and it is exactly the class of failure the old
   workflow would have painted green.
+
+## CI reliability: exact-count gate (2026-11-26)
+
+Follow-up assignment ("Fix CI Reliability Issues Only"): the
+**Validate genuine results** gate previously accepted any
+`UNIT_TESTS` line showing `failures=0 errors=0`; it now requires
+the single exact line `UNIT_TESTS tests=8 failures=0 errors=0
+skipped=0` (workflow commit `dd2b4f8`; guard needles updated in
+`tests/workflow_reliability.test.ts`, commit `8021ed6`). All other
+checks (RESULT_JSON `ok:true`, non-zero `apkBytes`, strict
+apksigner PASSED line, negative test `ok:true`, non-empty APK in
+`.android_artifacts`) are unchanged. The gate script was
+fixture-proven before going live: genuine output exits 0; a skip
+count or a wrong total exits 1.
+
+- Run #10 — 45759035975 (manual dispatch on `94c67b7`):
+  **success** — RESULT_JSON `ok:true`, APK 12,584,145 bytes,
+  sha256 `1ec3d770…cc107be`, `UNIT_TESTS tests=8 failures=0
+  errors=0 skipped=0`, apksigner strictly PASSED, gate's final
+  line "All Phase 34 checks passed." (The push-triggered run #9
+  on `dd2b4f8` also passed.)
+  https://github.com/shahrozkalash/Squadforge/actions/runs/45759035975

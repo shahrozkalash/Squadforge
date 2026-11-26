@@ -186,3 +186,20 @@ workflow unless the captured output shows at least one pass and
   passed."). The flag reporting appears intermittent; the limit
   itself enforced in both runs.
 - The earlier genuine pass (run 45669432584, 7/7) stands.
+
+## CI reliability: exact-count gate (2026-11-26)
+
+Follow-up assignment ("Fix CI Reliability Issues Only"): the
+**Validate genuine results** gate was tightened from "at least one
+pass and `# fail 0`" to the exact integration contract — it now
+requires all four summary lines verbatim: `# tests 7`, `# pass 7`,
+`# fail 0`, `# skipped 0` (workflow commit `94c67b7`; guard needles
+updated in `tests/workflow_reliability.test.ts`, commit `8021ed6`).
+The gate script was fixture-proven before going live: genuine
+output exits 0; a fail count, a skip count, or a wrong total each
+exit 1.
+
+- Run #7 — 45758978615 (push on `94c67b7`): **success** —
+  integration `# tests 7 / # pass 7 / # fail 0 / # cancelled 0 /
+  # skipped 0`; gate's final line "All Phase 32 checks passed."
+  https://github.com/shahrozkalash/Squadforge/actions/runs/45758978615
