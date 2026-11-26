@@ -1053,7 +1053,7 @@ object ExportPlanner {
      * video graph, and refuses the composition's
      * VideoCompositorSettings ("SingleInputVideoGraph does not use
      * VideoCompositor", runs #3/#5). Every offset in a video sequence
-     * is therefore filled with muted, audio-removed repeats of the
+     * is therefore filled with muted repeats of the
      * following item's own source segment; the compositor settings
      * keep every non-primary sequence at alpha 0 outside its windows,
      * so the filler is invisible and inaudible, and the real item
@@ -1073,7 +1073,13 @@ object ExportPlanner {
                 clipDurationSec = dur,
                 segmentOffsetSec = 0.0,
                 segmentDurationSec = dur,
-                removeAudio = true,
+                // Mirror the item's own audio presence: a sequence
+                // whose items disagree about carrying an audio track
+                // is refused by Media3, so an audio-bearing item gets
+                // audio-bearing pre-roll (silenced by the zero gain),
+                // and only a genuinely audio-less item gets
+                // audio-removed pre-roll.
+                removeAudio = item.removeAudio || !item.hasAudio,
                 applyPresentation = false,
                 texts = emptyList()
             )
@@ -1226,19 +1232,19 @@ object ExportPlanner {
             sequences.add(baseElements)
         }
 
-        // ---- crossfade heads sequence ----
-        if (heads.isNotEmpty() && baseElements.isNotEmpty()) {
-            val seqIndex = sequences.size
-            val elements = ArrayList<PlanElement>()
-            var cursor = 0.0
+        // ---- crossfade head sequences (one per head) ----
+        // One sequence per composited element keeps every sequence
+        // homogeneous: Media3 refuses a sequence whose items disagree
+        // about which track types they carry (an audio-less item
+        // followed by an audio-bearing one, or vice versa), so items
+        // from different source clips never share a sequence.
+        if (baseElements.isNotEmpty()) {
             for (head in heads.sortedBy { it.windowStartSec }) {
-                val gap = head.windowStartSec - cursor
-                if (gap > 0.001) {
-                    // Video sequences cannot contain gaps (see preRoll).
-                    elements.addAll(preRoll(head.item, gap))
-                }
+                val seqIndex = sequences.size
+                val elements = ArrayList<PlanElement>()
+                elements.addAll(preRoll(head.item, head.windowStartSec))
                 elements.add(PlanElement.Item(head.item))
-                cursor = max(cursor, head.windowStartSec) + head.durationSec
+                sequences.add(elements)
                 windows.add(
                     PlanWindow(
                         sequenceIndex = seqIndex,
@@ -1254,22 +1260,19 @@ object ExportPlanner {
                     )
                 )
             }
-            sequences.add(elements)
         }
 
         // ---- overlay video tracks (PiP + image compositing) ----
+        // One sequence per clip, for the homogeneity reason given at
+        // the crossfade heads: an overlay track can mix silent clips,
+        // audio-bearing clips and images, and those must never share
+        // a Media3 sequence.
         for (track in project.tracks.filter { it.kind == "video" && it.id != base?.id }) {
-            val seqIndex = sequences.size
-            val elements = ArrayList<PlanElement>()
-            var cursor = 0.0
-            var placed = 0
             for (clip in track.clips.sortedBy { it.trackStart }) {
                 val asset = mediaById[clip.mediaId] ?: continue
                 val kind = asset.mediaKind()
                 if (kind != "video" && kind != "image") continue
                 val startExp = exportTime(clip.trackStart)
-                val actualStart = max(cursor, startExp)
-                val gap = actualStart - cursor
                 val dur = clip.duration()
                 val tr = clip.transform ?: ClipTransform()
                 val mw = (asset.width ?: project.width).toDouble()
@@ -1295,16 +1298,17 @@ object ExportPlanner {
                     applyPresentation = false,
                     texts = emptyList()
                 )
-                if (gap > 0.001) {
-                    // Video sequences cannot contain gaps (see preRoll).
-                    elements.addAll(preRoll(item, gap))
-                }
+                val seqIndex = sequences.size
+                val elements = ArrayList<PlanElement>()
+                // Video sequences cannot contain gaps (see preRoll).
+                elements.addAll(preRoll(item, startExp))
                 elements.add(PlanElement.Item(item))
+                sequences.add(elements)
                 windows.add(
                     PlanWindow(
                         sequenceIndex = seqIndex,
-                        startSec = actualStart,
-                        endSec = actualStart + dur,
+                        startSec = startExp,
+                        endSec = startExp + dur,
                         scaleX = scaledW / projW,
                         scaleY = scaledH / projH,
                         anchorX = (tr.x + scaledW / 2.0) / projW * 2.0 - 1.0,
@@ -1314,11 +1318,6 @@ object ExportPlanner {
                         rotationDeg = tr.rotationDeg
                     )
                 )
-                cursor = actualStart + dur
-                placed++
-            }
-            if (placed > 0) {
-                sequences.add(elements)
             }
         }
 
@@ -1684,13 +1683,6 @@ class VideoExporter(private val context: Context) {
             sequences.add(builder.build())
         }
         val composition = Composition.Builder(sequences)
-            // Overlay and crossfade-head sequences legitimately start
-            // with items that carry no audio track (muted pre-roll,
-            // images) and later reach items that do; Media3 refuses
-            // that shape unless the audio track is forced (the exact
-            // IllegalStateException names this switch — Phase 37 CI
-            // run #7).
-            .experimentalSetForceAudioTrack(true)
             .setVideoCompositorSettings(
                 ExportCompositorSettings(plan.outputWidth, plan.outputHeight, plan.windows)
             )
@@ -2514,7 +2506,10 @@ class ExportPlannerTest {
         assertEquals(4, headItems.size)
         for (pre in headItems.dropLast(1)) {
             assertEquals(1.0, pre.segmentDurationSec, 0.001)
-            assertTrue(pre.removeAudio)
+            // Pre-roll mirrors the head's audio presence (the head's
+            // clip has audio), silenced by zero gain — a sequence whose
+            // items disagree about audio tracks is refused by Media3.
+            assertTrue(!pre.removeAudio)
             assertEquals(0.0, pre.gain, 0.001)
         }
         val head = headItems.last()
@@ -2600,7 +2595,10 @@ class ExportPlannerTest {
         val seqItems = items(plan.sequences[1])
         assertEquals(2, seqItems.size)
         assertEquals(2.0, seqItems[0].segmentDurationSec, 0.001)
-        assertTrue(seqItems[0].removeAudio)
+        // The clip's asset has audio, so the pre-roll mirrors that
+        // (zero gain) instead of removing the track.
+        assertTrue(!seqItems[0].removeAudio)
+        assertEquals(0.0, seqItems[0].gain, 0.001)
         assertEquals(3.0, seqItems[1].segmentDurationSec, 0.001)
         val w = plan.windows.single()
         assertEquals(1, w.sequenceIndex)
@@ -2627,23 +2625,26 @@ class ExportPlannerTest {
             listOf(asset("v1", "video"), asset("im", "image", 200, 100))
         )
         val plan = ExportPlanner.plan(p, null, null)
-        // Video sequences never contain gaps: the 1 s leading offset and
-        // the 1 s space between the two image clips are both filled with
-        // muted image pre-roll items (see ExportPlanner.preRoll).
+        // One sequence per overlay clip (homogeneous sequences), and
+        // video sequences never contain gaps: each clip's offset is
+        // filled with muted image pre-roll (see ExportPlanner.preRoll).
+        assertEquals(3, plan.sequences.size)
         assertEquals(emptyList<Double>(), gaps(plan.sequences[1]))
-        val imgItems = items(plan.sequences[1])
-        assertEquals(4, imgItems.size)
-        assertTrue(imgItems[0].isImage)
-        assertEquals(1.0, imgItems[0].segmentDurationSec, 0.001)
-        assertTrue(imgItems[0].removeAudio)
-        val item = imgItems[1]
-        assertTrue(item.isImage)
-        assertEquals(2.0, item.segmentDurationSec, 0.001)
-        assertTrue(imgItems[2].isImage)
-        assertEquals(1.0, imgItems[2].segmentDurationSec, 0.001)
-        assertTrue(imgItems[2].removeAudio)
-        assertTrue(imgItems[3].isImage)
-        assertEquals(1.5, imgItems[3].segmentDurationSec, 0.001)
+        assertEquals(emptyList<Double>(), gaps(plan.sequences[2]))
+        val first = items(plan.sequences[1])
+        assertEquals(2, first.size)
+        assertTrue(first[0].isImage)
+        assertEquals(1.0, first[0].segmentDurationSec, 0.001)
+        assertTrue(first[0].removeAudio)
+        assertTrue(first[1].isImage)
+        assertEquals(2.0, first[1].segmentDurationSec, 0.001)
+        val second = items(plan.sequences[2])
+        assertEquals(2, second.size)
+        assertTrue(second[0].isImage)
+        assertEquals(4.0, second[0].segmentDurationSec, 0.001)
+        assertTrue(second[0].removeAudio)
+        assertTrue(second[1].isImage)
+        assertEquals(1.5, second[1].segmentDurationSec, 0.001)
     }
 
     @Test
