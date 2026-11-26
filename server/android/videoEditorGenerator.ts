@@ -1684,6 +1684,13 @@ class VideoExporter(private val context: Context) {
             sequences.add(builder.build())
         }
         val composition = Composition.Builder(sequences)
+            // Overlay and crossfade-head sequences legitimately start
+            // with items that carry no audio track (muted pre-roll,
+            // images) and later reach items that do; Media3 refuses
+            // that shape unless the audio track is forced (the exact
+            // IllegalStateException names this switch — Phase 37 CI
+            // run #7).
+            .experimentalSetForceAudioTrack(true)
             .setVideoCompositorSettings(
                 ExportCompositorSettings(plan.outputWidth, plan.outputHeight, plan.windows)
             )
