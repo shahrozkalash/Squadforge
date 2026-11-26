@@ -203,3 +203,9 @@ exit 1.
   integration `# tests 7 / # pass 7 / # fail 0 / # cancelled 0 /
   # skipped 0`; gate's final line "All Phase 32 checks passed."
   https://github.com/shahrozkalash/Squadforge/actions/runs/45758978615
+
+- Addendum (2026-11-26, final CI reliability fix): run #8 —
+  45764540819 on `91691fc`, **success** — integration exactly
+  `# tests 7 / # pass 7 / # fail 0 / # skipped 0`; gate passed
+  ("All Phase 32 checks passed.").
+  https://github.com/shahrozkalash/Squadforge/actions/runs/45764540819

@@ -96,3 +96,13 @@ negative-test results are `ok:true`, and a non-empty
   (byte-identical to run #5), ops checks and the broken-Swift
   negative test passed, and the gate passed ("All Phase 35
   checks passed.").
+
+## Re-verification on latest main (2026-11-26)
+
+Final CI reliability fix: the Phase 35 workflow was re-run on
+commit `91691fc` — run #7 (45764630205): **success** —
+RESULT_JSON `ok:true`, ClipForge.app executable 72,232 bytes,
+sha256 `2b83a46d…c95759` (byte-identical to the accepted build),
+swiftc ops checks `OPS_ALL_PASS`, and the hardened gate passed
+("All Phase 35 checks passed.").
+https://github.com/shahrozkalash/Squadforge/actions/runs/45764630205

@@ -129,3 +129,10 @@ count or a wrong total exits 1.
   line "All Phase 34 checks passed." (The push-triggered run #9
   on `dd2b4f8` also passed.)
   https://github.com/shahrozkalash/Squadforge/actions/runs/45759035975
+
+- Addendum (2026-11-26, final CI reliability fix): run #11 —
+  45764584085 on `91691fc`, **success** — RESULT_JSON `ok:true`,
+  APK 12,584,254 bytes (sha256 `51ff0029…c0067`), exact line
+  `UNIT_TESTS tests=8 failures=0 errors=0 skipped=0`, apksigner
+  strictly PASSED, gate passed ("All Phase 34 checks passed.").
+  https://github.com/shahrozkalash/Squadforge/actions/runs/45764584085
