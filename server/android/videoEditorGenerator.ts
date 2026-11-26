@@ -1030,6 +1030,7 @@ data class PlanWindow(
 
 data class ExportPlan(
     val sequences: List<List<PlanElement>>,
+    val videoSequenceCount: Int,
     val windows: List<PlanWindow>,
     val outputWidth: Int,
     val outputHeight: Int,
@@ -1323,6 +1324,11 @@ object ExportPlanner {
             }
         }
 
+        // Every sequence added so far is a video sequence; the audio
+        // sequences below must stay after them (the exporter relies on
+        // video sequences forming a prefix of the plan).
+        val videoSequenceCount = sequences.size
+
         // ---- audio tracks ----
         for (track in project.tracks.filter { it.kind == "audio" && it.muted != true }) {
             val elements = ArrayList<PlanElement>()
@@ -1379,7 +1385,7 @@ object ExportPlanner {
             if (sum > total) total = sum
         }
 
-        return ExportPlan(sequences, windows, outW, outH, total, project.fps.roundToInt().coerceAtLeast(1), notes)
+        return ExportPlan(sequences, videoSequenceCount, windows, outW, outH, total, project.fps.roundToInt().coerceAtLeast(1), notes)
     }
 }
 `;
@@ -1535,7 +1541,8 @@ object CompositorDiagnostics {
 class ExportCompositorSettings(
     private val outputWidth: Int,
     private val outputHeight: Int,
-    private val windows: List<PlanWindow>
+    private val windows: List<PlanWindow>,
+    private val baseIndex: Int
 ) : VideoCompositorSettings {
 
     override fun getOutputSize(inputSizes: List<Size>): Size {
@@ -1545,8 +1552,8 @@ class ExportCompositorSettings(
 
     override fun getOverlaySettings(sequenceIndex: Int, presentationTimeUs: Long): OverlaySettings {
         val t = presentationTimeUs / 1000000.0
-        if (sequenceIndex == 0) {
-            CompositorDiagnostics.record("ov idx=0 t=" + t + " a=1")
+        if (sequenceIndex == baseIndex) {
+            CompositorDiagnostics.record("ov idx=" + sequenceIndex + " t=" + t + " a=1 (base)")
             return StaticOverlaySettings.Builder().build()
         }
         val w = windows.firstOrNull {
@@ -1711,7 +1718,7 @@ class VideoExporter(private val context: Context) {
             onDone(Result.failure(IllegalStateException("Nothing to export: the project has no exportable clips")))
             return
         }
-        val sequences = ArrayList<EditedMediaItemSequence>()
+        val builtSequences = ArrayList<EditedMediaItemSequence>()
         for (elements in plan.sequences) {
             val builder = EditedMediaItemSequence.Builder()
             for (element in elements) {
@@ -1720,11 +1727,34 @@ class VideoExporter(private val context: Context) {
                     is PlanElement.Item -> builder.addItem(buildItem(element.item, plan))
                 }
             }
-            sequences.add(builder.build())
+            builtSequences.add(builder.build())
+        }
+        // Layer order: Media3's DefaultVideoCompositor draws its frame
+        // list in REVERSE — the first-registered input (the primary) is
+        // drawn LAST, on top of every other input (verified in the
+        // Media3 1.6.1 bytecode of CompositorGlProgram.drawFrame, and
+        // on device in Phase 37 CI runs #13/#14, where base-first
+        // compositions rendered the base alone). The composition must
+        // therefore list video sequences TOP LAYER FIRST: overlays,
+        // then crossfade heads, then the base sequence LAST among the
+        // video sequences. Audio sequences keep their order after the
+        // video ones (they do not register video inputs, so the video
+        // indices stay a dense prefix). Compositor windows are remapped
+        // to the new indices; the base lands at videoSequenceCount - 1.
+        val videoCount = plan.videoSequenceCount
+        val sequences = ArrayList<EditedMediaItemSequence>()
+        for (i in videoCount - 1 downTo 0) {
+            sequences.add(builtSequences[i])
+        }
+        for (i in videoCount until builtSequences.size) {
+            sequences.add(builtSequences[i])
+        }
+        val remappedWindows = plan.windows.map { w ->
+            w.copy(sequenceIndex = videoCount - 1 - w.sequenceIndex)
         }
         val composition = Composition.Builder(sequences)
             .setVideoCompositorSettings(
-                ExportCompositorSettings(plan.outputWidth, plan.outputHeight, plan.windows)
+                ExportCompositorSettings(plan.outputWidth, plan.outputHeight, remappedWindows, videoCount - 1)
             )
             .build()
         // Media3's Transformer is bound to the application (main) thread:
@@ -2529,6 +2559,9 @@ class ExportPlannerTest {
         )
         val plan = ExportPlanner.plan(p, null, null)
         assertEquals(2, plan.sequences.size)
+        // Both sequences are video sequences (no audio tracks here);
+        // the exporter reverses this prefix so the base lands last.
+        assertEquals(2, plan.videoSequenceCount)
         val baseItems = items(plan.sequences[0])
         assertEquals(3, baseItems.size)
         assertEquals(3.0, baseItems[0].segmentDurationSec, 0.001)
