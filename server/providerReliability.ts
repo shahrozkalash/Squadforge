@@ -49,7 +49,14 @@ export function backoffSleep(attempt: number, signal?: AbortSignal): Promise<boo
       signal?.removeEventListener('abort', onAbort);
       resolve(true);
     }, ms);
-    timer.unref?.();
+    // The timer must NOT be unref'd: callers await this sleep, and an
+    // unref'd timer does not keep the event loop alive — when nothing
+    // else is pending, the loop drains while the sleep is still
+    // outstanding (node --test cancels such a test with "Promise
+    // resolution is still pending but the event loop has already
+    // resolved"; a production process could exit mid-retry). The
+    // promise always settles — the timer fires, or an abort clears
+    // it — so a ref'd timer cannot hold the process open either.
     const onAbort = (): void => {
       clearTimeout(timer);
       resolve(false);

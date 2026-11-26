@@ -190,6 +190,38 @@ test('timeout and retry policy: sane defaults, env override, clamping', () => {
   assert.equal(providerReliability.isRetryableErrorCode('CANCELLED'), false);
 });
 
+test('backoffSleep keeps the event loop alive until the awaited sleep resolves', async () => {
+  // Regression: backoffSleep's timer was unref'd, so in a process with
+  // nothing else pending the event loop drained mid-sleep and the
+  // awaited promise never resolved (node --test cancelled such tests
+  // in CI with "Promise resolution is still pending but the event
+  // loop has already resolved"). This must be exercised in a child
+  // process: this suite's own stub servers would keep the loop alive
+  // and mask the bug in-process.
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const execFileAsync = promisify(execFile);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'phase33-backoff-'));
+  const modulePath = path.resolve(process.cwd(), 'server/providerReliability.ts');
+  const driver = path.join(dir, 'driver.ts');
+  fs.writeFileSync(driver, [
+    `import { backoffSleep } from ${JSON.stringify(modulePath)};`,
+    'async function main(): Promise<void> {',
+    '  const ok = await backoffSleep(0, undefined);',
+    '  console.log(`RESOLVED ok=${ok}`);',
+    '}',
+    'void main();',
+    ''
+  ].join('\n'));
+  try {
+    const tsxBin = path.resolve(process.cwd(), 'node_modules/.bin/tsx');
+    const { stdout } = await execFileAsync(tsxBin, [driver], { timeout: 30_000 });
+    assert.match(stdout, /RESOLVED ok=true/, 'the awaited backoff sleep must resolve before the child process exits');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // OpenRouter transport (real fetch, stub server)
 // ---------------------------------------------------------------------------
