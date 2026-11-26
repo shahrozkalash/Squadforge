@@ -63,9 +63,14 @@ describe('Phase 37: export parity structure', () => {
     const plan = kt('/export/ExportPlan.kt');
     assert.ok(plan.includes('PlanWindow'));
     assert.ok(plan.includes('PlanElement.Gap'));
-    // Transform geometry: scaled size and centre anchor as
-    // fractions of the project frame (server overlay semantics).
-    assert.ok(plan.includes('scaledW / projW'));
+    // Transform geometry: the centre anchor is a fraction of the
+    // project frame (server overlay semantics), but the compositor
+    // scale is relative to the media's own size — Media3 applies it
+    // on top of its aspect fit, so canvas-relative scales shrink
+    // overlays a second time (Phase 37 run #15 calibration fix).
+    assert.ok(plan.includes('scaleX = scaledW / mw'));
+    assert.ok(plan.includes('scaleY = scaledH / mh'));
+    assert.ok(plan.includes('scaleX = projW / head.mediaWidth'));
     assert.ok(plan.includes('anchorX = (tr.x + scaledW / 2.0) / projW * 2.0 - 1.0'));
     assert.ok(plan.includes('alpha = tr.opacity'));
     assert.ok(plan.includes('rotationDeg = tr.rotationDeg'));
@@ -80,6 +85,13 @@ describe('Phase 37: export parity structure', () => {
     assert.ok(exporter.includes('class ExportCompositorSettings'));
     assert.ok(exporter.includes('VideoCompositorSettings'));
     assert.ok(exporter.includes('setVideoCompositorSettings'));
+    // Media3's compositor draws its first input LAST (on top), so the
+    // composition lists video sequences top-layer-first, base last,
+    // with windows remapped — and the output codec is pinned to H.264
+    // (the default fell back to a size-capped HEVC encoder in run #15).
+    assert.ok(exporter.includes('for (i in videoCount - 1 downTo 0)'));
+    assert.ok(exporter.includes('videoCount - 1 - w.sequenceIndex'));
+    assert.ok(exporter.includes('setVideoMimeType("video/avc")'));
     // Media3 binds the Transformer to the application thread: build, start
     // and cancel are all marshalled onto the main looper (Phase 37 run #2
     // failed on the emulator with "Transformer is accessed on the wrong
