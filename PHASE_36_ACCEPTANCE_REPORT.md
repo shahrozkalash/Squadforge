@@ -81,6 +81,11 @@ round-trip tests.
   `FitTrackLinux: genuine ELF (64-bit, little-endian, x86-64, DYN)`,
   and the `--smoke` run test passing on the runner. Phase 18 suite
   green by name (`ok 63`) with its genuine PE build.
+- **CI (docs commit):** run [#164](https://github.com/shahrozkalash/Squadforge/actions/runs/45778027887)
+  on `4a47869` — **Success**, counts identical to run #163. (A
+  failure was later reported for this run; direct inspection of
+  the run page and both job logs shows it passed — see
+  `CI_RELIABILITY_REPORT.md` section 7.)
 
 ## Known limitations
 

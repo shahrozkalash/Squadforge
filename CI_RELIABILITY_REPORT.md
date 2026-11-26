@@ -170,3 +170,25 @@ fix is covered by the full suite and CI below.
 - Locally: `tsc --noEmit` clean; Phase 33 + Phase 9 suites
   49 pass / 0 fail / 0 cancelled; `npm run build` (vite
   production build) succeeds.
+
+## 7. Run #164 verification (2026-11-26)
+
+A failure was reported for Main CI run #164, the run triggered by
+the Phase 36 documentation commit `4a47869` (Markdown only:
+`PHASE_36_ACCEPTANCE_REPORT.md`, `PHASE_36_PROGRESS.md`,
+`AGENTS.md`). Direct inspection of the run page and both job logs
+shows the report is not borne out — the run is green:
+
+- Run [#164](https://github.com/shahrozkalash/Squadforge/actions/runs/45778027887)
+  — **Success** (4m 41s). validate-and-test and sandbox-integration
+  both passed; annotations are the two Node.js 20 deprecation
+  warnings only.
+- Test counts identical to run #163: `# tests 1216 / # pass 1215 /
+  # fail 0 / # cancelled 0 / # skipped 1` (the skip is the
+  `DOCKER_INTEGRATION`-gated Phase 32 suite). A search of the
+  validate job log finds zero `not ok` lines.
+
+No code change was made: there is no confirmed failure to fix, and
+the commit under test changed no code. Local sanity on the same
+tree: `tsc --noEmit` clean, `npm run build` succeeds. No tests were
+weakened, skipped, or added — none were implicated.
