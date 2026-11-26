@@ -2857,6 +2857,14 @@ class ExportParityTest {
                 cur = cur.cause
                 if (cur != null) chain.append(" <- ")
             }
+            // Full stack of the root failure: a bare checkState inside
+            // Media3 carries no message, so the frames are the evidence.
+            var root: Throwable? = result.exceptionOrNull()
+            while (root?.cause != null) root = root.cause
+            if (root != null) {
+                val stackText: String = android.util.Log.getStackTraceString(root)
+                chain.append(" | ROOT STACK: ").append(stackText)
+            }
             throw AssertionError(chain.toString())
         }
         assertTrue("output file missing", output.exists())
