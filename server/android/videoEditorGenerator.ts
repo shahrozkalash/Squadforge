@@ -2777,6 +2777,7 @@ import ${pkg}.editor.TimelineClip
 import ${pkg}.editor.TimelineTrack
 import ${pkg}.editor.Transition
 import ${pkg}.editor.VideoProject
+import ${pkg}.export.CompositorDiagnostics
 import ${pkg}.export.ExportOutcome
 import ${pkg}.export.VideoExporter
 import java.io.File
