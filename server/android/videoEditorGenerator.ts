@@ -2745,7 +2745,19 @@ class ExportParityTest {
         assertTrue("no export outcome", outcome != null)
         val result = outcome!!
         if (result.isFailure) {
-            throw AssertionError("export failed: " + result.exceptionOrNull())
+            // Full cause chain: an ExportException's own message is generic
+            // ("Asset loader error"); the underlying cause is the evidence.
+            val chain = StringBuilder("export failed: ")
+            var cur: Throwable? = result.exceptionOrNull()
+            while (cur != null) {
+                chain.append(cur.javaClass.simpleName).append(": ").append(cur.message)
+                if (cur is androidx.media3.transformer.ExportException) {
+                    chain.append(" [errorCode=").append(cur.errorCode).append("]")
+                }
+                cur = cur.cause
+                if (cur != null) chain.append(" <- ")
+            }
+            throw AssertionError(chain.toString())
         }
         assertTrue("output file missing", output.exists())
         assertTrue("output suspiciously small: " + output.length(), output.length() > 20000)

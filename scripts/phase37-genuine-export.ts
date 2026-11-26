@@ -123,6 +123,16 @@ try {
     `${PACKAGE_NAME}.test/androidx.test.runner.AndroidJUnitRunner`
   ], { timeoutMs: 900000 });
   fs.writeFileSync(path.join(outDir, 'instrument.log'), instrument.stdout + instrument.stderr);
+  // Capture logcat either way: Media3 logs the real ExportException cause
+  // (asset loader / codec) there, which the test's summary cannot show.
+  try {
+    const logcat = run(adb, ['logcat', '-d'], { timeoutMs: 60000 });
+    fs.writeFileSync(path.join(outDir, 'logcat.txt'), logcat.stdout + logcat.stderr);
+    const interesting = (logcat.stdout + logcat.stderr).split('\n')
+      .filter((l) => /ExportException|AssetLoader|Transformer|MediaCodec|Decoder|ExportParity/i.test(l))
+      .slice(0, 40);
+    for (const line of interesting) console.log('LOGCAT ' + line.slice(0, 300));
+  } catch { /* logcat is diagnostic only */ }
   const instrumentOk = /OK \(1 test\)/.test(instrument.stdout);
   console.log('INSTRUMENTED status=' + (instrumentOk ? 'pass' : 'fail'));
   evidence.instrumented = instrumentOk ? 'pass' : 'fail';
