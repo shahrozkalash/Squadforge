@@ -13,6 +13,7 @@ import type {
 } from './types.js';
 import { DesktopProjectGenerator } from './desktopProjectGenerator.js';
 import { PeInspector } from './peInspector.js';
+import { ElfInspector } from './elfInspector.js';
 import { assertSafeWorkspacePath, sanitizeProjectFilePath } from '../pathSecurity.js';
 
 /**
@@ -20,11 +21,12 @@ import { assertSafeWorkspacePath, sanitizeProjectFilePath } from '../pathSecurit
  *
  * Writes the generated project into an isolated, path-validated
  * workspace, restores dependencies with `dotnet restore` (NuGet),
- * compiles with `dotnet build`, harvests the produced Windows
- * executables, and verifies each .exe by parsing its PE headers.
- * Nothing here fabricates artifacts: if the .NET SDK is missing or
- * compilation fails, the result is an honest failure with the real
- * compiler output attached.
+ * compiles with `dotnet build`, harvests the produced executables,
+ * and verifies each one by parsing its real format headers — PE
+ * for Windows .exe files (Phase 18), ELF for the extensionless
+ * Linux apphost (Phase 36). Nothing here fabricates artifacts: if
+ * the .NET SDK is missing or compilation fails, the result is an
+ * honest failure with the real compiler output attached.
  */
 export class DesktopBuildPipeline {
   private logs: DesktopBuildLogEntry[] = [];
@@ -159,6 +161,7 @@ export class DesktopBuildPipeline {
         return result;
       }
 
+      const rid = config.platform === 'linux' ? 'linux-x64' : 'win-x64';
       const outDir = path.join(
         workspace,
         'src',
@@ -166,7 +169,7 @@ export class DesktopBuildPipeline {
         'bin',
         options.configuration,
         config.targetFramework,
-        'win-x64'
+        rid
       );
       if (!fs.existsSync(outDir)) throw new Error(`Build output directory not found: ${outDir}`);
 
@@ -175,7 +178,18 @@ export class DesktopBuildPipeline {
       const harvested: DesktopArtifact[] = [];
       for (const name of await fsp.readdir(outDir)) {
         const ext = path.extname(name).toLowerCase();
-        if (ext !== '.exe' && ext !== '.dll') continue;
+        // Linux builds produce an extensionless ELF apphost named
+        // exactly after the assembly; Windows builds produce .exe.
+        const isLinuxApphost = config.platform === 'linux' && name === config.assemblyName;
+        // The apphost is framework-dependent: without its deps and
+        // runtimeconfig manifests beside it, it cannot start at all.
+        // Harvest both so the Linux artifact set is a runnable app
+        // folder, not a lone binary that errors on launch.
+        const isLinuxManifest =
+          config.platform === 'linux' &&
+          (name === `${config.assemblyName}.deps.json` ||
+            name === `${config.assemblyName}.runtimeconfig.json`);
+        if (ext !== '.exe' && ext !== '.dll' && !isLinuxApphost && !isLinuxManifest) continue;
         const buf = await fsp.readFile(path.join(outDir, name));
         if (ext === '.exe') {
           const pe = PeInspector.inspect(buf);
@@ -186,16 +200,31 @@ export class DesktopBuildPipeline {
           }
           this.log('INFO', 'verify', `${name}: genuine PE (${pe.machine}, ${pe.subsystem}, ${pe.sections} sections)`);
         }
-        await fsp.writeFile(path.join(artifactsDir, name), buf);
+        if (isLinuxApphost) {
+          const elf = ElfInspector.inspect(buf);
+          if (!elf.isElfFile) {
+            this.log('ERROR', 'verify', `${name} failed ELF validation: ${elf.errors.join('; ')}`);
+            result.error = `Artifact ${name} is not a valid Linux ELF executable: ${elf.errors.join('; ')}`;
+            return result;
+          }
+          this.log('INFO', 'verify', `${name}: genuine ELF (${elf.elfClass}, ${elf.endianness}, ${elf.machine}, ${elf.objectType})`);
+        }
+        const artifactPath = path.join(artifactsDir, name);
+        await fsp.writeFile(artifactPath, buf);
+        // Preserve the mode the toolchain set: both apphosts are
+        // executables, and a plain write would strip the executable
+        // bit, leaving a harvested Linux artifact that cannot run.
+        const srcStat = await fsp.stat(path.join(outDir, name));
+        await fsp.chmod(artifactPath, srcStat.mode & 0o777);
         harvested.push({
           filename: name,
-          kind: ext === '.exe' ? 'exe' : 'dll',
+          kind: ext === '.exe' || isLinuxApphost ? 'exe' : isLinuxManifest ? 'other' : 'dll',
           sizeBytes: buf.length,
           sha256: crypto.createHash('sha256').update(buf).digest('hex')
         });
       }
       if (!harvested.some((a) => a.kind === 'exe')) {
-        result.error = 'Build reported success but produced no .exe artifact; refusing to claim success.';
+        result.error = 'Build reported success but produced no executable artifact; refusing to claim success.';
         this.log('ERROR', 'verify', result.error);
         return result;
       }

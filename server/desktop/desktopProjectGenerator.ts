@@ -7,9 +7,16 @@ import type { DesktopProjectConfig } from './types.js';
  * Phase 18: generates real, buildable Windows desktop projects
  * (C# / .NET 8 / WinForms). The generated source is a genuine
  * application — Program entry point, main form, state persistence —
- * never a mockup. Linux/macOS configs are rejected honestly until
- * their generators land; the platform field keeps the door open.
+ * never a mockup.
+ *
+ * Phase 36: the Linux generator (C# / .NET 8 / Avalonia UI) landed
+ * alongside it — same contract: a genuine application with state
+ * persistence, plus a headless `--smoke` diagnostics mode. macOS
+ * configs are still rejected honestly until that generator lands.
  */
+
+/** Avalonia UI version pinned for generated Linux projects. */
+export const AVALONIA_VERSION = '11.2.8';
 export class DesktopProjectGenerator {
   public static getDefaultConfig(
     appName: string = 'SquadForgeApp',
@@ -30,6 +37,21 @@ export class DesktopProjectGenerator {
     };
   }
 
+  /** Default config for the Linux target (Phase 36): .NET 8 + Avalonia UI. */
+  public static getLinuxDefaultConfig(
+    appName: string = 'SquadForgeApp',
+    assemblyName?: string
+  ): DesktopProjectConfig {
+    const base = DesktopProjectGenerator.getDefaultConfig(appName, assemblyName);
+    return {
+      ...base,
+      platform: 'linux',
+      uiFramework: 'avalonia',
+      targetFramework: 'net8.0',
+      requireAdministrator: false
+    };
+  }
+
   /** Assembly names must be valid C# namespace roots. */
   public static validateConfig(config: DesktopProjectConfig): string[] {
     const errors: string[] = [];
@@ -37,14 +59,25 @@ export class DesktopProjectGenerator {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.assemblyName || '')) {
       errors.push('assemblyName must start with a letter or underscore and contain only letters, digits, underscores');
     }
-    if (config.platform !== 'windows') {
-      errors.push(`platform '${config.platform}' is not yet supported (Windows is the first target)`);
-    }
-    if (!/^net8\.0-windows$/.test(config.targetFramework || '')) {
-      errors.push('targetFramework must be net8.0-windows for the Windows desktop engine');
-    }
-    if (config.uiFramework !== 'winforms' && config.uiFramework !== 'wpf') {
-      errors.push('uiFramework must be winforms or wpf');
+    if (config.platform === 'windows') {
+      if (!/^net8\.0-windows$/.test(config.targetFramework || '')) {
+        errors.push('targetFramework must be net8.0-windows for the Windows desktop engine');
+      }
+      if (config.uiFramework !== 'winforms' && config.uiFramework !== 'wpf') {
+        errors.push('uiFramework must be winforms or wpf for the Windows desktop engine');
+      }
+    } else if (config.platform === 'linux') {
+      if (!/^net8\.0$/.test(config.targetFramework || '')) {
+        errors.push('targetFramework must be net8.0 for the Linux desktop engine');
+      }
+      if (config.uiFramework !== 'avalonia') {
+        errors.push('uiFramework must be avalonia for the Linux desktop engine (WinForms and WPF are Windows-only)');
+      }
+      if (config.requireAdministrator) {
+        errors.push('requireAdministrator has no Linux equivalent in this engine; leave it false for Linux projects');
+      }
+    } else {
+      errors.push(`platform '${config.platform}' is not yet supported (supported platforms: windows, linux)`);
     }
     return errors;
   }
@@ -92,20 +125,32 @@ export class DesktopProjectGenerator {
     }
   }
 
-  public static generateProjectFiles(config: DesktopProjectConfig): Record<string, string> {
-    const errors = DesktopProjectGenerator.validateConfig(config);
-    if (errors.length > 0) {
-      throw new Error(`Invalid desktop project config: ${errors.join('; ')}`);
-    }
+  /** Files every desktop target shares: solution, gitignore, build props. */
+  private static sharedProjectFiles(config: DesktopProjectConfig): Record<string, string> {
     const asm = config.assemblyName;
-    const root = `src/${asm}`;
     const files: Record<string, string> = {};
-
     files[`${asm}.sln`] =
       `\r\nMicrosoft Visual Studio Solution File, Format Version 12.00\r\n` +
       `# Visual Studio Version 17\r\n` +
       `Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "${asm}", "src\\${asm}\\${asm}.csproj", "{B8E2A6A0-1A2B-4C3D-9E4F-5A6B7C8D9E0F}"\r\nEndProject\r\n` +
       `Global\r\n\tGlobalSection(SolutionConfigurationPlatforms) = preSolution\r\n\t\tDebug|Any CPU = Debug|Any CPU\r\n\t\tRelease|Any CPU = Release|Any CPU\r\n\tEndGlobalSection\r\nEndGlobal\r\n`;
+    files['.gitignore'] = `bin/\nobj/\n.vs/\n*.user\n`;
+    files['Directory.Build.props'] =
+      `<Project>\n  <PropertyGroup>\n    <LangVersion>12.0</LangVersion>\n    <Deterministic>true</Deterministic>\n  </PropertyGroup>\n</Project>\n`;
+    return files;
+  }
+
+  public static generateProjectFiles(config: DesktopProjectConfig): Record<string, string> {
+    const errors = DesktopProjectGenerator.validateConfig(config);
+    if (errors.length > 0) {
+      throw new Error(`Invalid desktop project config: ${errors.join('; ')}`);
+    }
+    if (config.platform === 'linux') {
+      return DesktopProjectGenerator.generateLinuxProjectFiles(config);
+    }
+    const asm = config.assemblyName;
+    const root = `src/${asm}`;
+    const files: Record<string, string> = { ...DesktopProjectGenerator.sharedProjectFiles(config) };
 
     files[`${root}/${asm}.csproj`] =
       `<Project Sdk="Microsoft.NET.Sdk">\n\n` +
@@ -259,10 +304,6 @@ export class DesktopProjectGenerator {
       `    }\n` +
       `}\n`;
 
-    files['.gitignore'] = `bin/\nobj/\n.vs/\n*.user\n`;
-    files['Directory.Build.props'] =
-      `<Project>\n  <PropertyGroup>\n    <LangVersion>12.0</LangVersion>\n    <Deterministic>true</Deterministic>\n  </PropertyGroup>\n</Project>\n`;
-
     files['build.ps1'] =
       `# Build ${config.appName} (Windows, PowerShell)\n` +
       `dotnet restore\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n` +
@@ -278,6 +319,231 @@ export class DesktopProjectGenerator {
       `## Stack\n- C# 12 / .NET 8 (\`${config.targetFramework}\`)\n- Windows Forms (native Windows UI)\n\n` +
       `## Develop\n- Open \`${asm}.sln\` in Visual Studio 2022, or\n- \`dotnet restore\` then \`dotnet build\` (or run build.ps1 / build.sh)\n- Debug in VS Code / Visual Studio with F5; the app entry point is \`src/${asm}/Program.cs\`.\n\n` +
       `## Run\nRun the built executable from \`src/${asm}/bin/Debug/${config.targetFramework}/\` on Windows.\n`;
+
+    return files;
+  }
+
+  /**
+   * Phase 36: generates a real, buildable Linux desktop project
+   * (C# / .NET 8 / Avalonia UI 11). The generated source mirrors the
+   * Windows app feature for feature — a main window with an editable
+   * message, a save action, and persistent state (launch count, last
+   * message) stored as JSON under the per-user config directory —
+   * plus a headless `--smoke` diagnostics mode that exercises the
+   * same state store without opening a window, so machines without
+   * a display can still verify the app genuinely runs.
+   */
+  private static generateLinuxProjectFiles(config: DesktopProjectConfig): Record<string, string> {
+    const asm = config.assemblyName;
+    const root = `src/${asm}`;
+    const files: Record<string, string> = { ...DesktopProjectGenerator.sharedProjectFiles(config) };
+    const xmlTitle = config.appName
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+    files[`${root}/${asm}.csproj`] =
+      `<Project Sdk="Microsoft.NET.Sdk">\n\n` +
+      `  <PropertyGroup>\n` +
+      `    <OutputType>WinExe</OutputType>\n` +
+      `    <TargetFramework>${config.targetFramework}</TargetFramework>\n` +
+      `    <Nullable>enable</Nullable>\n` +
+      `    <ImplicitUsings>enable</ImplicitUsings>\n` +
+      `    <AssemblyName>${asm}</AssemblyName>\n` +
+      `    <!-- A Linux desktop app ships for the Linux x64 runtime; pinning the RID makes every host emit the real ELF apphost. -->\n` +
+      `    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>\n` +
+      `    <RootNamespace>${asm}</RootNamespace>\n` +
+      `    <Version>${config.version}</Version>\n` +
+      `    <Company>${config.company}</Company>\n` +
+      `    <Description>${config.description}</Description>\n` +
+      `  </PropertyGroup>\n\n` +
+      `  <ItemGroup>\n` +
+      `    <PackageReference Include="Avalonia" Version="${AVALONIA_VERSION}" />\n` +
+      `    <PackageReference Include="Avalonia.Desktop" Version="${AVALONIA_VERSION}" />\n` +
+      `    <PackageReference Include="Avalonia.Themes.Fluent" Version="${AVALONIA_VERSION}" />\n` +
+      `    <PackageReference Include="Avalonia.Fonts.Inter" Version="${AVALONIA_VERSION}" />\n` +
+      `  </ItemGroup>\n\n` +
+      `</Project>\n`;
+
+    files[`${root}/Program.cs`] =
+      `using System;\n` +
+      `using System.Linq;\n` +
+      `using Avalonia;\n\n` +
+      `namespace ${asm};\n\n` +
+      `sealed class Program\n` +
+      `{\n` +
+      `    /// <summary>The main entry point for the application.</summary>\n` +
+      `    [STAThread]\n` +
+      `    public static void Main(string[] args)\n` +
+      `    {\n` +
+      `        if (args.Contains("--smoke"))\n` +
+      `        {\n` +
+      `            // Headless diagnostics mode: exercises the real state store\n` +
+      `            // (the same code the window uses) without opening a window,\n` +
+      `            // so a machine without a display can verify the app runs.\n` +
+      `            var store = new AppStateStore();\n` +
+      `            var state = store.Load();\n` +
+      `            state.LaunchCount++;\n` +
+      `            store.Save(state);\n` +
+      `            Console.WriteLine($"SMOKE_OK ${asm} launches={state.LaunchCount} state={store.StatePath}");\n` +
+      `            return;\n` +
+      `        }\n` +
+      `        BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);\n` +
+      `    }\n\n` +
+      `    // Avalonia configuration. No Avalonia API is used before this runs:\n` +
+      `    // the framework is not initialized until the builder starts.\n` +
+      `    public static AppBuilder BuildAvaloniaApp()\n` +
+      `        => AppBuilder.Configure<App>()\n` +
+      `            .UsePlatformDetect()\n` +
+      `            .WithInterFont()\n` +
+      `            .LogToTrace();\n` +
+      `}\n`;
+
+    files[`${root}/App.axaml`] =
+      `<Application xmlns="https://github.com/avaloniaui"\n` +
+      `             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"\n` +
+      `             x:Class="${asm}.App"\n` +
+      `             RequestedThemeVariant="Default">\n` +
+      `    <Application.Styles>\n` +
+      `        <FluentTheme />\n` +
+      `    </Application.Styles>\n` +
+      `</Application>\n`;
+
+    files[`${root}/App.axaml.cs`] =
+      `using Avalonia;\n` +
+      `using Avalonia.Controls.ApplicationLifetimes;\n` +
+      `using Avalonia.Markup.Xaml;\n\n` +
+      `namespace ${asm};\n\n` +
+      `public partial class App : Application\n` +
+      `{\n` +
+      `    public override void Initialize() => AvaloniaXamlLoader.Load(this);\n\n` +
+      `    public override void OnFrameworkInitializationCompleted()\n` +
+      `    {\n` +
+      `        if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)\n` +
+      `        {\n` +
+      `            desktop.MainWindow = new MainWindow();\n` +
+      `        }\n` +
+      `        base.OnFrameworkInitializationCompleted();\n` +
+      `    }\n` +
+      `}\n`;
+
+    files[`${root}/MainWindow.axaml`] =
+      `<Window xmlns="https://github.com/avaloniaui"\n` +
+      `        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"\n` +
+      `        x:Class="${asm}.MainWindow"\n` +
+      `        Title="${xmlTitle}" Width="520" Height="320">\n` +
+      `    <StackPanel Margin="24" Spacing="12">\n` +
+      `        <TextBox x:Name="MessageBox" AcceptsReturn="True" Height="140"\n` +
+      `                 Watermark="Type a message..." />\n` +
+      `        <StackPanel Orientation="Horizontal" Spacing="12">\n` +
+      `            <Button x:Name="SaveButton" Content="Save" />\n` +
+      `            <TextBlock x:Name="StatusLabel" VerticalAlignment="Center" Text="Ready" />\n` +
+      `        </StackPanel>\n` +
+      `    </StackPanel>\n` +
+      `</Window>\n`;
+
+    files[`${root}/MainWindow.axaml.cs`] =
+      `using System;\n` +
+      `using Avalonia.Controls;\n` +
+      `using Avalonia.Interactivity;\n` +
+      `using Avalonia.Markup.Xaml;\n\n` +
+      `namespace ${asm};\n\n` +
+      `/// <summary>\n` +
+      `/// Main window of ${config.appName}. Keeps a small persistent app state\n` +
+      `/// (launch count, last message) in the per-user config directory to\n` +
+      `/// prove real file I/O, state handling and a working event loop — a\n` +
+      `/// starting point the owner extends, not a static mockup.\n` +
+      `/// </summary>\n` +
+      `public partial class MainWindow : Window\n` +
+      `{\n` +
+      `    private readonly AppStateStore _store;\n` +
+      `    private readonly AppState _state;\n` +
+      `    private readonly TextBox _messageBox;\n` +
+      `    private readonly TextBlock _statusLabel;\n\n` +
+      `    public MainWindow()\n` +
+      `    {\n` +
+      `        InitializeComponent();\n` +
+      `        _store = new AppStateStore();\n` +
+      `        _state = _store.Load();\n` +
+      `        _state.LaunchCount++;\n` +
+      `        _store.Save(_state);\n` +
+      `        _messageBox = this.FindControl<TextBox>("MessageBox")!;\n` +
+      `        _statusLabel = this.FindControl<TextBlock>("StatusLabel")!;\n` +
+      `        var saveButton = this.FindControl<Button>("SaveButton")!;\n` +
+      `        saveButton.Click += OnSaveClicked;\n` +
+      `        _statusLabel.Text = $"Launches: {_state.LaunchCount}";\n` +
+      `        _messageBox.Text = _state.LastMessage;\n` +
+      `    }\n\n` +
+      `    private void InitializeComponent() => AvaloniaXamlLoader.Load(this);\n\n` +
+      `    private void OnSaveClicked(object? sender, RoutedEventArgs e)\n` +
+      `    {\n` +
+      `        _state.LastMessage = _messageBox.Text ?? string.Empty;\n` +
+      `        _store.Save(_state);\n` +
+      `        _statusLabel.Text = $"Saved at {DateTime.Now:T} - launches: {_state.LaunchCount}";\n` +
+      `    }\n` +
+      `}\n`;
+
+    files[`${root}/AppState.cs`] =
+      `using System;\n` +
+      `using System.IO;\n` +
+      `using System.Text.Json;\n\n` +
+      `namespace ${asm};\n\n` +
+      `/// <summary>Persistent state for ${config.appName}.</summary>\n` +
+      `public sealed class AppState\n` +
+      `{\n` +
+      `    public int LaunchCount { get; set; }\n` +
+      `    public string LastMessage { get; set; } = string.Empty;\n` +
+      `}\n\n` +
+      `/// <summary>\n` +
+      `/// Loads and saves AppState as JSON under the per-user config\n` +
+      `/// directory (Environment.SpecialFolder.ApplicationData, which\n` +
+      `/// resolves to the XDG config home — usually ~/.config — on Linux).\n` +
+      `/// </summary>\n` +
+      `public sealed class AppStateStore\n` +
+      `{\n` +
+      `    public string StatePath { get; }\n\n` +
+      `    public AppStateStore()\n` +
+      `    {\n` +
+      `        var dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "${asm}");\n` +
+      `        Directory.CreateDirectory(dir);\n` +
+      `        StatePath = Path.Combine(dir, "state.json");\n` +
+      `    }\n\n` +
+      `    public AppState Load()\n` +
+      `    {\n` +
+      `        try\n` +
+      `        {\n` +
+      `            if (File.Exists(StatePath))\n` +
+      `                return JsonSerializer.Deserialize<AppState>(File.ReadAllText(StatePath)) ?? new AppState();\n` +
+      `        }\n` +
+      `        catch { /* corrupted state falls back to defaults */ }\n` +
+      `        return new AppState();\n` +
+      `    }\n\n` +
+      `    public void Save(AppState state) =>\n` +
+      `        File.WriteAllText(StatePath, JsonSerializer.Serialize(state));\n` +
+      `}\n`;
+
+    files[`${root}/${asm}.desktop`] =
+      `[Desktop Entry]\n` +
+      `Type=Application\n` +
+      `Name=${config.appName}\n` +
+      `Comment=${config.description}\n` +
+      `Exec=${asm}\n` +
+      `Terminal=false\n` +
+      `Categories=Utility;\n`;
+
+    files['build.sh'] =
+      `#!/bin/sh\n# Build ${config.appName} (Linux) from any host with the .NET 8 SDK.\n` +
+      `set -e\ndotnet restore\ndotnet build -c Release\n`;
+
+    files['README.md'] =
+      `# ${config.appName}\n\n${config.description}\n\n` +
+      `Generated by SquadForge (Desktop Development Engine, Linux target).\n\n` +
+      `## Stack\n- C# 12 / .NET 8 (\`${config.targetFramework}\`)\n- Avalonia UI ${AVALONIA_VERSION} (cross-platform XAML UI, Fluent theme)\n\n` +
+      `## Develop\n- Open \`${asm}.sln\` in VS Code / Rider, or\n- \`dotnet restore\` then \`dotnet build\` (or run build.sh)\n- The app entry point is \`src/${asm}/Program.cs\`; the main window is \`src/${asm}/MainWindow.axaml\`.\n\n` +
+      `## Run\nRun the built executable from \`src/${asm}/bin/Debug/${config.targetFramework}/linux-x64/\` on a Linux desktop with a display.\n` +
+      `On a headless machine, \`<app> --smoke\` exercises the state store and prints SMOKE_OK without opening a window.\n` +
+      `State is stored as JSON in the per-user config directory (~/.config/${asm}/state.json).\n`;
 
     return files;
   }

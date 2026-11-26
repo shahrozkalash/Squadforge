@@ -7,6 +7,7 @@ import type { DesktopBuildOptions, DesktopProjectConfig } from './types.js';
 import { DesktopProjectGenerator } from './desktopProjectGenerator.js';
 import { DesktopBuildPipeline } from './desktopBuildPipeline.js';
 import { PeInspector } from './peInspector.js';
+import { ElfInspector } from './elfInspector.js';
 import {
   assertScopedArtifactPath,
   validateArtifactScope,
@@ -16,11 +17,31 @@ import {
 
 export { validateArtifactFilename, validateBuildId };
 
+/**
+ * Desktop artifact names: Windows builds produce .exe/.dll files;
+ * Linux builds (Phase 36) additionally produce an extensionless ELF
+ * apphost named after the assembly. The shared
+ * validateArtifactFilename default extension list predates the
+ * desktop engine and rejects all three shapes, so this module
+ * validates with desktop rules — the same traversal/charset
+ * discipline, applied to the artifact shapes the engine emits.
+ */
+export function isValidDesktopArtifactFilename(filename: string): boolean {
+  if (validateArtifactFilename(filename, ['exe', 'dll'])) return true;
+  // Extensionless apphost: letters, digits, underscore and hyphen
+  // only — no dot at all, so no traversal segment or smuggled
+  // extension is possible.
+  if (/^[A-Za-z0-9_-]+$/.test(filename)) return true;
+  // The apphost's two framework manifests, harvested with it so the
+  // Linux artifact set can actually start (Phase 36).
+  return /^[A-Za-z0-9_-]+\.(deps|runtimeconfig)\.json$/.test(filename);
+}
+
 const ARTIFACTS_BASE_DIR = path.resolve(process.cwd(), '.desktop_artifacts');
 const artifactBufferCache: Map<string, Map<string, Buffer>> = new Map();
 
 export function storeDesktopArtifactBuffer(buildId: string, filename: string, buffer: Buffer) {
-  if (!validateBuildId(buildId) || !validateArtifactFilename(filename)) {
+  if (!validateBuildId(buildId) || !isValidDesktopArtifactFilename(filename)) {
     throw new Error(`Security Violation: Invalid buildId or filename for artifact storage: ${filename}`);
   }
   let buildMap = artifactBufferCache.get(buildId);
@@ -39,7 +60,7 @@ export function storeDesktopArtifactBuffer(buildId: string, filename: string, bu
 }
 
 export function getDesktopArtifactBuffer(buildId: string, filename: string): Buffer | undefined {
-  if (!validateBuildId(buildId) || !validateArtifactFilename(filename)) return undefined;
+  if (!validateBuildId(buildId) || !isValidDesktopArtifactFilename(filename)) return undefined;
   const inMemory = artifactBufferCache.get(buildId)?.get(filename);
   if (inMemory) return inMemory;
   try {
@@ -103,17 +124,31 @@ export function createDesktopRouter(deps: DesktopRouteDependencies): Router {
       }
     };
 
-  // 1. Generate / scaffold a Windows desktop project
+  // 1. Generate / scaffold a desktop project (Windows or Linux)
   router.post('/generate', requireAuth, owned(async (build, req, res) => {
-    const { appName, assemblyName, version, company, requireAdministrator } = req.body || {};
+    const { appName, assemblyName, version, company, requireAdministrator, platform, uiFramework, targetFramework } = req.body || {};
     const base = getOrCreateConfig(build);
+    // A platform in the request starts from that platform's defaults
+    // (framework and TFM are platform-specific); without one, the
+    // build's stored config rules, exactly as before. An unsupported
+    // platform value flows into the config and validateConfig
+    // rejects it honestly below.
+    const platformBase =
+      platform === 'linux'
+        ? DesktopProjectGenerator.getLinuxDefaultConfig(base.appName, base.assemblyName)
+        : platform === 'windows'
+          ? DesktopProjectGenerator.getDefaultConfig(base.appName, base.assemblyName)
+          : base;
     const config: DesktopProjectConfig = {
-      ...base,
-      appName: appName || base.appName,
-      assemblyName: assemblyName || base.assemblyName,
-      version: version || base.version,
-      company: company || base.company,
-      requireAdministrator: requireAdministrator ?? base.requireAdministrator
+      ...platformBase,
+      appName: appName || platformBase.appName,
+      assemblyName: assemblyName || platformBase.assemblyName,
+      version: version || platformBase.version,
+      company: company || platformBase.company,
+      requireAdministrator: requireAdministrator ?? platformBase.requireAdministrator,
+      platform: platform || platformBase.platform,
+      uiFramework: uiFramework || platformBase.uiFramework,
+      targetFramework: targetFramework || platformBase.targetFramework
     };
     const errors = DesktopProjectGenerator.validateConfig(config);
     if (errors.length > 0) return res.status(400).json({ error: errors.join('; ') });
@@ -143,6 +178,7 @@ export function createDesktopRouter(deps: DesktopRouteDependencies): Router {
     return res.json({
       success: true,
       platform: 'windows',
+      supportedPlatforms: ['windows', 'linux'],
       dotnetFound: Boolean(dotnet),
       dotnetPath: dotnet,
       sdks: dotnet ? DesktopProjectGenerator.listSdks(dotnet) : [],
@@ -150,7 +186,7 @@ export function createDesktopRouter(deps: DesktopRouteDependencies): Router {
     });
   }));
 
-  // 3. Genuine build: restore + compile + PE-verified artifact harvest
+  // 3. Genuine build: restore + compile + format-verified artifact harvest
   router.post('/build', requireAuth, owned(async (build, req, res) => {
     const configuration = req.body?.configuration === 'Release' ? 'Release' : 'Debug';
     const options: DesktopBuildOptions = { configuration, restore: req.body?.restore !== false };
@@ -176,7 +212,7 @@ export function createDesktopRouter(deps: DesktopRouteDependencies): Router {
   // 4. Download a verified artifact (auth + ownership enforced by `owned`)
   router.get('/artifacts/:filename', requireAuth, owned(async (build, req, res) => {
     const filename = req.params.filename;
-    if (!validateArtifactFilename(filename)) {
+    if (!isValidDesktopArtifactFilename(filename)) {
       return res.status(400).json({ error: 'Invalid artifact filename' });
     }
     const buf = getDesktopArtifactBuffer(build.id, filename);
@@ -184,6 +220,11 @@ export function createDesktopRouter(deps: DesktopRouteDependencies): Router {
     if (filename.toLowerCase().endsWith('.exe')) {
       const pe = PeInspector.inspect(buf);
       if (!pe.isPeFile) return res.status(422).json({ error: 'Stored artifact failed PE validation' });
+    }
+    if (!filename.includes('.')) {
+      // Extensionless artifact: the Linux ELF apphost.
+      const elf = ElfInspector.inspect(buf);
+      if (!elf.isElfFile) return res.status(422).json({ error: 'Stored artifact failed ELF validation' });
     }
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

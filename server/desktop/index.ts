@@ -2,6 +2,7 @@ export * from './types.js';
 export * from './desktopProjectGenerator.js';
 export * from './desktopBuildPipeline.js';
 export * from './peInspector.js';
+export * from './elfInspector.js';
 export * from './desktopRoutes.js';
 export {
   isPathScopedWithin,

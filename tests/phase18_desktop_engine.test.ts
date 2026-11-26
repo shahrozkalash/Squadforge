@@ -93,11 +93,22 @@ describe('SquadForge Phase 18: Desktop Development Engine Test Suite', () => {
       );
     });
 
-    test('2.3 Linux/macOS are rejected honestly until their generators land', () => {
-      for (const platform of ['linux', 'macos'] as const) {
-        const errors = DesktopProjectGenerator.validateConfig({ ...config, platform });
-        assert.ok(errors.some((e) => e.includes('not yet supported')), `expected honest rejection for ${platform}`);
-      }
+    test('2.3 macOS is rejected honestly; a Linux tag on the Windows stack is not a Linux config', () => {
+      const macErrors = DesktopProjectGenerator.validateConfig({ ...config, platform: 'macos' });
+      assert.ok(
+        macErrors.some((e) => e.includes('not yet supported')),
+        'expected honest rejection for macos'
+      );
+      // Phase 36: Linux is supported, but only with its own stack —
+      // the Windows config with the platform tag flipped must fail.
+      const mismatched = DesktopProjectGenerator.validateConfig({ ...config, platform: 'linux' });
+      assert.ok(mismatched.length > 0, 'linux platform with winforms/net8.0-windows must be rejected');
+      assert.deepEqual(
+        DesktopProjectGenerator.validateConfig(
+          DesktopProjectGenerator.getLinuxDefaultConfig('FitTrack', 'FitTrack')
+        ),
+        []
+      );
     });
   });
 

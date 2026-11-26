@@ -1,14 +1,15 @@
 /**
  * Phase 18: Desktop Development Engine — shared types.
  *
- * Windows is the first supported desktop target. The platform field is
- * part of every config so Linux and macOS generators can be added later
+ * Windows was the first supported desktop target; the Linux target
+ * (Avalonia UI) landed in Phase 36. The platform field is part of
+ * every config so the macOS generator can still be added later
  * without changing the pipeline or routes.
  */
 
 export type DesktopPlatform = 'windows' | 'linux' | 'macos';
 
-export type DesktopUiFramework = 'winforms' | 'wpf';
+export type DesktopUiFramework = 'winforms' | 'wpf' | 'avalonia';
 
 export interface DesktopProjectConfig {
   appName: string;
@@ -73,5 +74,18 @@ export interface PeInspectionReport {
   subsystem?: string;
   isGuiApp?: boolean;
   sections?: number;
+  errors: string[];
+}
+
+export interface ElfInspectionReport {
+  isElfFile: boolean;
+  /** '64-bit' or '32-bit' (ELFCLASS64 / ELFCLASS32). */
+  elfClass?: string;
+  /** 'little-endian' or 'big-endian' (ELFDATA2LSB / ELFDATA2MSB). */
+  endianness?: string;
+  /** Human-readable e_machine, e.g. 'x86-64'. */
+  machine?: string;
+  /** Human-readable e_type, e.g. 'DYN (shared object / PIE executable)'. */
+  objectType?: string;
   errors: string[];
 }
