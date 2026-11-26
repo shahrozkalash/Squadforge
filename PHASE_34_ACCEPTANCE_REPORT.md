@@ -78,3 +78,32 @@ build evidence.
 - App export: overlay video tracks not composited, transitions as
   cuts, clip speed/fades not baked in — all stated in the app's
   export notes and README; the server engine covers those paths.
+
+
+## Workflow reliability hardening (2026-11-26)
+
+The verification workflow itself was hardened (workflow commit
+`6e2a72c`; guard tests in `tests/workflow_reliability.test.ts`,
+commit `89c5d4d`). Both harness steps previously piped through
+`tee` without `pipefail`, so the step exit code was `tee`'s; they
+now run under `set -eo pipefail`, and a new **Validate genuine
+results** step (`if: always()`) fails the workflow unless the
+build RESULT_JSON is `ok:true` with non-zero `apkBytes`, the
+Gradle-XML `UNIT_TESTS` line shows `failures=0 errors=0`, the
+apksigner strictly-PASSED line is present, the negative test is
+`ok:true`, and a non-empty APK exists in `.android_artifacts`.
+
+- Run 45706615202 (first hardened run): **failed, genuinely** —
+  Gradle failed during plugin dependency resolution (Kotlin
+  Compose plugin 2.0.0 / AGP 8.5.1) after ~5 minutes;
+  `apkBytes: 0`. The gate failed the workflow at its first check.
+  No code had changed since the successful run 45700928724.
+- Run 45710851264 (re-run, unchanged code): **full success** —
+  APK 12,584,161 bytes, sha256
+  `fa45c9d2bbcaf1085aac705c61a1f68b1ef78a44b8176270a0d93cde23f72cca`
+  (size/hash differ slightly from run #6 — APKs embed build
+  metadata; both are genuine), unit tests 8/8 from Gradle's XML,
+  gate passed ("All Phase 34 checks passed."). The first failure
+  is assessed as a transient plugin-repository/runner network
+  failure, and it is exactly the class of failure the old
+  workflow would have painted green.

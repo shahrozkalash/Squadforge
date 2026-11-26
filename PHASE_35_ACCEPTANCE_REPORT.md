@@ -76,3 +76,23 @@ build evidence.
   cuts, clip speed/fades not baked in, text overlays not burned
   in, image clips skipped — all stated in the app's export notes
   and README; the server engine covers those paths.
+
+
+## Workflow reliability hardening (2026-11-26)
+
+The verification workflow itself was hardened (workflow commit
+`e00aab7`; guard tests in `tests/workflow_reliability.test.ts`,
+commit `89c5d4d`). The build, ops and negative-test steps
+previously piped through `tee` without `pipefail`; they now run
+under `set -eo pipefail`, and a new **Validate genuine results**
+step (`if: always()`) fails the workflow unless the build
+RESULT_JSON is `ok:true` with non-zero `appBytes`, the ops and
+negative-test results are `ok:true`, and a non-empty
+`ClipForge.app` executable exists on disk.
+
+- Run 45706734870 (first hardened run): **full success** —
+  RESULT_JSON `ok:true`, app 72,232 bytes, sha256
+  `2b83a46dbdfe9d4bd68f0bb0dab965b9dcc0833b83dcf30832d84d25c6f95759`
+  (byte-identical to run #5), ops checks and the broken-Swift
+  negative test passed, and the gate passed ("All Phase 35
+  checks passed.").

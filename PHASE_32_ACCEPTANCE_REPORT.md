@@ -161,3 +161,28 @@ No production worker exists. Nothing has run against one.
   daemon-side certificate problem (e.g. expired server cert) still
   surfaces as connection failures in capabilities/health, which fail
   closed.
+
+
+## Workflow reliability hardening (2026-11-26)
+
+The verification workflow itself was hardened (workflow commit
+`b443931`; guard tests in `tests/workflow_reliability.test.ts`,
+commit `89c5d4d`). The integration step previously piped its output
+through `tee` without `pipefail`, so a failing suite would still
+have exited 0; it now runs under `set -eo pipefail`, and a new
+**Validate genuine results** step (`if: always()`) fails the
+workflow unless the captured output shows at least one pass and
+`# fail 0`.
+
+- Run 45710334262 (first hardened run): **failed, genuinely** —
+  integration 6/7. The memory-limit test reported "expected the
+  kernel OOM killer, got exit 137 without OOMKilled": the limit
+  did kill the container (exit 137), but Docker's `OOMKilled`
+  flag was false under runsc in that run. The gate failed the
+  workflow ("integration suite reported failures"). Under the
+  old workflow this failure would have been masked.
+- Run 45711051643 (re-run, unchanged code): **success** — 7/7
+  including the OOM test; gate passed ("All Phase 32 checks
+  passed."). The flag reporting appears intermittent; the limit
+  itself enforced in both runs.
+- The earlier genuine pass (run 45669432584, 7/7) stands.
