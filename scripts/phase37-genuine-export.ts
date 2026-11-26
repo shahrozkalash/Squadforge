@@ -157,18 +157,31 @@ try {
   const duration = Number(probeJson.format.duration);
   console.log(`FFPROBE duration=${duration.toFixed(2)} video=${vStream?.width}x${vStream?.height} audio=${aStream ? aStream.codec_name : 'none'}`);
 
-  const pixel = (t: number, x: number, y: number): [number, number, number] => {
-    const r = spawnSync('ffmpeg', ['-v', 'error', '-i', localMp4, '-ss', String(t), '-frames:v', '1', '-vf', `crop=1:1:${x}:${y}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 1024 * 1024 });
+  const frameW = vStream?.width ?? 0;
+  const frameH = vStream?.height ?? 0;
+  const frameCache = new Map<number, Buffer>();
+  const frameAt = (t: number): Buffer => {
+    const cached = frameCache.get(t);
+    if (cached) return cached;
+    const r = spawnSync('ffmpeg', ['-v', 'error', '-i', localMp4, '-ss', String(t), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 16 * 1024 * 1024 });
     const b = r.stdout as unknown as Buffer;
-    if (!b || b.length < 3) throw new Error(`pixel read failed at t=${t} (${x},${y})`);
-    return [b[0], b[1], b[2]];
+    if (!b || b.length < frameW * frameH * 3) throw new Error(`frame read failed at t=${t} (got ${b ? b.length : 0} of ${frameW * frameH * 3} bytes)`);
+    frameCache.set(t, b);
+    return b;
+  };
+  const pixel = (t: number, x: number, y: number): [number, number, number] => {
+    const b = frameAt(t);
+    const i = (y * frameW + x) * 3;
+    return [b[i], b[i + 1], b[i + 2]];
   };
   const regionWhiteCount = (t: number, x: number, y: number, w: number, h: number): number => {
-    const r = spawnSync('ffmpeg', ['-v', 'error', '-i', localMp4, '-ss', String(t), '-frames:v', '1', '-vf', `crop=${w}:${h}:${x}:${y}`, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'], { maxBuffer: 16 * 1024 * 1024 });
-    const b = r.stdout as unknown as Buffer;
+    const b = frameAt(t);
     let count = 0;
-    for (let i = 0; i + 2 < b.length; i += 3) {
-      if (b[i] > 200 && b[i + 1] > 200 && b[i + 2] > 200) count++;
+    for (let yy = y; yy < y + h && yy < frameH; yy++) {
+      for (let xx = x; xx < x + w && xx < frameW; xx++) {
+        const i = (yy * frameW + xx) * 3;
+        if (b[i] > 200 && b[i + 1] > 200 && b[i + 2] > 200) count++;
+      }
     }
     return count;
   };

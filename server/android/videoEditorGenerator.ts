@@ -1507,6 +1507,26 @@ class ClipAudioProcessor(
  * their window. Sequence 0 (the base track) is the identity;
  * sequences with no active window are fully transparent.
  */
+/**
+ * Phase 37 diagnostics: records how Media3's compositor actually
+ * calls ExportCompositorSettings (which sequence indices, which
+ * timestamps, which alpha came back) so a CI run shows whether
+ * overlay sequences are consulted at all. Capped and best-effort;
+ * never affects the export itself.
+ */
+object CompositorDiagnostics {
+    private val sb = StringBuilder()
+    var calls: Int = 0
+    @Synchronized fun record(text: String) {
+        calls++
+        if (sb.length < 6000) {
+            if (sb.isNotEmpty()) sb.append("; ")
+            sb.append(text)
+        }
+    }
+    @Synchronized fun summary(): String = "calls=" + calls + " [" + sb.toString() + "]"
+}
+
 @OptIn(UnstableApi::class)
 class ExportCompositorSettings(
     private val outputWidth: Int,
@@ -1515,22 +1535,29 @@ class ExportCompositorSettings(
 ) : VideoCompositorSettings {
 
     override fun getOutputSize(inputSizes: List<Size>): Size {
+        CompositorDiagnostics.record("outputSize inputs=" + inputSizes.size)
         return Size(outputWidth, outputHeight)
     }
 
     override fun getOverlaySettings(sequenceIndex: Int, presentationTimeUs: Long): OverlaySettings {
+        val t = presentationTimeUs / 1000000.0
         if (sequenceIndex == 0) {
+            CompositorDiagnostics.record("ov idx=0 t=" + t + " a=1")
             return StaticOverlaySettings.Builder().build()
         }
-        val t = presentationTimeUs / 1000000.0
         val w = windows.firstOrNull {
             it.sequenceIndex == sequenceIndex && t >= it.startSec - 0.002 && t <= it.endSec + 0.002
-        } ?: return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
+        }
+        if (w == null) {
+            CompositorDiagnostics.record("ov idx=" + sequenceIndex + " t=" + t + " a=0")
+            return StaticOverlaySettings.Builder().setAlphaScale(0f).build()
+        }
         var alpha = w.alpha
         if (w.fadeInSec > 0) {
             val p = ((t - w.startSec) / w.fadeInSec).coerceIn(0.0, 1.0)
             alpha *= p
         }
+        CompositorDiagnostics.record("ov idx=" + sequenceIndex + " t=" + t + " a=" + alpha)
         return StaticOverlaySettings.Builder()
             .setScale(w.scaleX.toFloat(), w.scaleY.toFloat())
             .setBackgroundFrameAnchor(w.anchorX.toFloat(), w.anchorY.toFloat())
@@ -2881,7 +2908,8 @@ class ExportParityTest {
         assertTrue("output suspiciously small: " + output.length(), output.length() > 20000)
         val notes = result.getOrThrow().notes.joinToString(" | ")
         File(outDir, "export_parity_result.txt").writeText(
-            "bytes=" + output.length() + " notes=" + notes
+            "bytes=" + output.length() + " notes=" + notes +
+                " diag=" + CompositorDiagnostics.summary()
         )
     }
 }
