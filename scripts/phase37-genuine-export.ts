@@ -148,6 +148,8 @@ try {
   const pull = run(adb, ['pull', `${remoteDir}/export_parity_output.mp4`, localMp4], { timeoutMs: 300000 });
   if (pull.status !== 0 || !fs.existsSync(localMp4)) throw new Error('could not pull exported MP4 from the emulator');
   run(adb, ['pull', `${remoteDir}/export_parity_result.txt`, path.join(outDir, 'export_parity_result.txt')]);
+  run(adb, ['pull', `${remoteDir}/export_parity_minimal.txt`, path.join(outDir, 'export_parity_minimal.txt')]);
+  run(adb, ['pull', `${remoteDir}/export_parity_minimal.mp4`, path.join(outDir, 'export_parity_minimal.mp4')]);
   console.log('exported MP4 pulled:', fs.statSync(localMp4).size, 'bytes');
 
   const probe = run('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', localMp4]);

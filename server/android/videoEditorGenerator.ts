@@ -1525,6 +1525,10 @@ object CompositorDiagnostics {
         }
     }
     @Synchronized fun summary(): String = "calls=" + calls + " [" + sb.toString() + "]"
+    @Synchronized fun reset() {
+        sb.setLength(0)
+        calls = 0
+    }
 }
 
 @OptIn(UnstableApi::class)
@@ -2911,6 +2915,73 @@ class ExportParityTest {
         File(outDir, "export_parity_result.txt").writeText(
             "bytes=" + output.length() + " notes=" + notes +
                 " diag=" + CompositorDiagnostics.summary()
+        )
+
+        // Minimal-composition probe: base clip plus ONE overlay clip
+        // whose window covers the whole canvas at alpha 1. If the
+        // compositor path draws secondaries at all, the sampled
+        // pixels of this export are the overlay's green; if they
+        // stay the base's red, secondaries never reach the output.
+        CompositorDiagnostics.reset()
+        val minimalProject = VideoProject(
+            id = "minimal", name = "Minimal Probe", width = 640, height = 360, fps = 30.0,
+            tracks = listOf(
+                TimelineTrack(
+                    "tBase", "video", "Base",
+                    listOf(
+                        TimelineClip(id = "clipA", mediaId = "mA", trackStart = 0.0, sourceIn = 0.0, sourceOut = 2.0)
+                    )
+                ),
+                TimelineTrack(
+                    "tOv", "video", "Overlay",
+                    listOf(
+                        TimelineClip(
+                            id = "clipOv", mediaId = "mOv", trackStart = 0.0, sourceIn = 0.0, sourceOut = 2.0,
+                            transform = ClipTransform(0.0, 0.0, 4.0, 0.0, 1.0)
+                        )
+                    )
+                )
+            ),
+            media = media,
+            transitions = emptyList(),
+            texts = emptyList(),
+            captions = emptyList()
+        )
+        val minimalOutput = File(outDir, "export_parity_minimal.mp4")
+        if (minimalOutput.exists()) minimalOutput.delete()
+        val minimalLatch = CountDownLatch(1)
+        var minimalOutcome: Result<ExportOutcome>? = null
+        VideoExporter(appContext).export(minimalProject, null, null, minimalOutput) { r ->
+            minimalOutcome = r
+            minimalLatch.countDown()
+        }
+        val minimalText = StringBuilder()
+        if (!minimalLatch.await(180, TimeUnit.SECONDS)) {
+            minimalText.append("minimal export timed out")
+        } else if (minimalOutcome?.isSuccess != true) {
+            minimalText.append("minimal export failed: ")
+                .append(minimalOutcome?.exceptionOrNull()?.message)
+        } else {
+            val retriever = android.media.MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(minimalOutput.absolutePath)
+                val frame = retriever.getFrameAtTime(1000000, android.media.MediaMetadataRetriever.OPTION_CLOSEST)
+                if (frame == null) {
+                    minimalText.append("minimal frame=null")
+                } else {
+                    val center = frame.getPixel(320, 180)
+                    val corner = frame.getPixel(10, 10)
+                    minimalText.append("center=").append(Integer.toHexString(center))
+                        .append(" corner=").append(Integer.toHexString(corner))
+                }
+            } catch (e: Exception) {
+                minimalText.append("minimal probe error: ").append(e.message)
+            } finally {
+                retriever.release()
+            }
+        }
+        File(outDir, "export_parity_minimal.txt").writeText(
+            minimalText.toString() + " diag=" + CompositorDiagnostics.summary()
         )
     }
 }
