@@ -955,6 +955,7 @@ import ${pkg}.editor.VideoProject
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Phase 37: the export plan — a pure, JVM-testable description of
@@ -1033,6 +1034,7 @@ data class ExportPlan(
     val outputWidth: Int,
     val outputHeight: Int,
     val totalDurationSec: Double,
+    val frameRate: Int,
     val notes: List<String>
 )
 
@@ -1377,7 +1379,7 @@ object ExportPlanner {
             if (sum > total) total = sum
         }
 
-        return ExportPlan(sequences, windows, outW, outH, total, notes)
+        return ExportPlan(sequences, windows, outW, outH, total, project.fps.roundToInt().coerceAtLeast(1), notes)
     }
 }
 `;
@@ -1651,10 +1653,17 @@ class VideoExporter(private val context: Context) {
             }
             videoEffects.add(OverlayEffect(overlays))
         }
-        return EditedMediaItem.Builder(mediaBuilder.build())
+        val editedBuilder = EditedMediaItem.Builder(mediaBuilder.build())
             .setEffects(Effects(audioProcessors, videoEffects))
             .setRemoveAudio(item.removeAudio)
-            .build()
+        if (item.isImage) {
+            // Media3's ImageAssetLoader refuses an image item whose
+            // frame rate is unset (a checkState in its constructor,
+            // proven on device in Phase 37 CI run #10): the loader
+            // samples the bitmap at this rate over the item duration.
+            editedBuilder.setFrameRate(plan.frameRate)
+        }
+        return editedBuilder.build()
     }
 
     fun export(
@@ -2628,6 +2637,7 @@ class ExportPlannerTest {
         // One sequence per overlay clip (homogeneous sequences), and
         // video sequences never contain gaps: each clip's offset is
         // filled with muted image pre-roll (see ExportPlanner.preRoll).
+        assertEquals(30, plan.frameRate)
         assertEquals(3, plan.sequences.size)
         assertEquals(emptyList<Double>(), gaps(plan.sequences[1]))
         assertEquals(emptyList<Double>(), gaps(plan.sequences[2]))
