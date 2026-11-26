@@ -67,7 +67,8 @@ These are proposed by the handoff and still need confirming against the code.
 | Phase 15 | Deployment and Distribution. Implemented and verified on 2026-11-06. See `PHASE_15_ACCEPTANCE_REPORT.md`. |
 | Phase 16 | Production Readiness and Intelligence. Implemented and verified on 2026-11-06. See `PHASE_16_ACCEPTANCE_REPORT.md`. |
 | Phase 17 | Native Android Development Engine. Implemented and verified on 2026-11-06. See `PHASE_17_ACCEPTANCE_REPORT.md`. |
-| Phase 18 | Desktop Development Engine (Windows first). Implemented and verified on 2026-11-25, including a genuine local `dotnet build` of a generated project producing a PE-verified Windows `.exe`. See `PHASE_18_ACCEPTANCE_REPORT.md`. |
+| Phase 18 | Desktop Development Engine (Windows first). Implemented and verified on 2026-11-25, including a genuine local `dotnet build` of a generated project producing a PE-verified Windows `.exe`. The Linux target landed later as Phase 36. See `PHASE_18_ACCEPTANCE_REPORT.md`. |
+| Phase 36 | Desktop Development Engine — Linux Target. Implemented and verified on 2026-11-26: Avalonia UI generator (`getLinuxDefaultConfig`, platform-branched validation, macOS still honestly rejected), `ElfInspector` mirroring `PeInspector`, pipeline RID/harvest generalization (ELF-verified extensionless apphost, executable bit preserved, deps/runtimeconfig manifests harvested so the artifact folder genuinely runs), a `--smoke` headless diagnostics mode in the generated app (state persistence proven across real runs), `/generate` platform support, and a latent route-layer bug fixed (the shared artifact-filename defaults rejected the engine's own `.exe`/`.dll` artifacts). Local: focused 31/31, full suite 1,213/1,216 with only the 2 known pre-existing local-only failures; CI run #163 (45773463796) green — 1,215 pass / 0 fail / 0 cancelled / 1 gated skip, genuine ELF build on the runner. The generated GUI itself is not run headless; `--smoke` is the run verification. See `PHASE_36_ACCEPTANCE_REPORT.md`. |
 | Phase 19 | Image Editing Engine. Implemented and verified on 2026-11-25: real pixel/layer/tool engine with PNG/BMP codecs (24/24 tests) plus a generated C# editor app that compiles genuinely via the Phase 18 pipeline. See `PHASE_19_ACCEPTANCE_REPORT.md`. |
 | Phase 20 | Video Editing Engine. Implemented and verified on 2026-11-25: multitrack timeline model with validated operations, genuine ffmpeg exports (crossfades, titles, effects, audio mix) validated by ffprobe (15/15 tests), journal-based recovery, plus a generated C# editor app that compiles genuinely. See `PHASE_20_ACCEPTANCE_REPORT.md`. |
 | Phase 21 | 3D Creation Engine. Implemented and verified on 2026-11-25: scene graph with primitives/materials/lights/keyframe animation, a genuine z-buffer software renderer (17/17 tests), real OBJ and glTF 2.0 export, plus a generated C# 3D app that compiles genuinely via the Phase 18 pipeline. See `PHASE_21_ACCEPTANCE_REPORT.md`. |
@@ -88,7 +89,7 @@ These are proposed by the handoff and still need confirming against the code.
 
 Later roadmap:
 
-- Phase 18: Multi-Platform Native Extensions (iOS / Desktop) — desktop half delivered as the Desktop Development Engine above; iOS remains future work.
+- Phase 18: Multi-Platform Native Extensions (iOS / Desktop) — desktop delivered as the Desktop Development Engine (Windows in Phase 18, Linux in Phase 36; macOS still future work); iOS delivered as Phase 25.
 
 Do not present GitHub integration or deployment as complete until they are implemented and tested, even where the README lists them. The "production ready" wording in the Phase 8 report does not describe the whole product.
 

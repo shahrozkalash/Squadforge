@@ -1,6 +1,6 @@
 # Phase 36 Progress: Desktop Development Engine — Linux Target
 
-**Started:** 2026-11-26 · **Status:** Implementation complete; verification in progress
+**Started:** 2026-11-26 · **Status:** Complete — implemented, verified locally and in CI (run #163, Success). See `PHASE_36_ACCEPTANCE_REPORT.md`
 
 ## Why this phase
 
@@ -91,10 +91,14 @@ manifests; arbitrary `.json` names stay rejected).
   (LaunchCount 1 → 2 across runs).
 - Production build (`npm run build`, vite): succeeds.
 
-## Pending
+## Resolved
 
-- Full test suite result and the main CI run on the pushed commit
-  (recorded in the acceptance report when they land).
+- Full suite (local): 1,216 tests, 1,213 pass, 2 fail (the two
+  documented pre-existing local-only failures), 0 cancelled,
+  1 skipped. Main CI run #163 on `77e74b2`: **Success** — 1,215
+  pass, 0 fail, 0 cancelled, 1 skipped; Phase 36 and Phase 18
+  suites green by name with genuine-build evidence in the log.
+  Full detail in `PHASE_36_ACCEPTANCE_REPORT.md`.
 - The generated app's GUI itself is not run here — this host has no
   display. The `--smoke` mode is the headless run verification;
   opening the window needs a Linux desktop.
