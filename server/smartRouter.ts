@@ -797,7 +797,13 @@ export class SmartModelRouter {
     const timer = internal
       ? setTimeout(() => internal.abort(new Error(`Gateway timeout (${timeoutMs}ms)`)), timeoutMs)
       : undefined;
-    timer?.unref?.();
+    // Not unref'd: when this timer fires it aborts the SDK signal,
+    // which is what settles the awaited race below. An unref'd
+    // timer would let the event loop drain first if the SDK
+    // promise held no ref'd handles, leaving the race pending
+    // forever (same bug class as the backoffSleep fix). The timer
+    // is cleared in the finally when the race settles, so a ref'd
+    // timer cannot hold the process open.
 
     try {
       const genAiCall = genAI.models.generateContent({
@@ -826,7 +832,9 @@ export class SmartModelRouter {
       if (!internal) {
         timeoutPromise = new Promise<never>((_, reject) => {
           raceTimer = setTimeout(() => reject(new Error(`Gateway timeout (${timeoutMs}ms)`)), timeoutMs);
-          raceTimer?.unref?.();
+          // Not unref'd: this timer settles the awaited race, so
+          // it must keep the event loop alive until it fires or is
+          // cleared in the finally below (see the timer note above).
         });
       }
 
