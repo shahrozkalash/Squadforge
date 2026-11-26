@@ -24,7 +24,10 @@ const WORKFLOWS: Record<string, { gateNeedles: string[] }> = {
     gateNeedles: ['# tests 7', '# pass 7', '# fail 0', '# skipped 0']
   },
   '.github/workflows/phase34-android-video-editor.yml': {
-    gateNeedles: ['"ok":true', 'apkBytes', 'UNIT_TESTS tests=8 failures=0 errors=0 skipped=0', 'apksigner verification strictly PASSED', '.android_artifacts']
+    gateNeedles: ['"ok":true', 'apkBytes', 'UNIT_TESTS tests=19 failures=0 errors=0 skipped=0', 'apksigner verification strictly PASSED', '.android_artifacts']
+  },
+  '.github/workflows/phase37-android-export-parity.yml': {
+    gateNeedles: ['"ok":true', 'apkBytes', 'UNIT_TESTS tests=19 failures=0 errors=0 skipped=0', 'INSTRUMENTED status=pass', 'EXPORT_VERIFY', 'export_parity_output.mp4', 'All Phase 37 checks passed.']
   },
   '.github/workflows/phase35-ios-video-editor.yml': {
     gateNeedles: ['"ok":true', 'appBytes', 'ClipForge.app']
