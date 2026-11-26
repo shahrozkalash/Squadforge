@@ -1,5 +1,23 @@
 import type { DesktopProjectConfig } from '../desktop/types.js';
 import { DesktopProjectGenerator } from '../desktop/desktopProjectGenerator.js';
+import type { EditorWorkspace, PanelLayout } from './types.js';
+import { createDefaultWorkspace, createFocusWorkspace, formatKeyChord } from './workspace.js';
+
+/** One panel layout entry as a C# initializer (Phase 54: emitted from the TS workspace model, never hand-duplicated). */
+function panelEntryCSharp(p: PanelLayout): string {
+  const weight = Number.isInteger(p.weight) ? p.weight.toFixed(0) : String(p.weight);
+  return `new("${p.id}", "${p.dock}", ${p.visible ? 'true' : 'false'}, ${weight})`;
+}
+
+function layoutCSharp(ws: EditorWorkspace): string {
+  return ws.panels.map(panelEntryCSharp).join(', ');
+}
+
+function shortcutsCSharp(ws: EditorWorkspace): string {
+  return Object.entries(ws.shortcuts)
+    .map(([id, c]) => `        ["${id}"] = "${formatKeyChord(c)}"`)
+    .join(',\n');
+}
 
 /**
  * Phase 19: generates a real, editable C# WinForms image-editing
@@ -74,6 +92,16 @@ export class ImageProjectGenerator {
       `            attrs.SetColorMatrix(cm);\n` +
       `            g.DrawImage(layer.Bitmap, new Rectangle(0, 0, Width, Height), 0, 0, Width, Height, GraphicsUnit.Pixel, attrs);\n        }\n` +
       `        return result;\n    }\n\n` +
+      `    public void RemoveLayer(int index)\n    {\n` +
+      `        if (Layers.Count <= 1 || index < 0 || index >= Layers.Count) return;\n` +
+      `        Layers[index].Dispose();\n` +
+      `        Layers.RemoveAt(index);\n` +
+      `        ActiveIndex = Math.Clamp(ActiveIndex, 0, Layers.Count - 1);\n    }\n\n` +
+      `    public void MoveLayer(int index, int delta)\n    {\n` +
+      `        var target = index + delta;\n` +
+      `        if (index < 0 || index >= Layers.Count || target < 0 || target >= Layers.Count) return;\n` +
+      `        (Layers[index], Layers[target]) = (Layers[target], Layers[index]);\n` +
+      `        ActiveIndex = target;\n    }\n\n` +
       `    public void Resize(int newWidth, int newHeight)\n    {\n` +
       `        foreach (var layer in Layers)\n        {\n` +
       `            var resized = new Bitmap(newWidth, newHeight, PixelFormat.Format32bppArgb);\n` +
@@ -117,6 +145,7 @@ export class ImageProjectGenerator {
       `    public ImageDocument? Document { get; set; }\n` +
       `    public EditorTool Tool { get; set; } = EditorTool.Brush;\n` +
       `    public Color ForeColor2 { get; set; } = Color.Black;\n` +
+      `    public Color BackColor2 { get; set; } = Color.White;\n` +
       `    public int BrushSize { get; set; } = 8;\n` +
       `    public string TextToDraw { get; set; } = "Text";\n` +
       `    public float Zoom { get; private set; } = 1f;\n` +
@@ -129,6 +158,13 @@ export class ImageProjectGenerator {
       `    public EditorCanvas() { DoubleBuffered = true; BackColor = Color.FromArgb(60, 60, 60); }\n\n` +
       `    public Point ToImage(Point screen)\n    {\n` +
       `        return new Point((int)((screen.X - Pan.X) / Zoom), (int)((screen.Y - Pan.Y) / Zoom));\n    }\n\n` +
+      `    /// <summary>Zoom by a factor, anchored at the control's center (keyboard zoom, Phase 54).</summary>\n` +
+      `    public void ZoomBy(float factor)\n    {\n` +
+      `        var center = new Point(Width / 2, Height / 2);\n` +
+      `        var before = ToImage(center);\n` +
+      `        Zoom = Math.Clamp(Zoom * factor, 0.05f, 32f);\n` +
+      `        Pan = new PointF(center.X - before.X * Zoom, center.Y - before.Y * Zoom);\n` +
+      `        Invalidate();\n    }\n\n` +
       `    protected override void OnMouseWheel(MouseEventArgs e)\n    {\n` +
       `        var before = ToImage(e.Location);\n` +
       `        Zoom = Math.Clamp(Zoom * (e.Delta > 0 ? 1.1f : 0.9f), 0.05f, 32f);\n` +
@@ -192,7 +228,9 @@ export class ImageProjectGenerator {
       `/// <summary>\n` +
       `/// Editor shell: tool palette, layer panel (visibility, ordering,\n` +
       `/// opacity), adjustments menu, undo/redo (snapshot history),\n` +
-      `/// import/export and project save/load.\n` +
+      `/// import/export and project save/load. Panel placement comes\n` +
+      `/// from the Phase 54 workspace layout (Workspace.cs), and every\n` +
+      `/// command is reachable from the keyboard via ShortcutResolver.\n` +
       `/// </summary>\n` +
       `public sealed class MainForm : Form\n{\n` +
       `    private ImageDocument _doc = new(1024, 768);\n` +
@@ -203,40 +241,125 @@ export class ImageProjectGenerator {
       `    public MainForm()\n    {\n` +
       `        Text = "${config.appName} — Image Editor";\n` +
       `        Width = 1200; Height = 820;\n` +
+      `        KeyPreview = true;\n` +
       `        _canvas.Document = _doc;\n` +
       `        _canvas.StrokeStarted += PushUndo;\n` +
       `        _canvas.ImageChanged += RefreshLayers;\n\n` +
-      `        var tools = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40 };\n` +
+      `        var layout = WorkspaceData.DefaultLayout;\n\n` +
+      `        var toolsEntry = WorkspaceData.FindPanel(layout, "tools");\n` +
+      `        var tools = new FlowLayoutPanel { Dock = DockOf(toolsEntry), Visible = toolsEntry.Visible };\n` +
+      `        if (tools.Dock is DockStyle.Top or DockStyle.Bottom) tools.Height = 40; else tools.Width = 110;\n` +
       `        foreach (var tool in Enum.GetValues<EditorTool>())\n        {\n` +
       `            var b = new Button { Text = tool.ToString(), AutoSize = true };\n` +
       `            b.Click += (_, _) => _canvas.Tool = tool;\n` +
-      `            tools.Controls.Add(b);\n        }\n` +
+      `            tools.Controls.Add(b);\n        }\n\n` +
+      `        var colorsEntry = WorkspaceData.FindPanel(layout, "colors");\n` +
+      `        var colors = new FlowLayoutPanel { Dock = DockOf(colorsEntry), Visible = colorsEntry.Visible };\n` +
+      `        if (colors.Dock is DockStyle.Top or DockStyle.Bottom) colors.Height = 40; else colors.Width = 110;\n` +
       `        var colorBtn = new Button { Text = "Color…", AutoSize = true };\n` +
       `        colorBtn.Click += (_, _) => { using var d = new ColorDialog(); if (d.ShowDialog() == DialogResult.OK) _canvas.ForeColor2 = d.Color; };\n` +
-      `        tools.Controls.Add(colorBtn);\n\n` +
-      `        var side = new Panel { Dock = DockStyle.Right, Width = 220 };\n` +
+      `        colors.Controls.Add(colorBtn);\n` +
+      `        var bgBtn = new Button { Text = "BG Color…", AutoSize = true };\n` +
+      `        bgBtn.Click += (_, _) => { using var d = new ColorDialog(); if (d.ShowDialog() == DialogResult.OK) _canvas.BackColor2 = d.Color; };\n` +
+      `        colors.Controls.Add(bgBtn);\n` +
+      `        var swapBtn = new Button { Text = "Swap colors", AutoSize = true };\n` +
+      `        swapBtn.Click += (_, _) => { (_canvas.ForeColor2, _canvas.BackColor2) = (_canvas.BackColor2, _canvas.ForeColor2); };\n` +
+      `        colors.Controls.Add(swapBtn);\n\n` +
+      `        var layersEntry = WorkspaceData.FindPanel(layout, "layers");\n` +
+      `        var side = new Panel { Dock = DockOf(layersEntry), Visible = layersEntry.Visible };\n` +
+      `        if (side.Dock is DockStyle.Left or DockStyle.Right) side.Width = (int)(layersEntry.Weight * 70); else side.Height = (int)(layersEntry.Weight * 70);\n` +
       `        var addBtn = new Button { Text = "Add layer", Dock = DockStyle.Top };\n` +
-      `        addBtn.Click += (_, _) => { PushUndo(); _doc.AddLayer($"Layer {_doc.Layers.Count + 1}"); RefreshLayers(); _canvas.Invalidate(); };\n` +
+      `        addBtn.Click += (_, _) => AddLayer();\n` +
       `        var upBtn = new Button { Text = "Move up", Dock = DockStyle.Top };\n` +
-      `        upBtn.Click += (_, _) => { int i = _doc.ActiveIndex; if (i < _doc.Layers.Count - 1) { (_doc.Layers[i], _doc.Layers[i + 1]) = (_doc.Layers[i + 1], _doc.Layers[i]); _doc.ActiveIndex = i + 1; RefreshLayers(); _canvas.Invalidate(); } };\n` +
-      `        side.Controls.Add(_layerList); side.Controls.Add(upBtn); side.Controls.Add(addBtn);\n` +
+      `        upBtn.Click += (_, _) => MoveLayerUp();\n` +
+      `        var delBtn = new Button { Text = "Delete layer", Dock = DockStyle.Top };\n` +
+      `        delBtn.Click += (_, _) => DeleteLayer();\n` +
+      `        side.Controls.Add(_layerList); side.Controls.Add(delBtn); side.Controls.Add(upBtn); side.Controls.Add(addBtn);\n` +
       `        _layerList.SelectedIndexChanged += (_, _) => { if (_layerList.SelectedIndex >= 0) { _doc.ActiveIndex = _doc.Layers.Count - 1 - _layerList.SelectedIndex; } };\n\n` +
       `        var menu = new MenuStrip();\n` +
       `        var file = new ToolStripMenuItem("File");\n` +
-      `        file.DropDownItems.Add("Import image…", null, (_, _) => ImportImage());\n` +
-      `        file.DropDownItems.Add("Export PNG…", null, (_, _) => ExportImage(ImageFormat.Png));\n` +
-      `        file.DropDownItems.Add("Export JPEG…", null, (_, _) => ExportImage(ImageFormat.Jpeg));\n` +
-      `        file.DropDownItems.Add("Save project…", null, (_, _) => { using var d = new FolderBrowserDialog(); if (d.ShowDialog() == DialogResult.OK) _doc.SaveProject(d.SelectedPath); });\n` +
-      `        file.DropDownItems.Add("Open project…", null, (_, _) => { using var d = new FolderBrowserDialog(); if (d.ShowDialog() == DialogResult.OK) { _doc.Dispose(); _doc = ImageDocument.LoadProject(d.SelectedPath); _canvas.Document = _doc; RefreshLayers(); _canvas.Invalidate(); } });\n` +
+      `        file.DropDownItems.Add(MenuItem("New project", "file.new", (_, _) => NewProject()));\n` +
+      `        file.DropDownItems.Add(MenuItem("Import image…", null, (_, _) => ImportImage()));\n` +
+      `        file.DropDownItems.Add(MenuItem("Export PNG…", "file.exportPng", (_, _) => ExportImage(ImageFormat.Png)));\n` +
+      `        file.DropDownItems.Add(MenuItem("Export JPEG…", null, (_, _) => ExportImage(ImageFormat.Jpeg)));\n` +
+      `        file.DropDownItems.Add(MenuItem("Save project…", "file.save", (_, _) => SaveProject()));\n` +
+      `        file.DropDownItems.Add(MenuItem("Open project…", "file.open", (_, _) => OpenProject()));\n` +
       `        var edit = new ToolStripMenuItem("Edit");\n` +
-      `        edit.DropDownItems.Add("Undo", null, (_, _) => Undo());\n` +
-      `        edit.DropDownItems.Add("Redo", null, (_, _) => Redo());\n` +
-      `        edit.DropDownItems.Add("Rotate 90°", null, (_, _) => { PushUndo(); _doc.RotateFlip(RotateFlipType.Rotate90FlipNone); _canvas.Invalidate(); });\n` +
-      `        edit.DropDownItems.Add("Flip horizontal", null, (_, _) => { PushUndo(); _doc.RotateFlip(RotateFlipType.RotateNoneFlipX); _canvas.Invalidate(); });\n` +
+      `        edit.DropDownItems.Add(MenuItem("Undo", "edit.undo", (_, _) => Undo()));\n` +
+      `        edit.DropDownItems.Add(MenuItem("Redo", "edit.redo", (_, _) => Redo()));\n` +
+      `        edit.DropDownItems.Add(MenuItem("Rotate 90°", "image.rotate90", (_, _) => { PushUndo(); _doc.RotateFlip(RotateFlipType.Rotate90FlipNone); _canvas.Invalidate(); }));\n` +
+      `        edit.DropDownItems.Add(MenuItem("Flip horizontal", "image.flipHorizontal", (_, _) => { PushUndo(); _doc.RotateFlip(RotateFlipType.RotateNoneFlipX); _canvas.Invalidate(); }));\n` +
       `        menu.Items.Add(file); menu.Items.Add(edit);\n\n` +
-      `        Controls.Add(_canvas); Controls.Add(side); Controls.Add(tools); Controls.Add(menu);\n` +
+      `        Controls.Add(_canvas); Controls.Add(side); Controls.Add(colors); Controls.Add(tools); Controls.Add(menu);\n` +
       `        MainMenuStrip = menu;\n` +
       `        RefreshLayers();\n    }\n\n` +
+      `    private static DockStyle DockOf(PanelLayoutEntry entry) => entry.Dock switch\n    {\n` +
+      `        "left" => DockStyle.Left,\n` +
+      `        "right" => DockStyle.Right,\n` +
+      `        "top" => DockStyle.Top,\n` +
+      `        "bottom" => DockStyle.Bottom,\n` +
+      `        _ => DockStyle.Right\n    };\n\n` +
+      `    private static ToolStripMenuItem MenuItem(string text, string? command, EventHandler onClick)\n    {\n` +
+      `        var item = new ToolStripMenuItem(text, null, onClick);\n` +
+      `        if (command != null && WorkspaceData.Shortcuts.TryGetValue(command, out var chord))\n` +
+      `            item.ShortcutKeyDisplayString = chord;\n` +
+      `        return item;\n    }\n\n` +
+      `    protected override void OnKeyDown(KeyEventArgs e)\n    {\n` +
+      `        var command = ShortcutResolver.Resolve(e);\n` +
+      `        if (command != null && DispatchCommand(command))\n        {\n` +
+      `            e.Handled = true;\n` +
+      `            e.SuppressKeyPress = true;\n` +
+      `            return;\n        }\n` +
+      `        base.OnKeyDown(e);\n    }\n\n` +
+      `    private bool DispatchCommand(string command)\n    {\n` +
+      `        switch (command)\n        {\n` +
+      `            case "edit.undo": Undo(); return true;\n` +
+      `            case "edit.redo": Redo(); return true;\n` +
+      `            case "file.new": NewProject(); return true;\n` +
+      `            case "file.open": OpenProject(); return true;\n` +
+      `            case "file.save": SaveProject(); return true;\n` +
+      `            case "file.exportPng": ExportImage(ImageFormat.Png); return true;\n` +
+      `            case "layer.add": AddLayer(); return true;\n` +
+      `            case "layer.delete": DeleteLayer(); return true;\n` +
+      `            case "layer.moveUp": MoveLayerUp(); return true;\n` +
+      `            case "layer.moveDown": _doc.MoveLayer(_doc.ActiveIndex, -1); RefreshLayers(); _canvas.Invalidate(); return true;\n` +
+      `            case "view.zoomIn": _canvas.ZoomBy(1.25f); return true;\n` +
+      `            case "view.zoomOut": _canvas.ZoomBy(0.8f); return true;\n` +
+      `            case "image.rotate90": PushUndo(); _doc.RotateFlip(RotateFlipType.Rotate90FlipNone); _canvas.Invalidate(); return true;\n` +
+      `            case "image.flipHorizontal": PushUndo(); _doc.RotateFlip(RotateFlipType.RotateNoneFlipX); _canvas.Invalidate(); return true;\n` +
+      `            default:\n` +
+      `                if (command.StartsWith("tool.") && Enum.TryParse<EditorTool>(command.Substring(5), true, out var tool))\n` +
+      `                { _canvas.Tool = tool; return true; }\n` +
+      `                return false;\n        }\n    }\n\n` +
+      `    private void NewProject()\n    {\n` +
+      `        _doc.Dispose();\n` +
+      `        _doc = new ImageDocument(1024, 768);\n` +
+      `        _canvas.Document = _doc;\n` +
+      `        _undo.Clear(); _redo.Clear();\n` +
+      `        RefreshLayers(); _canvas.Invalidate();\n    }\n\n` +
+      `    private void SaveProject()\n    {\n` +
+      `        using var d = new FolderBrowserDialog();\n` +
+      `        if (d.ShowDialog() == DialogResult.OK) _doc.SaveProject(d.SelectedPath);\n    }\n\n` +
+      `    private void OpenProject()\n    {\n` +
+      `        using var d = new FolderBrowserDialog();\n` +
+      `        if (d.ShowDialog() != DialogResult.OK) return;\n` +
+      `        _doc.Dispose();\n` +
+      `        _doc = ImageDocument.LoadProject(d.SelectedPath);\n` +
+      `        _canvas.Document = _doc;\n` +
+      `        _undo.Clear(); _redo.Clear();\n` +
+      `        RefreshLayers(); _canvas.Invalidate();\n    }\n\n` +
+      `    private void AddLayer()\n    {\n` +
+      `        PushUndo();\n` +
+      `        _doc.AddLayer($"Layer {_doc.Layers.Count + 1}");\n` +
+      `        RefreshLayers(); _canvas.Invalidate();\n    }\n\n` +
+      `    private void DeleteLayer()\n    {\n` +
+      `        if (_doc.Layers.Count <= 1) return;\n` +
+      `        PushUndo();\n` +
+      `        _doc.RemoveLayer(_doc.ActiveIndex);\n` +
+      `        RefreshLayers(); _canvas.Invalidate();\n    }\n\n` +
+      `    private void MoveLayerUp()\n    {\n` +
+      `        _doc.MoveLayer(_doc.ActiveIndex, 1);\n` +
+      `        RefreshLayers(); _canvas.Invalidate();\n    }\n\n` +
       `    private byte[] Snapshot()\n    {\n` +
       `        using var ms = new MemoryStream();\n` +
       `        using var flat = _doc.Flatten();\n` +
@@ -275,6 +398,65 @@ export class ImageProjectGenerator {
       `        _layerList.Items.Clear();\n` +
       `        for (int i = _doc.Layers.Count - 1; i >= 0; i--)\n` +
       `            _layerList.Items.Add($"{_doc.Layers[i].Name}{(_doc.Layers[i].Visible ? "" : " (hidden)")}");\n    }\n}\n`;
+
+    const defaultWorkspace = createDefaultWorkspace();
+    const focusWorkspace = createFocusWorkspace();
+    files[`${root}/Workspace.cs`] =
+      `namespace ${asm};\n\n` +
+      `/// <summary>One panel placement in the editor workspace layout (Phase 54).</summary>\n` +
+      `public sealed record PanelLayoutEntry(string Id, string Dock, bool Visible, double Weight);\n\n` +
+      `/// <summary>\n` +
+      `/// Workspace data for the editor shell, generated from the\n` +
+      `/// TypeScript workspace model (server/imageEditor/workspace.ts):\n` +
+      `/// panel layouts for the built-in presets and the keyboard\n` +
+      `/// shortcut map (command id to chord string). The shell docks\n` +
+      `/// its panels from this data and resolves keys through\n` +
+      `/// ShortcutResolver; it does not keep its own copies.\n` +
+      `/// </summary>\n` +
+      `public static class WorkspaceData\n{\n` +
+      `    public static readonly PanelLayoutEntry[] DefaultLayout = { ` + layoutCSharp(defaultWorkspace) + ` };\n\n` +
+      `    public static readonly PanelLayoutEntry[] FocusLayout = { ` + layoutCSharp(focusWorkspace) + ` };\n\n` +
+      `    public static readonly IReadOnlyDictionary<string, string> Shortcuts = new Dictionary<string, string>\n    {\n` +
+      shortcutsCSharp(defaultWorkspace) + `\n    };\n\n` +
+      `    public static PanelLayoutEntry FindPanel(PanelLayoutEntry[] layout, string id) => layout.First(p => p.Id == id);\n}\n\n` +
+      `/// <summary>\n` +
+      `/// Resolves key presses to editor commands. Matching is\n` +
+      `/// modifier-exact, mirroring the TypeScript resolver: a\n` +
+      `/// Ctrl+Shift+Z press does not fire the Ctrl+Z binding.\n` +
+      `/// </summary>\n` +
+      `public static class ShortcutResolver\n{\n` +
+      `    public static string? Resolve(KeyEventArgs e)\n    {\n` +
+      `        var chord = FormatChord(e.KeyCode, e.Control, e.Shift, e.Alt);\n` +
+      `        if (chord.Length == 0) return null;\n` +
+      `        foreach (var pair in WorkspaceData.Shortcuts)\n` +
+      `            if (pair.Value == chord) return pair.Key;\n` +
+      `        return null;\n    }\n\n` +
+      `    public static string FormatChord(Keys key, bool ctrl, bool shift, bool alt)\n    {\n` +
+      `        var name = KeyName(key);\n` +
+      `        if (name == null) return "";\n` +
+      `        var parts = new List<string>();\n` +
+      `        if (ctrl) parts.Add("Ctrl");\n` +
+      `        if (shift) parts.Add("Shift");\n` +
+      `        if (alt) parts.Add("Alt");\n` +
+      `        parts.Add(name);\n` +
+      `        return string.Join("+", parts);\n    }\n\n` +
+      `    private static string? KeyName(Keys key)\n    {\n` +
+      `        switch (key)\n        {\n` +
+      `            case Keys.Delete: return "Delete";\n` +
+      `            case Keys.Back: return "Backspace";\n` +
+      `            case Keys.Enter: return "Enter";\n` +
+      `            case Keys.Escape: return "Escape";\n` +
+      `            case Keys.Space: return "Space";\n` +
+      `            case Keys.Tab: return "Tab";\n` +
+      `            case Keys.OemOpenBrackets: return "[";\n` +
+      `            case Keys.OemCloseBrackets: return "]";\n` +
+      `            case Keys.Oemplus: return "=";\n` +
+      `            case Keys.OemMinus: return "-";\n` +
+      `            default:\n` +
+      `                if (key >= Keys.A && key <= Keys.Z) return key.ToString();\n` +
+      `                if (key >= Keys.D0 && key <= Keys.D9) return ((char)('0' + (key - Keys.D0))).ToString();\n` +
+      `                if (key >= Keys.F1 && key <= Keys.F24) return key.ToString();\n` +
+      `                return null;\n        }\n    }\n}\n`;
 
     files['README.md'] =
       `# ${config.appName}\n\nA layered image-editing application generated by SquadForge (Phase 19 Image Editing Engine on the Phase 18 desktop stack).\n\n` +

@@ -1,0 +1,59 @@
+# Phase 51 Progress — GPU Acceleration and Performance (Graphics Editor)
+
+Date: 2026-11-26
+Baseline: local snapshot after Phase 50 (staged locally, **not pushed** — batched push is the owner's)
+Status: **Implemented and verified locally.** The acceleration architecture, the parallel CPU provider, the execution policy and the benchmarks are real and measured. **GPU execution is not implemented and is not claimed**: this VM has no GPU and Node here exposes no WebGPU, so there is nothing genuine to build or verify a GPU kernel against. What ships for GPU is the honest half — a provider interface, a registry, and capability detection that reports GPU unavailable in this runtime (asserted by tests). Acceptance is the owner's decision.
+
+## The honest headline
+
+On this machine, the parallel provider is **slower** than serial at both benchmarked sizes (0.28×–0.83×). That is a measured property of this environment, not a defect in the split: the band math is byte-identical to serial (proven), but each parallel call pays ~252 ms of worker startup per worker (the tsx dev loader booting in every worker) plus structured-clone transfer of the full inputs (~116 ms per 16.7 MB layer buffer), while the VM's sustained compute is roughly 1.5 effective cores despite Node reporting 4 logical CPUs — so there is little parallel compute to buy the overhead back with. The gap narrows exactly as the fixed-cost theory predicts when the canvas quadruples (composite 0.28× → 0.55×/0.59×; box blur 0.41×/0.51× → 0.83×/0.81×). The policy layer therefore treats parallel as an opt-in capability with a size threshold, never as a speed promise. Full numbers below.
+
+## What was built
+
+- **Banded seams in the engine** (`server/imageEditor/imageCore.ts`, refactored — no behavior change; the Phase 19 + 44–50 suites pass unchanged at 248/248):
+  - `compositeRows(project, y0, y1)` — compositing is per-pixel independent (a layer pixel blends only with the backdrop pixel at the same coordinates; clip bases and group buffers are per-pixel too), so the Phase 44 node renderer was generalized to render a row band into a band-sized buffer with identical per-pixel math, and `composite()` is now the full-height case of it.
+  - `separableConvolveRows(img, kernel, y0, y1)` — the Phase 47 blur core restricted to a band: the horizontal pass computes exactly the rows the vertical pass can read (band + radius halo, clamped), every sum in the same order over the same values, so band rows are byte-identical to the full-image result. `separableConvolve` delegates to it.
+  - `applyFilterToImageRows(img, filterId, params, y0, y1)` + `isBandedFilter(filterId)` — the banded entry for the two band-separable filters (`box-blur`, `gaussian-blur`, now sharing their kernel builders with the serial impls). Parameters validate exactly as in `applyFilterToImage`; a non-separable filter throws a named error rather than approximating. The identity cases (radius 0, σ 0) return the exact input rows.
+- **Acceleration architecture** (`server/imageEditor/acceleration.ts`):
+  - `ComputeProvider` — the contract every backend is held to: `composite()` and `applyFilter()` returning results **byte-identical to cpu-serial**.
+  - A registry (`registerComputeProvider` / `unregisterComputeProvider` / `getComputeProvider` / `listComputeProviders`) with shape validation. The built-ins `cpu-serial` and `cpu-parallel` register at module load; a custom provider dispatches by name through the async entry points (proven by a test double that is a dispatch probe, not an acceleration claim).
+  - `detectAccelerationCapabilities()` — CPU always available (with the host core count); parallel CPU available iff worker_threads is; **GPU available only while a genuine `kind: 'gpu'` provider is registered** — none is, and the report also records `webGpuRuntimePresent: false` for this runtime. The Phase 51 suite asserts the no-GPU result in this environment.
+  - `resolveExecutionPlan(task, options)` — the pure policy function: an explicitly named provider wins (subject to the same qualification); parallel requires worker_threads, a band-separable operation, ≥ `PARALLEL_MIN_PIXELS` (65,536) pixels, and ≥ 2 bands; every fallback returns `cpu-serial` **with the reason recorded** (threshold, non-bandable, single band, no workers). The threshold is pinned exactly by tests (65,535 px → serial; 65,536 px → parallel).
+  - `computeBands(height, bandCount)` — contiguous bands covering the height exactly, sizes differing by at most one row (earlier bands take the extra rows): 61 rows over 4 workers split 16/15/15/15.
+  - Additive async entry points `compositeProjectAsync(project, options?)` and `applyFilterAsync(image, filterId, params?, options?)`. Filter parameters are validated before anything spawns; non-bandable filters fall back to serial by policy through these entry points. The synchronous defaults (`composite`, `applyFilterToImage`, `applyFilter`) are untouched.
+- **Parallel CPU provider** (`server/imageEditor/accelerationWorker.ts` + the banded runner in `acceleration.ts`): one worker per band, spawned per operation, each computing its band with the same engine functions the serial path is built from (`compositeRows` / `applyFilterToImageRows`), returning the band's pixels as a transferred buffer; the main thread assembles. Worker failures reject the operation — a failed band is never masked by a silent serial retry. The worker entry is a real `.ts` file loaded through the inherited tsx loader (verified working under `npx tsx --test`; the probe is how the design was chosen). The provider itself refuses non-bandable filters with a named error; called directly it works at any size (the size policy lives in the plan layer, which is how the tests exercise workers on small canvases too).
+- **Benchmark** (`scripts/phase51-benchmark.ts`): measures serial vs parallel (4 workers) compositing (5-layer project: multiply + masked screen + isolated group) and box blur r=6 at 1024×1024 and 2048×2048, verifies every parallel result byte-identical to serial (exit 1 on mismatch), and prints the environment. Parallel times are end-to-end — spawn, clone, compute, assemble; nothing is hidden.
+
+## Measured benchmarks (this VM)
+
+Environment: node v24.22.1, linux x64, AMD EPYC 9D64 (4 logical CPUs reported, `availableParallelism` = 4), shared/throttled VM — sustained throughput is consistent with ~1.5 effective cores. Two consecutive runs of `npx tsx scripts/phase51-benchmark.ts`:
+
+| Operation | Serial (run 1 / run 2) | Parallel, 4 workers (run 1 / run 2) | Speed ratio | Byte-identical |
+| :--- | :--- | :--- | :--- | :--- |
+| Composite 1024×1024 | 592.5 / 606.1 ms | 2079.2 / 2194.7 ms | 0.28× / 0.28× | yes |
+| Box blur r=6, 1024×1024 | 550.4 / 605.6 ms | 1327.1 / 1194.1 ms | 0.41× / 0.51× | yes |
+| Composite 2048×2048 | 2353.4 / 2472.0 ms | 4285.0 / 4155.0 ms | 0.55× / 0.59× | yes |
+| Box blur r=6, 2048×2048 | 2456.6 / 2370.8 ms | 2943.1 / 2927.2 ms | 0.83× / 0.81× | yes |
+
+Overhead components, measured separately on this VM: worker spawn + first reply ≈ **252 ms per worker** (Node + tsx loader boot); structured clone of one 2048×2048 RGBA buffer (16.7 MB) ≈ **116 ms** — and the 2048 composite project carries ~84 MB of layer data, cloned once per worker. Against ~1.5 effective cores of real compute capacity, those fixed costs are the whole story: the most compute-dense operation (2048 blur) comes closest to parity, and every ratio improves with canvas size. On a host with genuinely idle cores and a compiled runtime (no per-worker tsx boot), the same architecture has far less overhead to overcome — but that is a prediction, not a measurement, and it is recorded as one.
+
+## Genuine evidence
+
+- **Phase 51 tests: 22/22 pass** (`tests/phase51_acceleration.test.ts`):
+  - Capabilities: CPU available with the host core count; **GPU asserted unavailable** (`available: false`, `webGpuRuntimePresent: false`, reason naming the missing provider); parallel CPU available with its worker bound; both built-ins listed.
+  - Registry: built-ins resolve by id; unknown ids throw naming the registered set; a custom provider registers, dispatches by name through `compositeProjectAsync`, and unregisters; registration validates id/kind/methods.
+  - Band splitting: exact splits (10/3 → 4/3/3; 61/4 → 16/15/15/15; 5/5 → 1×5), coverage/adjacency for 257/4, 257/3, 100/7; invalid counts throw.
+  - Policy: small-image fallback with reason; the exact 65,535/65,536 threshold; explicit serial; explicit parallel on a small image falling back with reason; explicit parallel with workers=2 → 2 bands; workers=1 → serial fallback; bands capped by height; non-bandable → serial with reason; unknown provider / bad worker counts / bad sizes throw.
+  - Composite consistency: `compositeRows` bands (×2, ×3, ×4, ×7) reassemble byte-exactly into `composite()` on a 40×61 project with blend modes, a per-row gradient mask, an isolated group with a clipped member and a hidden layer; the cpu-parallel provider matches on that small project; `compositeProjectAsync` matches under the default policy, workers 2/3/4, explicit parallel and explicit serial on a 256×257 project (65,792 px, bands 65/64/64/64); small-project fallback matches too.
+  - Filter consistency: box blur r=3 over a step image byte-identical under default policy and workers 4/3 (input proven unmutated); Gaussian σ=1.5 and box r=2 over impulses placed on band boundaries (rows 64 and 129 of 257) byte-identical — the halo is exact; the provider runs banded filters directly; radius-0/σ-0 identities exact; `invert`/`sharpen` fall back through `applyFilterAsync` byte-identically and are refused by the parallel provider; unknown filter ids and bad params fail with the serial errors before any worker runs.
+- **Regression: 248/248** in the same style of run — Phase 19 (24), 44 (31), 45 (40), 46 (33), 47 (51), 48 (36), 49 (8), 50 (25) — the imageCore refactor changed no existing behavior.
+- **Typecheck: `npx tsc --noEmit` clean.** One real find along the way: this repo's tsconfig does not enable `strict`, under which `!result.ok` does not narrow a boolean discriminated union — the worker-result handler uses `result.ok === false` (which narrows in both modes), with the reason recorded in a comment.
+- Not run in this pass: the full repo test suite and the production web build (the change is two new modules, one worker entry, banded seams inside imageCore, one export line, one benchmark script, one new test file, and docs; the focused suites and typecheck cover the touched surface).
+
+## Limitations (stated, not hidden)
+
+- **No GPU execution exists.** No GPU hardware is present in this environment and Node here has no WebGPU; no GPU kernel was written, and no GPU performance figure exists anywhere in this phase. What a future GPU provider must implement to register is documented in `acceleration.ts` (the `ComputeProvider` contract, byte-identical results, `kind: 'gpu'`).
+- **Parallel is slower than serial on this VM** at both benchmarked sizes, for the measured reasons above (per-call worker spawn under the tsx loader, whole-input structured clones, ~1.5 effective cores). Workers are one-shot — there is no persistent pool — and inputs are cloned whole to each worker rather than sliced to band + halo; both are named as the obvious next optimizations, neither is claimed.
+- Only `box-blur` and `gaussian-blur` are band-separable. Every other Phase 47 filter runs serially (policy fallback through the async entry points; refusal from the parallel provider used directly).
+- The execution-plan threshold (65,536 px) is a heuristic constant, not a tuned optimum; on this VM serial wins at every measured size, so the threshold's role is limiting overhead exposure, not picking a measured winner.
+- The HTTP routes and the generated C# desktop app do not expose the provider/async API yet.

@@ -1,18 +1,47 @@
 import * as zlib from 'zlib';
-import type { PixelImage } from './types.js';
+import type { GrayImage, PixelImage, PixelImage16 } from './types.js';
 
 /**
  * Phase 19: real image import/export codecs.
  *
  * PNG: full encoder (filter 0, zlib via Node's built-in zlib) and a
- * decoder handling 8-bit RGB/RGBA non-interlaced PNGs with all five
- * scanline filters — the format this engine exports, plus the common
- * case of imported files. BMP: 24/32-bit uncompressed read/write.
+ * decoder handling 8-bit non-interlaced PNGs with all five scanline
+ * filters — the format this engine exports, plus the common case of
+ * imported files. BMP: 24/32-bit uncompressed read/write.
+ *
+ * Phase 50 additions (color management):
+ * - PNG decode now also covers the remaining 8-bit color types:
+ *   grayscale (0), palette/indexed (3, PLTE + tRNS expanded to real
+ *   RGBA), and grayscale+alpha (4). Palette and grayscale files at
+ *   sub-8-bit depths (1/2/4) are still rejected with a named error.
+ * - 16-bit PNGs are decoded by `decodePng16` into the 16-bit
+ *   working representation (color types 0/2/4/6) and written by
+ *   `encodePng16`. Plain `decodePng` refuses 16-bit files with an
+ *   error naming `decodePng16`, so 16-bit data is never silently
+ *   reduced to 8-bit.
+ * - `encodePngGrayscale` writes a real grayscale (type 0) PNG from
+ *   the grayscale working representation.
+ * - ICC profiles: `extractPngIccProfile` reads the iCCP chunk
+ *   (profile name + inflated profile bytes) and `encodePng` accepts
+ *   an `iccProfile` option that writes it back — the profile payload
+ *   is carried byte-exact (its zlib container is recompressed).
+ *   Profiles are carried as data only; nothing in this engine
+ *   applies an ICC transform (all values are treated as sRGB-encoded
+ *   as stored — see colorManagement.ts).
+ * - What plain decode/encode still drops, stated plainly: every
+ *   ancillary chunk other than PLTE/tRNS (which are applied) and
+ *   iCCP (which needs the explicit APIs above) — gAMA, cHRM, sRGB,
+ *   tEXt and friends are not preserved by a decode→encode round
+ *   trip, and tRNS for RGB/grayscale files (a transparent-color
+ *   spec, not per-pixel alpha) is not applied. Encoded output is
+ *   always plain RGBA/grayscale samples plus the optional iCCP.
  *
  * JPEG is intentionally NOT faked: there is no pure-TypeScript JPEG
- * codec in this codebase, so JPEG import/export is reported as
- * unsupported rather than simulated (the generated desktop app uses
- * System.Drawing, which does support JPEG — see the generator).
+ * codec in this codebase and no JPEG library in node_modules, so
+ * JPEG import/export is reported as unsupported rather than
+ * simulated (the generated desktop app uses System.Drawing, which
+ * does support JPEG — see the generator). `importImage` recognizes
+ * the JPEG signature and says exactly that.
  */
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -42,24 +71,42 @@ function pngChunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([len, typeBuf, data, crcBuf]);
 }
 
-export function encodePng(img: PixelImage): Buffer {
-  const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(img.width, 0);
-  ihdr.writeUInt32BE(img.height, 4);
-  ihdr[8] = 8; // bit depth
-  ihdr[9] = 6; // color type RGBA
-  ihdr[10] = 0; // compression
-  ihdr[11] = 0; // filter
-  ihdr[12] = 0; // interlace
+interface PngChunkData {
+  type: string;
+  data: Buffer;
+}
 
-  const stride = img.width * 4;
-  const raw = Buffer.alloc((stride + 1) * img.height);
-  for (let y = 0; y < img.height; y++) {
-    raw[y * (stride + 1)] = 0; // filter: none
-    Buffer.from(img.data.buffer, img.data.byteOffset + y * stride, stride).copy(raw, y * (stride + 1) + 1);
+/** Walk a PNG's chunks in file order. Throws on a bad signature. */
+function walkPngChunks(buffer: Buffer): PngChunkData[] {
+  if (buffer.length < 8 || !buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    throw new Error('Not a PNG file (bad signature)');
   }
-  const idat = zlib.deflateSync(raw, { level: 6 });
-  return Buffer.concat([PNG_SIGNATURE, pngChunk('IHDR', ihdr), pngChunk('IDAT', idat), pngChunk('IEND', Buffer.alloc(0))]);
+  const chunks: PngChunkData[] = [];
+  let offset = 8;
+  while (offset + 8 <= buffer.length) {
+    const len = buffer.readUInt32BE(offset);
+    const type = buffer.toString('ascii', offset + 4, offset + 8);
+    chunks.push({ type, data: buffer.subarray(offset + 8, offset + 8 + len) });
+    offset += 12 + len;
+    if (type === 'IEND') break;
+  }
+  return chunks;
+}
+
+function pngIhdr(chunks: PngChunkData[]): { width: number; height: number; bitDepth: number; colorType: number; interlace: number } {
+  const ihdr = chunks.find((c) => c.type === 'IHDR');
+  if (!ihdr) throw new Error('PNG has no IHDR');
+  return {
+    width: ihdr.data.readUInt32BE(0),
+    height: ihdr.data.readUInt32BE(4),
+    bitDepth: ihdr.data[8],
+    colorType: ihdr.data[9],
+    interlace: ihdr.data[12]
+  };
+}
+
+function pngIdat(chunks: PngChunkData[]): Buffer {
+  return zlib.inflateSync(Buffer.concat(chunks.filter((c) => c.type === 'IDAT').map((c) => Buffer.from(c.data))));
 }
 
 function paeth(a: number, b: number, c: number): number {
@@ -72,43 +119,14 @@ function paeth(a: number, b: number, c: number): number {
   return c;
 }
 
-export function decodePng(buffer: Buffer): PixelImage {
-  if (buffer.length < 8 || !buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    throw new Error('Not a PNG file (bad signature)');
-  }
-  let offset = 8;
-  let width = 0;
-  let height = 0;
-  let bitDepth = 0;
-  let colorType = 0;
-  let interlace = 0;
-  const idatParts: Buffer[] = [];
-  while (offset + 8 <= buffer.length) {
-    const len = buffer.readUInt32BE(offset);
-    const type = buffer.toString('ascii', offset + 4, offset + 8);
-    const data = buffer.subarray(offset + 8, offset + 8 + len);
-    if (type === 'IHDR') {
-      width = data.readUInt32BE(0);
-      height = data.readUInt32BE(4);
-      bitDepth = data[8];
-      colorType = data[9];
-      interlace = data[12];
-    } else if (type === 'IDAT') {
-      idatParts.push(Buffer.from(data));
-    } else if (type === 'IEND') {
-      break;
-    }
-    offset += 12 + len;
-  }
-  if (!width || !height) throw new Error('PNG has no IHDR');
-  if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth: ${bitDepth} (only 8 supported)`);
-  if (interlace !== 0) throw new Error('Interlaced PNGs are not supported');
-  const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 0;
-  if (!channels) throw new Error(`Unsupported PNG color type: ${colorType} (only RGB=2 and RGBA=6 supported)`);
-
-  const raw = zlib.inflateSync(Buffer.concat(idatParts));
-  const stride = width * channels;
-  const out = new Uint8ClampedArray(width * height * 4);
+/**
+ * Undo PNG scanline filtering. `stride` is the byte length of one
+ * scanline and `bpp` the byte size of one pixel (samples included),
+ * which is the filter's "left" distance — this is what generalizes
+ * the Phase 19 decoder to 1/2-byte-sample and 16-bit layouts.
+ */
+function unfilterScanlines(raw: Buffer, height: number, stride: number, bpp: number): Uint8Array {
+  const out = new Uint8Array(stride * height);
   const prevRow = new Uint8Array(stride);
   for (let y = 0; y < height; y++) {
     const rowStart = y * (stride + 1);
@@ -116,9 +134,9 @@ export function decodePng(buffer: Buffer): PixelImage {
     const row = raw.subarray(rowStart + 1, rowStart + 1 + stride);
     const recon = new Uint8Array(stride);
     for (let i = 0; i < stride; i++) {
-      const left = i >= channels ? recon[i - channels] : 0;
+      const left = i >= bpp ? recon[i - bpp] : 0;
       const up = prevRow[i];
-      const upLeft = i >= channels ? prevRow[i - channels] : 0;
+      const upLeft = i >= bpp ? prevRow[i - bpp] : 0;
       let v = row[i];
       switch (filter) {
         case 0:
@@ -141,13 +159,255 @@ export function decodePng(buffer: Buffer): PixelImage {
       recon[i] = v;
     }
     prevRow.set(recon);
-    for (let x = 0; x < width; x++) {
-      const si = x * channels;
-      const di = (y * width + x) * 4;
-      out[di] = recon[si];
-      out[di + 1] = recon[si + 1];
-      out[di + 2] = recon[si + 2];
-      out[di + 3] = channels === 4 ? recon[si + 3] : 255;
+    out.set(recon, y * stride);
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ ICC profiles
+
+/** An ICC profile as carried by a PNG iCCP chunk: a Latin-1 name and the raw profile bytes. */
+export interface PngIccProfile {
+  name: string;
+  data: Buffer;
+}
+
+/**
+ * Read the ICC profile embedded in a PNG's iCCP chunk, if any: the
+ * profile name and the inflated profile bytes, exactly as stored.
+ * Returns null when the file has no iCCP chunk. The profile is
+ * returned as data — this engine never applies ICC transforms.
+ */
+export function extractPngIccProfile(buffer: Buffer): PngIccProfile | null {
+  const chunks = walkPngChunks(buffer);
+  const iccp = chunks.find((c) => c.type === 'iCCP');
+  if (!iccp) return null;
+  const nul = iccp.data.indexOf(0);
+  if (nul < 0) throw new Error('Malformed PNG iCCP chunk (no profile name terminator)');
+  const name = iccp.data.toString('latin1', 0, nul);
+  const method = iccp.data[nul + 1];
+  if (method !== 0) throw new Error(`Unsupported PNG iCCP compression method: ${method}`);
+  return { name, data: zlib.inflateSync(iccp.data.subarray(nul + 2)) };
+}
+
+function iccpChunk(profile: PngIccProfile): Buffer {
+  const nameBytes = Buffer.from(profile.name, 'latin1');
+  if (nameBytes.length === 0 || nameBytes.length > 79 || nameBytes.includes(0)) {
+    throw new Error('Invalid ICC profile name for PNG iCCP: must be 1..79 Latin-1 characters without NUL');
+  }
+  const data = Buffer.concat([nameBytes, Buffer.from([0, 0]), zlib.deflateSync(profile.data, { level: 6 })]);
+  return pngChunk('iCCP', data);
+}
+
+export interface EncodePngOptions {
+  /** When given, an iCCP chunk carrying this profile is written before IDAT. */
+  iccProfile?: PngIccProfile;
+}
+
+// ------------------------------------------------------------------ PNG 8-bit
+
+export function encodePng(img: PixelImage, options?: EncodePngOptions): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(img.width, 0);
+  ihdr.writeUInt32BE(img.height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // color type RGBA
+  ihdr[10] = 0; // compression
+  ihdr[11] = 0; // filter
+  ihdr[12] = 0; // interlace
+
+  const stride = img.width * 4;
+  const raw = Buffer.alloc((stride + 1) * img.height);
+  for (let y = 0; y < img.height; y++) {
+    raw[y * (stride + 1)] = 0; // filter: none
+    Buffer.from(img.data.buffer, img.data.byteOffset + y * stride, stride).copy(raw, y * (stride + 1) + 1);
+  }
+  const idat = zlib.deflateSync(raw, { level: 6 });
+  const parts = [PNG_SIGNATURE, pngChunk('IHDR', ihdr)];
+  if (options?.iccProfile) parts.push(iccpChunk(options.iccProfile));
+  parts.push(pngChunk('IDAT', idat), pngChunk('IEND', Buffer.alloc(0)));
+  return Buffer.concat(parts);
+}
+
+/** Write a grayscale working image as a real grayscale (color type 0, 8-bit) PNG. */
+export function encodePngGrayscale(img: GrayImage): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(img.width, 0);
+  ihdr.writeUInt32BE(img.height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 0; // color type grayscale
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+  const raw = Buffer.alloc((img.width + 1) * img.height);
+  for (let y = 0; y < img.height; y++) {
+    raw[y * (img.width + 1)] = 0; // filter: none
+    Buffer.from(img.data.buffer, img.data.byteOffset + y * img.width, img.width).copy(raw, y * (img.width + 1) + 1);
+  }
+  const idat = zlib.deflateSync(raw, { level: 6 });
+  return Buffer.concat([PNG_SIGNATURE, pngChunk('IHDR', ihdr), pngChunk('IDAT', idat), pngChunk('IEND', Buffer.alloc(0))]);
+}
+
+/**
+ * Decode an 8-bit PNG to RGBA. Color types: grayscale (0), RGB (2),
+ * palette (3 — PLTE expanded, tRNS applied per index), grayscale+
+ * alpha (4) and RGBA (6). 16-bit files are refused with an error
+ * naming `decodePng16`; sub-8-bit depths and interlaced files are
+ * refused with named errors.
+ */
+export function decodePng(buffer: Buffer): PixelImage {
+  const chunks = walkPngChunks(buffer);
+  const { width, height, bitDepth, colorType, interlace } = pngIhdr(chunks);
+  if (!width || !height) throw new Error('PNG has no IHDR');
+  if (bitDepth === 16) {
+    throw new Error('Unsupported PNG bit depth: 16 in decodePng — use decodePng16 so 16-bit data is not silently reduced to 8-bit');
+  }
+  if (bitDepth !== 8) throw new Error(`Unsupported PNG bit depth: ${bitDepth} (only 8 supported)`);
+  if (interlace !== 0) throw new Error('Interlaced PNGs are not supported');
+  const channelsByType: Record<number, number> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+  const channels = channelsByType[colorType];
+  if (!channels) throw new Error(`Unsupported PNG color type: ${colorType} (only grayscale=0, RGB=2, palette=3, grayscale+alpha=4 and RGBA=6 supported)`);
+
+  const plte = chunks.find((c) => c.type === 'PLTE')?.data;
+  const trns = chunks.find((c) => c.type === 'tRNS')?.data;
+  if (colorType === 3 && (!plte || plte.length < 3)) throw new Error('Palette PNG has no PLTE chunk');
+
+  const raw = pngIdat(chunks);
+  const stride = width * channels;
+  const recon = unfilterScanlines(raw, height, stride, channels);
+  const out = new Uint8ClampedArray(width * height * 4);
+  for (let p = 0, px = 0; p < width * height; p++, px += 4) {
+    const si = p * channels;
+    switch (colorType) {
+      case 0: {
+        const v = recon[si];
+        out[px] = v;
+        out[px + 1] = v;
+        out[px + 2] = v;
+        out[px + 3] = 255;
+        break;
+      }
+      case 2:
+        out[px] = recon[si];
+        out[px + 1] = recon[si + 1];
+        out[px + 2] = recon[si + 2];
+        out[px + 3] = 255;
+        break;
+      case 3: {
+        const idx = recon[si];
+        const palette = plte as Buffer;
+        const entries = Math.floor(palette.length / 3);
+        if (idx >= entries) throw new Error(`PNG palette index ${idx} out of range (${entries} palette entries)`);
+        out[px] = palette[idx * 3];
+        out[px + 1] = palette[idx * 3 + 1];
+        out[px + 2] = palette[idx * 3 + 2];
+        out[px + 3] = trns && idx < trns.length ? trns[idx] : 255;
+        break;
+      }
+      case 4: {
+        const v = recon[si];
+        out[px] = v;
+        out[px + 1] = v;
+        out[px + 2] = v;
+        out[px + 3] = recon[si + 1];
+        break;
+      }
+      case 6:
+        out[px] = recon[si];
+        out[px + 1] = recon[si + 1];
+        out[px + 2] = recon[si + 2];
+        out[px + 3] = recon[si + 3];
+        break;
+    }
+  }
+  return { width, height, data: out };
+}
+
+/** Decode a PNG's pixels together with its embedded ICC profile (null when it has none). */
+export function decodePngWithProfile(buffer: Buffer): { image: PixelImage; iccProfile: PngIccProfile | null } {
+  return { image: decodePng(buffer), iccProfile: extractPngIccProfile(buffer) };
+}
+
+// ------------------------------------------------------------------ PNG 16-bit
+
+/** Write a 16-bit working image as a real 16-bit RGBA (color type 6, depth 16) PNG. */
+export function encodePng16(img: PixelImage16): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(img.width, 0);
+  ihdr.writeUInt32BE(img.height, 4);
+  ihdr[8] = 16; // bit depth
+  ihdr[9] = 6; // color type RGBA
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+  const stride = img.width * 8;
+  const raw = Buffer.alloc((stride + 1) * img.height);
+  for (let y = 0; y < img.height; y++) {
+    raw[y * (stride + 1)] = 0; // filter: none
+    for (let i = 0; i < img.width * 4; i++) {
+      const v = img.data[y * img.width * 4 + i];
+      const di = y * (stride + 1) + 1 + i * 2;
+      raw[di] = (v >> 8) & 0xff;
+      raw[di + 1] = v & 0xff;
+    }
+  }
+  const idat = zlib.deflateSync(raw, { level: 6 });
+  return Buffer.concat([PNG_SIGNATURE, pngChunk('IHDR', ihdr), pngChunk('IDAT', idat), pngChunk('IEND', Buffer.alloc(0))]);
+}
+
+/**
+ * Decode a 16-bit PNG into the 16-bit working representation —
+ * samples are read big-endian and kept at full precision. Color
+ * types: grayscale (0, replicated, opaque), RGB (2, opaque),
+ * grayscale+alpha (4) and RGBA (6). Palette files cannot be 16-bit
+ * in PNG and are refused, as are 8-bit files (use `decodePng`).
+ */
+export function decodePng16(buffer: Buffer): PixelImage16 {
+  const chunks = walkPngChunks(buffer);
+  const { width, height, bitDepth, colorType, interlace } = pngIhdr(chunks);
+  if (!width || !height) throw new Error('PNG has no IHDR');
+  if (bitDepth !== 16) throw new Error(`decodePng16 needs a 16-bit PNG, got bit depth ${bitDepth} (use decodePng for 8-bit files)`);
+  if (interlace !== 0) throw new Error('Interlaced PNGs are not supported');
+  const channelsByType: Record<number, number> = { 0: 1, 2: 3, 4: 2, 6: 4 };
+  const channels = channelsByType[colorType];
+  if (!channels) throw new Error(`Unsupported PNG color type for 16-bit decode: ${colorType} (only grayscale=0, RGB=2, grayscale+alpha=4 and RGBA=6 supported)`);
+
+  const raw = pngIdat(chunks);
+  const stride = width * channels * 2;
+  const recon = unfilterScanlines(raw, height, stride, channels * 2);
+  const sample = (si: number) => (recon[si] << 8) | recon[si + 1];
+  const out = new Uint16Array(width * height * 4);
+  for (let p = 0, px = 0; p < width * height; p++, px += 4) {
+    const si = p * channels * 2;
+    switch (colorType) {
+      case 0: {
+        const v = sample(si);
+        out[px] = v;
+        out[px + 1] = v;
+        out[px + 2] = v;
+        out[px + 3] = 65535;
+        break;
+      }
+      case 2:
+        out[px] = sample(si);
+        out[px + 1] = sample(si + 2);
+        out[px + 2] = sample(si + 4);
+        out[px + 3] = 65535;
+        break;
+      case 4: {
+        const v = sample(si);
+        out[px] = v;
+        out[px + 1] = v;
+        out[px + 2] = v;
+        out[px + 3] = sample(si + 2);
+        break;
+      }
+      case 6:
+        out[px] = sample(si);
+        out[px + 1] = sample(si + 2);
+        out[px + 2] = sample(si + 4);
+        out[px + 3] = sample(si + 6);
+        break;
     }
   }
   return { width, height, data: out };
@@ -221,10 +481,20 @@ export function detectFormat(buffer: Buffer): ImageFormat | null {
   return null;
 }
 
+/** True when the buffer starts with the JPEG SOI + marker prefix (FF D8 FF). */
+function looksLikeJpeg(buffer: Buffer): boolean {
+  return buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff;
+}
+
 export function importImage(buffer: Buffer): PixelImage {
   const format = detectFormat(buffer);
   if (format === 'png') return decodePng(buffer);
   if (format === 'bmp') return decodeBmp(buffer);
+  if (looksLikeJpeg(buffer)) {
+    throw new Error(
+      'JPEG image detected: the TypeScript engine has no JPEG codec (import supports PNG and BMP; JPEG is supported by the generated desktop app via System.Drawing)'
+    );
+  }
   throw new Error('Unsupported image format: only PNG and BMP can be imported by the TypeScript engine (JPEG is supported by the generated desktop app via System.Drawing)');
 }
 

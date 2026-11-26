@@ -1,10 +1,18 @@
-import type { Point } from './types.js';
+import type { BuiltInFontId, Point } from './types.js';
 
 /**
  * Phase 19: a tiny built-in 5x7 bitmap font so the text tool rasterizes
  * real glyphs without any external font dependency. Each glyph is 7
  * rows of 5 bits. Covers A–Z, 0–9 and basic punctuation; unknown
  * characters render as a hollow box.
+ *
+ * Phase 48: the glyph tables are organized as named built-in fonts.
+ * 'pixel' is the original set. 'pixel-bold' is a bold companion set
+ * materialized from the regular set by a 1px horizontal dilation
+ * (every set bit also sets its right neighbour) — a standard bitmap
+ * emboldening, stored as its own table below. There are no other
+ * fonts: this engine has no system-font access, and text layers name
+ * one of these two ids.
  */
 const GLYPHS: Record<string, number[]> = {
   A: [0x0e, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11],
@@ -59,6 +67,45 @@ const GLYPHS: Record<string, number[]> = {
 };
 
 const FALLBACK: number[] = [0x1f, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1f];
+
+/** Phase 48: embolden a glyph table — each row gains its right-shifted self. */
+function dilateGlyphs(glyphs: Record<string, number[]>): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  for (const [ch, rows] of Object.entries(glyphs)) {
+    out[ch] = rows.map((r) => (r | (r >> 1)) & 0x1f);
+  }
+  return out;
+}
+
+const BOLD_GLYPHS: Record<string, number[]> = dilateGlyphs(GLYPHS);
+const BOLD_FALLBACK: number[] = FALLBACK.map((r) => (r | (r >> 1)) & 0x1f);
+
+const FONT_GLYPHS: Record<BuiltInFontId, Record<string, number[]>> = {
+  pixel: GLYPHS,
+  'pixel-bold': BOLD_GLYPHS
+};
+
+const FONT_FALLBACKS: Record<BuiltInFontId, number[]> = {
+  pixel: FALLBACK,
+  'pixel-bold': BOLD_FALLBACK
+};
+
+/** Glyph grid metrics shared by both built-in fonts. */
+export const GLYPH_WIDTH = 5;
+export const GLYPH_HEIGHT = 7;
+/** Horizontal advance per glyph, in unscaled pixels (5 glyph + 1 gap). */
+export const GLYPH_ADVANCE = 6;
+
+/**
+ * Phase 48: the 7 rows (5 bits each, MSB = leftmost column) of one
+ * character in a built-in font. Lookup folds to uppercase, like the
+ * Phase 19 text tool; unknown characters give the hollow-box fallback.
+ */
+export function glyphRowsFor(font: BuiltInFontId, ch: string): number[] {
+  const glyphs = FONT_GLYPHS[font];
+  if (!glyphs) throw new Error(`Unknown built-in font: ${font}`);
+  return glyphs[ch.toUpperCase()] || FONT_FALLBACKS[font];
+}
 
 export function measureText(text: string, scale: number): { width: number; height: number } {
   return { width: text.length * 6 * scale - (text.length > 0 ? scale : 0), height: 7 * scale };
