@@ -2674,7 +2674,7 @@ class ExportParityTest {
             MediaAsset("mA", clipA.absolutePath, 4.0, true, true, 640, 360, "video"),
             MediaAsset("mB", clipB.absolutePath, 4.0, true, true, 640, 360, "video"),
             MediaAsset("mOv", overlay.absolutePath, 3.0, true, false, 160, 120, "video"),
-            MediaAsset("mImg", image.absolutePath, 0.8, false, false, 200, 100, "image"),
+            MediaAsset("mImg", image.absolutePath, 0.6, false, false, 200, 100, "image"),
             MediaAsset("mMus", music.absolutePath, 6.0, false, true, null, null, "audio")
         )
         val baseTrack = TimelineTrack(
@@ -2692,7 +2692,7 @@ class ExportParityTest {
                     transform = ClipTransform(400.0, 200.0, 1.0, 0.0, 1.0)
                 ),
                 TimelineClip(
-                    id = "clipImg", mediaId = "mImg", trackStart = 4.2, sourceIn = 0.0, sourceOut = 0.8,
+                    id = "clipImg", mediaId = "mImg", trackStart = 5.4, sourceIn = 0.0, sourceOut = 0.6,
                     transform = ClipTransform(40.0, 220.0, 1.0, 0.0, 1.0)
                 )
             )
