@@ -66,8 +66,7 @@ jobs:
           echo "Validating Phase 34 evidence (a green workflow requires every check below):"
           grep -q '"ok":true' phase34-build-output.txt || { echo "FAIL: build RESULT_JSON is not ok:true"; exit 1; }
           grep -Eq '"apkBytes":[1-9][0-9]*' phase34-build-output.txt || { echo "FAIL: apkBytes is zero or missing"; exit 1; }
-          grep -q 'UNIT_TESTS tests=' phase34-build-output.txt || { echo "FAIL: no unit-test evidence in the build output"; exit 1; }
-          grep -q 'failures=0 errors=0' phase34-build-output.txt || { echo "FAIL: unit tests had failures or errors"; exit 1; }
+          grep -q 'UNIT_TESTS tests=8 failures=0 errors=0 skipped=0' phase34-build-output.txt || { echo "FAIL: JVM unit tests are not exactly 8 passed with 0 failures, 0 errors, 0 skipped (Gradle test-results XML)"; exit 1; }
           grep -q 'apksigner verification strictly PASSED' phase34-build-output.txt || { echo "FAIL: apksigner verification did not pass"; exit 1; }
           grep -q '"ok":true' phase34-broken-output.txt || { echo "FAIL: broken-source negative test did not fail honestly"; exit 1; }
           APK=$(find .android_artifacts -name '*.apk' -size +0 2>/dev/null | head -1)
