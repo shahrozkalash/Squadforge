@@ -114,7 +114,7 @@ describe('Phase 37: export parity structure', () => {
       'unsupportedTransitionTypeRendersAsCutWithNote',
       'speedHalvesTimelineDurationAndIsCarriedOnItem',
       'fadesAreCarriedWithClipRelativeOffsetsAfterTextSplit',
-      'overlayTrackIsGapPositionedWithTransformWindow',
+      'overlayTrackIsPreRollPositionedWithTransformWindow',
       'imageClipOnOverlayTrackBecomesImageItem',
       'imageClipOnBaseTrackIsExportedAsImageItem',
       'audioTrackClipsAreGapPositionedWithCombinedGainAndMuteRespected',
