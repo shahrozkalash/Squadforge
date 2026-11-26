@@ -80,6 +80,12 @@ describe('Phase 37: export parity structure', () => {
     assert.ok(exporter.includes('class ExportCompositorSettings'));
     assert.ok(exporter.includes('VideoCompositorSettings'));
     assert.ok(exporter.includes('setVideoCompositorSettings'));
+    // Media3 binds the Transformer to the application thread: build, start
+    // and cancel are all marshalled onto the main looper (Phase 37 run #2
+    // failed on the emulator with "Transformer is accessed on the wrong
+    // thread" before this was pinned).
+    assert.ok(exporter.includes("Media3's Transformer is bound to the application (main) thread"));
+    assert.ok(exporter.includes('handler.post { transformer?.cancel() }'));
     assert.ok(exporter.includes('builder.addGap'));
     assert.ok(exporter.includes('setImageDurationMs'));
     // Text burn-in carries position, size and colour from the model.

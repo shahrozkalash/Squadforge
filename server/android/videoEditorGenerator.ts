@@ -1520,7 +1520,8 @@ class VideoExporter(private val context: Context) {
 
     fun cancel() {
         cancelled = true
-        transformer?.cancel()
+        // The Transformer is bound to the application thread; cancel there.
+        handler.post { transformer?.cancel() }
     }
 
     private fun buildItem(item: PlanItem, plan: ExportPlan): EditedMediaItem {
@@ -1628,44 +1629,57 @@ class VideoExporter(private val context: Context) {
                 ExportCompositorSettings(plan.outputWidth, plan.outputHeight, plan.windows)
             )
             .build()
-        val built = Transformer.Builder(context)
-            .addListener(object : Transformer.Listener {
-                override fun onCompleted(composition: Composition, exportResult: ExportResult) {
-                    progress = 1f
-                    transformer = null
-                    onDone(Result.success(ExportOutcome(outputFile, plan.notes)))
-                }
+        // Media3's Transformer is bound to the application (main) thread:
+        // it must be built and started there, whatever thread called export().
+        handler.post {
+            if (cancelled) {
+                onDone(Result.failure(ExportCancelledException()))
+                return@post
+            }
+            try {
+                val built = Transformer.Builder(context)
+                    .addListener(object : Transformer.Listener {
+                        override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                            progress = 1f
+                            transformer = null
+                            onDone(Result.success(ExportOutcome(outputFile, plan.notes)))
+                        }
 
-                override fun onError(
-                    composition: Composition,
-                    exportResult: ExportResult,
-                    exception: ExportException
-                ) {
-                    transformer = null
-                    if (cancelled) {
-                        outputFile.delete()
-                        onDone(Result.failure(ExportCancelledException()))
-                    } else {
-                        onDone(Result.failure(exception))
+                        override fun onError(
+                            composition: Composition,
+                            exportResult: ExportResult,
+                            exception: ExportException
+                        ) {
+                            transformer = null
+                            if (cancelled) {
+                                outputFile.delete()
+                                onDone(Result.failure(ExportCancelledException()))
+                            } else {
+                                onDone(Result.failure(exception))
+                            }
+                        }
+                    })
+                    .build()
+                transformer = built
+
+                val poll = object : Runnable {
+                    override fun run() {
+                        val active = transformer ?: return
+                        val holder = ProgressHolder()
+                        val state = active.getProgress(holder)
+                        if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
+                            progress = holder.progress / 100f
+                        }
+                        if (transformer != null) handler.postDelayed(this, 250)
                     }
                 }
-            })
-            .build()
-        transformer = built
-
-        val poll = object : Runnable {
-            override fun run() {
-                val active = transformer ?: return
-                val holder = ProgressHolder()
-                val state = active.getProgress(holder)
-                if (state == Transformer.PROGRESS_STATE_AVAILABLE) {
-                    progress = holder.progress / 100f
-                }
-                if (transformer != null) handler.postDelayed(this, 250)
+                handler.post(poll)
+                built.start(composition, outputFile.absolutePath)
+            } catch (e: Exception) {
+                transformer = null
+                onDone(Result.failure(e))
             }
         }
-        handler.post(poll)
-        built.start(composition, outputFile.absolutePath)
     }
 }
 `;
