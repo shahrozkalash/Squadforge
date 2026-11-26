@@ -1,0 +1,90 @@
+name: Phase 37 Android Export Parity Verification
+
+# Proves Phase 37's ClipForge export upgrade end to end: the
+# generated app is built genuinely (Gradle assembleDebug +
+# testDebugUnitTest — EditorOpsTest + ExportPlannerTest), then an
+# instrumented test on an emulator runs the app's real Media3
+# export of a synthetic project (crossfade, 2x speed, PiP overlay
+# with transform, image overlay, audio fades, burned-in text), and
+# the exported MP4 is verified on the host with ffprobe and
+# ffmpeg pixel/audio measurements. The SquadForge dev VM cannot
+# run the Gradle daemon or an emulator, so this runs here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/phase37-android-export-parity.yml'
+      - 'scripts/phase37-genuine-export.ts'
+      - 'server/android/**'
+
+permissions:
+  contents: read
+
+jobs:
+  genuine-android-export-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Install SquadForge dependencies
+        run: npm ci
+
+      - name: Genuine export parity run (build + emulator export + ffprobe verification)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: default
+          arch: x86_64
+          profile: Nexus 6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot-save
+          script: |
+            set -eo pipefail
+            npx tsx scripts/phase37-genuine-export.ts all | tee phase37-output.txt
+
+      - name: Validate genuine results (fail the workflow on any failed check)
+        if: always()
+        run: |
+          set -e
+          echo "Validating Phase 37 evidence (a green workflow requires every check below):"
+          grep -q '"ok":true' phase37-output.txt || { echo "FAIL: harness RESULT_JSON is not ok:true"; exit 1; }
+          grep -Eq '"apkBytes":[1-9][0-9]*' phase37-output.txt || { echo "FAIL: apkBytes is zero or missing"; exit 1; }
+          grep -q 'UNIT_TESTS tests=19 failures=0 errors=0 skipped=0' phase37-output.txt || { echo "FAIL: JVM unit tests are not exactly 19 passed with 0 failures, 0 errors, 0 skipped (Gradle test-results XML)"; exit 1; }
+          grep -q 'INSTRUMENTED status=pass' phase37-output.txt || { echo "FAIL: instrumented export test did not pass on the emulator"; exit 1; }
+          for check in duration resolution audioStream pipGreen baseRed crossfadeBlend imageYellow pipGoneBlueBase textWhitePixels audioFadeIn audioFadeOut; do
+            grep -q "EXPORT_VERIFY $check=pass" phase37-output.txt || { echo "FAIL: EXPORT_VERIFY $check did not pass"; exit 1; }
+          done
+          [ -s phase37-output/export_parity_output.mp4 ] || { echo "FAIL: exported MP4 artifact missing or empty"; exit 1; }
+          echo "All Phase 37 checks passed."
+
+      - name: Upload genuine export outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase37-genuine-artifacts
+          path: |
+            phase37-output.txt
+            phase37-output/**
+          if-no-files-found: warn
