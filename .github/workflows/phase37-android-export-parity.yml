@@ -51,8 +51,18 @@ jobs:
       - name: Install SquadForge dependencies
         run: npm ci
 
+      - name: Enable KVM group perms
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - name: Genuine export parity run (build + emulator export + ffprobe verification)
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          # Fallback if KVM is still unavailable: allow TCG software emulation
+          # instead of failing with "-accel off is not supported".
+          ANDROID_I_WANT_MY_TCG: 'yes'
         with:
           api-level: 34
           target: default
@@ -60,6 +70,7 @@ jobs:
           profile: Nexus 6
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot-save
+          emulator-boot-timeout: 900
           script: |
             set -eo pipefail
             npx tsx scripts/phase37-genuine-export.ts all | tee phase37-output.txt
