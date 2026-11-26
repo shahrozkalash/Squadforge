@@ -68,6 +68,10 @@ try {
   });
   console.log('build status:', result.status, 'apkBytes:', apkBuffer?.length || 0);
   if (result.status !== 'success' || !apkBuffer) {
+    // Print the pipeline's full diagnostics: result.error alone is only the
+    // first Gradle error line, which hid the cause of the run #4 failure.
+    for (const d of result.diagnostics || []) console.log('BUILD_DIAGNOSTIC ' + d.severity + ' ' + d.file + ': ' + d.message);
+    for (const l of (result.logs || []).slice(-15)) console.log('BUILD_LOG ' + l.level + ' ' + l.step + ': ' + String(l.message).slice(0, 300));
     throw new Error(`genuine build failed: ${result.error || 'unknown'}`);
   }
   evidence.apkBytes = apkBuffer.length;
