@@ -34,15 +34,15 @@ jobs:
           ffmpeg -version | head -1
           ffprobe -version | head -1
 
-            - name: Set up .NET 8 SDK (required to build the Phase 60 release packages)
-              uses: actions/setup-dotnet@v4
-              with:
-                dotnet-version: '8.0.x'
+      - name: Set up .NET 8 SDK (required to build the Phase 60 release packages)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
       - name: Build Phase 60 release packages (verified by tests 60.9/60.10)
         run: npx tsx scripts/phase60-release.ts
 
-                            - name: Check TypeScript Syntax & Type Integrity
+      - name: Check TypeScript Syntax & Type Integrity
         run: npm run lint
 
       - name: Run Automated Test Suites
