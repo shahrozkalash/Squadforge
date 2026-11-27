@@ -1,6 +1,7 @@
 export * from './types.js';
 export * from './imageCore.js';
 export * from './imageCodec.js';
+export * from './tiff.js';
 export * from './colorManagement.js';
 export * from './acceleration.js';
 export * from './psd.js';

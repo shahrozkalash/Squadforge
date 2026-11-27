@@ -5,13 +5,15 @@ import type { BandJob, BandResult } from './acceleration.js';
 /**
  * Phase 51: the parallel CPU provider's worker entry.
  *
- * One-shot protocol: the main thread spawns one worker per row band,
- * posts exactly one `BandJob`, and this worker computes that band
- * with the same banded engine functions the serial path is built
- * from (`compositeRows` / `applyFilterToImageRows` in imageCore.ts),
- * posts the band's pixels back as a transferred buffer, and is then
- * terminated by the main thread. Errors are reported, never hidden:
- * a failed band fails the whole operation on the main thread.
+ * Protocol: the main thread posts `BandJob`s to this worker — since
+ * Phase 59 from a persistent pool, so a worker answers job after
+ * job (at most one in flight per worker; the protocol carries no
+ * job ids). Each job is computed with the same banded engine
+ * functions the serial path is built from (`compositeRows` /
+ * `applyFilterToImageRows` in imageCore.ts) and the band's pixels
+ * are posted back as a transferred buffer. Errors are reported,
+ * never hidden: a failed band fails the whole operation on the
+ * main thread.
  *
  * The worker loads through the same tsx loader as the main thread
  * (worker_threads inherits execArgv), which is how this .ts entry

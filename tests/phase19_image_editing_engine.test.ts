@@ -280,13 +280,24 @@ describe('SquadForge Phase 19: Image Editing Engine Test Suite', () => {
         assert.ok(files[expected], `missing ${expected}`);
       }
       const doc = files['src/PixelForge/ImageDocument.cs'];
-      assert.match(doc, /public Bitmap Flatten\(\)/);
+      // Phase 57 needle migration: Flatten() moved to
+      // ImageDocument.Drawing.cs when the document model was split
+      // into a raw-buffer core (ImageDocument.cs) and its GDI
+      // surface (the .Drawing.cs partial), so the harness can run
+      // the core headless. The assertion itself is unchanged.
+      const docDrawing = files['src/PixelForge/ImageDocument.Drawing.cs'];
+      assert.match(docDrawing, /public Bitmap Flatten\(\)/);
       assert.match(doc, /SaveProject/);
       assert.match(doc, /LoadProject/);
       const canvas = files['src/PixelForge/EditorCanvas.cs'];
       assert.match(canvas, /OnMouseWheel/); // zoom
       assert.match(canvas, /EditorTool\.Eraser/);
-      assert.match(canvas, /CompositingMode\.SourceCopy/); // true alpha erase
+      // Phase 56 needle migration: the canvas no longer erases via a
+      // System.Drawing SourceCopy blit. Erasing now runs through the
+      // ported brush engine (BrushEngine.EraseStroke scales pixel
+      // alpha by 1 - coverage), which is the same true-alpha-erase
+      // semantics on the raw-pixel core. See PHASE_56_PROGRESS.md.
+      assert.match(canvas, /BrushEngine\.EraseStroke/); // true alpha erase (Phase 56 engine)
       const form = files['src/PixelForge/MainForm.cs'];
       assert.match(form, /Undo\(\)/);
       assert.match(form, /ExportImage\(ImageFormat\.Jpeg\)/);

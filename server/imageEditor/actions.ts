@@ -618,7 +618,7 @@ export interface BatchSummary {
 }
 
 export interface BatchOptions {
-  /** Input image files (PNG or BMP — whatever `importImage` decodes). */
+  /** Input image files (PNG, JPEG, BMP or TIFF — whatever `importImage` decodes; widened in Phase 58). */
   inputs: string[];
   /** Directory outputs are written into (created if missing). */
   outputDir: string;

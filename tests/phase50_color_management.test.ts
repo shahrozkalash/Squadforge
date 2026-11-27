@@ -404,11 +404,17 @@ describe('Phase 50 — ICC profile carriage', () => {
 // ---------------------------------------------------------- JPEG honesty + color accuracy
 
 describe('Phase 50 — JPEG state and color accuracy', () => {
-  test('JPEG bytes are recognized and refused with the exact reason (no codec exists)', () => {
+  test('JPEG bytes are detected by content; a header fragment fails decode with the format named', () => {
+    // Phase 58 needle migration: this test originally pinned Phase
+    // 50's documented state — no JPEG codec existed, so JPEG bytes
+    // were refused. Phase 58 added a genuine codec (the jpeg-js
+    // package, verified against ffmpeg), so detection now reports
+    // 'jpeg' and import attempts a real decode. The fixture is only
+    // a JFIF header fragment (no frame data), so the honest failure
+    // is a decode failure naming JPEG. See PHASE_58_PROGRESS.md.
     const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]), Buffer.from('JFIF\0', 'latin1')]);
-    assert.equal(detectFormat(jpeg), null);
-    assert.throws(() => importImage(jpeg), /JPEG image detected/);
-    assert.throws(() => importImage(jpeg), /no JPEG codec/);
+    assert.equal(detectFormat(jpeg), 'jpeg');
+    assert.throws(() => importImage(jpeg), /JPEG decode failed/);
   });
 
   test('primaries and mid-gray survive the 8->16->8 path exactly', () => {

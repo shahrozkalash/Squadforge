@@ -2,12 +2,13 @@ import * as os from 'node:os';
 import { Worker } from 'node:worker_threads';
 import {
   applyFilterToImage,
+  bandedFilterRadius,
   composite,
   createPixelImage,
   isBandedFilter,
   resolveFilterParams
 } from './imageCore.js';
-import type { ImageProject, PixelImage } from './types.js';
+import type { ImageProject, Layer, PixelImage } from './types.js';
 
 /**
  * Phase 51: acceleration architecture for the image editor.
@@ -31,6 +32,23 @@ import type { ImageProject, PixelImage } from './types.js';
  *   least `PARALLEL_MIN_PIXELS` pixels with at least two bands.
  *   Below that, execution falls back to serial — the plan says so,
  *   it is never a silent switch of implementation.
+ *
+ * Phase 59 transport revision (measured, see PHASE_59_PROGRESS.md):
+ * the Phase 51 driver spawned one worker per band per call and
+ * structured-cloned the whole input into every worker — on this
+ * machine that cost more than the split saved (0.26–0.60× serial).
+ * The driver now keeps a persistent worker pool (spawn cost paid
+ * once) and, whenever the work is per-pixel across bands, sends
+ * each band only its own rows as transferred buffers (the total
+ * bytes moved equal the input once, not once per band). Measured
+ * on this VM after the change (scripts/phase59-benchmark.ts):
+ * shipped-provider compositing runs 1.26× serial at 1024² and
+ * 1.44× at 2048², banded box blur 1.10×/1.28× — where the one-shot
+ * design measured 0.42×/0.60× in the same benchmark's baseline.
+ * Work that is NOT per-pixel across bands (a layer
+ * with enabled effects or a placement, an adjustment layer) still
+ * travels whole, by clone, exactly as in Phase 51 — correctness
+ * first; the plan policy above is unchanged.
  * - Additive async entry points (`compositeProjectAsync`,
  *   `applyFilterAsync`). The synchronous `composite()` /
  *   `applyFilterToImage()` defaults are untouched; callers opt in.
@@ -93,7 +111,7 @@ export interface AccelerationCapabilities {
   providers: Array<{ id: string; kind: ComputeProviderKind; description: string }>;
 }
 
-/** The one-shot band protocol between acceleration.ts and accelerationWorker.ts. */
+/** The band protocol between acceleration.ts and accelerationWorker.ts (one job in flight per pooled worker). */
 export type BandJob =
   | { kind: 'composite'; project: ImageProject; y0: number; y1: number }
   | { kind: 'filter'; image: PixelImage; filterId: string; params?: Record<string, number>; y0: number; y1: number };
@@ -142,49 +160,173 @@ export function computeBands(height: number, bandCount: number): Array<{ y0: num
   return bands;
 }
 
-// ---------------------------------------------------------------- worker execution
+// ---------------------------------------------------------------- worker execution (Phase 59: persistent pool + sliced transfers)
 
-/** Run one band job in a fresh one-shot worker. Any worker failure rejects — band errors are never masked. */
-function runBandJob(job: BandJob): Promise<PixelImage> {
-  return new Promise<PixelImage>((resolve, reject) => {
-    let worker: Worker;
-    try {
-      worker = new Worker(new URL('./accelerationWorker.ts', import.meta.url));
-    } catch (err) {
-      reject(err instanceof Error ? err : new Error(String(err)));
-      return;
-    }
-    let settled = false;
-    const settle = (complete: () => void) => {
-      if (settled) return;
-      settled = true;
-      void worker.terminate();
-      complete();
-    };
-    worker.once('message', (result: BandResult) => {
-      // NB: `=== false`, not `!result.ok` — this repo's tsconfig does
-      // not enable strict mode, under which truthiness checks do not
-      // narrow a boolean discriminated union.
-      if (result.ok === false) {
-        const error = result.error;
-        settle(() => reject(new Error(`Parallel worker failed: ${error}`)));
-        return;
-      }
-      const { width, height, data } = result;
-      settle(() => resolve({ width, height, data }));
-    });
-    worker.once('error', (err) => settle(() => reject(err)));
-    worker.once('exit', (code) => {
-      settle(() => reject(new Error(`Parallel worker exited (code ${code}) without producing a result`)));
-    });
-    worker.postMessage(job);
+/**
+ * The persistent worker pool. Workers are spawned lazily, reused
+ * across calls, and hold at most one job each (the acceleration
+ * worker's protocol has no job ids, so one outstanding job per
+ * worker keeps responses unambiguous). A slot is `ref()`'d while a
+ * job is in flight and `unref()`'d when idle, so an idle pool never
+ * keeps a process alive. A worker that errors or exits mid-job
+ * rejects that job and is retired (a fresh one spawns on demand);
+ * job failures reported by the worker reject with the same message
+ * shape the Phase 51 one-shot driver produced. Band errors are
+ * never masked and never retried silently.
+ */
+interface PoolSlot {
+  worker: Worker;
+  busy: boolean;
+  resolve: ((img: PixelImage) => void) | null;
+  reject: ((err: Error) => void) | null;
+}
+
+interface QueuedJob {
+  job: BandJob;
+  transfers: ArrayBuffer[] | undefined;
+  resolve: (img: PixelImage) => void;
+  reject: (err: Error) => void;
+}
+
+const poolSlots: PoolSlot[] = [];
+const poolQueue: QueuedJob[] = [];
+let poolCapacity = 0;
+
+function removeSlot(slot: PoolSlot): void {
+  const idx = poolSlots.indexOf(slot);
+  if (idx >= 0) poolSlots.splice(idx, 1);
+  void slot.worker.terminate();
+}
+
+function spawnSlot(): PoolSlot {
+  const worker = new Worker(new URL('./accelerationWorker.ts', import.meta.url));
+  const slot: PoolSlot = { worker, busy: false, resolve: null, reject: null };
+  worker.on('message', (result: BandResult) => {
+    const resolve = slot.resolve;
+    const reject = slot.reject;
+    slot.resolve = slot.reject = null;
+    slot.busy = false;
+    worker.unref();
+    // NB: `=== false`, not `!result.ok` — this repo's tsconfig does
+    // not enable strict mode, under which truthiness checks do not
+    // narrow a boolean discriminated union.
+    if (result.ok === false) reject?.(new Error(`Parallel worker failed: ${result.error}`));
+    else resolve?.({ width: result.width, height: result.height, data: result.data });
+    pumpPool();
   });
+  worker.on('error', (err) => {
+    const reject = slot.reject;
+    slot.resolve = slot.reject = null;
+    slot.busy = false;
+    removeSlot(slot);
+    reject?.(err);
+    pumpPool();
+  });
+  worker.on('exit', (code) => {
+    const reject = slot.reject;
+    slot.resolve = slot.reject = null;
+    slot.busy = false;
+    removeSlot(slot);
+    if (reject) reject(new Error(`Parallel worker exited (code ${code}) without producing a result`));
+  });
+  worker.unref(); // idle until first dispatch
+  poolSlots.push(slot);
+  return slot;
+}
+
+function pumpPool(): void {
+  while (poolQueue.length > 0) {
+    let slot = poolSlots.find((s) => !s.busy);
+    if (!slot) {
+      if (poolSlots.length < poolCapacity) slot = spawnSlot();
+      else return;
+    }
+    const next = poolQueue.shift()!;
+    slot.busy = true;
+    slot.resolve = next.resolve;
+    slot.reject = next.reject;
+    slot.worker.ref();
+    if (next.transfers && next.transfers.length > 0) slot.worker.postMessage(next.job, next.transfers);
+    else slot.worker.postMessage(next.job);
+  }
+}
+
+/** Queue one band job on the pool, growing it to at least `minSlots` workers (never beyond 64). */
+function runPoolJob(job: BandJob, transfers: ArrayBuffer[] | undefined, minSlots: number): Promise<PixelImage> {
+  poolCapacity = Math.max(poolCapacity, Math.min(64, Math.max(1, minSlots)));
+  return new Promise<PixelImage>((resolve, reject) => {
+    poolQueue.push({ job, transfers, resolve, reject });
+    pumpPool();
+  });
+}
+
+/**
+ * Terminate every pooled worker and reject any queued (not yet
+ * started) jobs. In-flight jobs reject via their worker's exit.
+ * The pool respawns lazily on the next parallel call. Exported for
+ * servers and test suites that manage process lifecycle explicitly;
+ * ordinary callers do not need it — idle workers are unref'd and
+ * never keep a process alive.
+ */
+export async function shutdownAccelerationWorkers(): Promise<void> {
+  const queued = poolQueue.splice(0, poolQueue.length);
+  for (const q of queued) q.reject(new Error('Parallel worker pool was shut down before the job ran'));
+  const slots = poolSlots.splice(0, poolSlots.length);
+  poolCapacity = 0;
+  await Promise.all(slots.map((s) => s.worker.terminate()));
+}
+
+/**
+ * Can this project's bands travel as row slices? Only when every
+ * layer's rendering is per-pixel across band boundaries: no
+ * adjustment layers (their stacks read the whole backdrop), no
+ * enabled per-layer effect stacks and no placements (both transform
+ * the whole layer image before blending). Groups, masks, clipping
+ * and blend modes are per-pixel and slice safely. When in doubt the
+ * answer is no — the whole-project clone path is always correct.
+ */
+function compositeSliceable(project: ImageProject): boolean {
+  return project.layers.every(
+    (l) => l.kind !== 'adjustment' && !l.placement && !l.effects.some((e) => e.enabled)
+  );
+}
+
+/** Copy rows [y0, y1) of every layer (image + mask) into a band-sized project plus the buffers to transfer. */
+function sliceProjectForBand(
+  project: ImageProject,
+  y0: number,
+  y1: number
+): { project: ImageProject; transfers: ArrayBuffer[] } {
+  const transfers: ArrayBuffer[] = [];
+  const width = project.width;
+  const rows = y1 - y0;
+  const sliceLayer = (layer: Layer): Layer => {
+    const imgData = new Uint8ClampedArray(width * rows * 4);
+    imgData.set(layer.image.data.subarray(y0 * width * 4, y1 * width * 4));
+    transfers.push(imgData.buffer as ArrayBuffer);
+    let mask = layer.mask;
+    if (mask) {
+      const maskData = new Uint8ClampedArray(width * rows);
+      maskData.set(mask.data.subarray(y0 * width, y1 * width));
+      transfers.push(maskData.buffer as ArrayBuffer);
+      mask = { width, height: rows, data: maskData };
+    }
+    return { ...layer, image: { width, height: rows, data: imgData }, mask };
+  };
+  return { project: { ...project, height: rows, layers: project.layers.map(sliceLayer) }, transfers };
 }
 
 async function compositeBanded(project: ImageProject, bandCount: number): Promise<PixelImage> {
   const bands = computeBands(project.height, bandCount);
+  const sliceable = compositeSliceable(project);
   const parts = await Promise.all(
-    bands.map((b) => runBandJob({ kind: 'composite', project, y0: b.y0, y1: b.y1 }))
+    bands.map((b) => {
+      if (sliceable) {
+        const { project: sliced, transfers } = sliceProjectForBand(project, b.y0, b.y1);
+        return runPoolJob({ kind: 'composite', project: sliced, y0: 0, y1: b.y1 - b.y0 }, transfers, bandCount);
+      }
+      return runPoolJob({ kind: 'composite', project, y0: b.y0, y1: b.y1 }, undefined, bandCount);
+    })
   );
   const out = createPixelImage(project.width, project.height);
   parts.forEach((part, i) => {
@@ -200,8 +342,26 @@ async function filterBanded(
   bandCount: number
 ): Promise<PixelImage> {
   const bands = computeBands(image.height, bandCount);
+  // Each band job carries the band's rows plus the convolution halo
+  // on both sides (clamped at the image edges, where the slice edge
+  // IS the image edge, so the worker's clamping matches the serial
+  // computation exactly). The buffer is a fresh copy, transferred.
+  const halo = bandedFilterRadius(filterId, params);
   const parts = await Promise.all(
-    bands.map((b) => runBandJob({ kind: 'filter', image, filterId, params, y0: b.y0, y1: b.y1 }))
+    bands.map((b) => {
+      const sy0 = Math.max(0, b.y0 - halo);
+      const sy1 = Math.min(image.height, b.y1 + halo);
+      const slice: PixelImage = {
+        width: image.width,
+        height: sy1 - sy0,
+        data: new Uint8ClampedArray(image.data.subarray(sy0 * image.width * 4, sy1 * image.width * 4))
+      };
+      return runPoolJob(
+        { kind: 'filter', image: slice, filterId, params, y0: b.y0 - sy0, y1: b.y1 - sy0 },
+        [slice.data.buffer as ArrayBuffer],
+        bandCount
+      );
+    })
   );
   const out = createPixelImage(image.width, image.height);
   parts.forEach((part, i) => {
@@ -228,7 +388,7 @@ const parallelProvider: ComputeProvider = {
   id: 'cpu-parallel',
   kind: 'cpu-parallel',
   description:
-    'Parallel CPU execution: row bands computed in node:worker_threads workers (accelerationWorker.ts) and assembled. Byte-identical to cpu-serial.',
+    'Parallel CPU execution: row bands computed in a persistent node:worker_threads pool (accelerationWorker.ts) and assembled; band rows are transferred, not whole-input cloned, whenever the work is per-pixel across bands. Byte-identical to cpu-serial.',
   async composite(project: ImageProject): Promise<PixelImage> {
     const bandCount = Math.min(defaultWorkerCount(), project.height);
     // A one-row-tall canvas cannot split; the serial call IS the band computation there.

@@ -41,8 +41,37 @@ import { drawTextBitmap, glyphRowsFor, GLYPH_ADVANCE, GLYPH_HEIGHT, GLYPH_WIDTH 
  * additional pure functions over the same types.
  */
 
+/**
+ * Phase 59: the engine's canvas-size ceiling — 2^28 pixels
+ * (268,435,456; a 1 GiB RGBA buffer). This is the bound PSD import
+ * (Phase 49, `MAX_CANVAS_PIXELS` there) and TIFF import (Phase 58)
+ * already enforce on file dimensions; Phase 59 extends it to every
+ * allocation entry point, so an absurd size — from a crafted file
+ * header, a corrupt project file or a bad API call — fails with a
+ * named error here instead of a RangeError from a typed-array
+ * constructor or an out-of-memory kill mid-allocation.
+ */
+export const MAX_IMAGE_PIXELS = 268_435_456;
+
+/**
+ * Phase 59: validate dimensions before any buffer is allocated from
+ * them. Dimensions must be positive integers (a fractional size
+ * previously produced a buffer shorter than width×height×4 — silent
+ * corruption) totalling at most MAX_IMAGE_PIXELS pixels.
+ */
+export function assertImageDimensions(width: number, height: number, what = 'image'): void {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1) {
+    throw new Error(`Invalid ${what} size ${width}x${height}: dimensions must be positive integers`);
+  }
+  if (width * height > MAX_IMAGE_PIXELS) {
+    throw new Error(
+      `Invalid ${what} size ${width}x${height}: ${width * height} pixels exceeds the engine limit of ${MAX_IMAGE_PIXELS} pixels`
+    );
+  }
+}
+
 export function createPixelImage(width: number, height: number, fill?: RgbaColor): PixelImage {
-  if (width <= 0 || height <= 0) throw new Error(`Invalid image size ${width}x${height}`);
+  assertImageDimensions(width, height);
   const data = new Uint8ClampedArray(width * height * 4);
   if (fill) {
     for (let i = 0; i < data.length; i += 4) {
@@ -87,23 +116,52 @@ function blendOver(dst: Uint8ClampedArray, i: number, sr: number, sg: number, sb
   dst[i + 3] = Math.round(outA * 255);
 }
 
-/** Per-channel blend functions (W3C compositing spec), channels in 0..1. */
-function blendChannel(mode: BlendMode, cb: number, cs: number): number {
-  switch (mode) {
-    case 'multiply':
-      return cb * cs;
-    case 'screen':
-      return 1 - (1 - cb) * (1 - cs);
-    case 'overlay':
-      return cb <= 0.5 ? 2 * cb * cs : 1 - 2 * (1 - cb) * (1 - cs);
-    case 'darken':
-      return Math.min(cb, cs);
-    case 'lighten':
-      return Math.max(cb, cs);
-    default:
-      return cs; // normal
-  }
+/** Blend one pixel onto a destination buffer at index i; sr/sg/sb are 0..255, sa the effective source alpha in 0..1. */
+type PixelBlender = (dst: Uint8ClampedArray, i: number, sr: number, sg: number, sb: number, sa: number) => void;
+
+/**
+ * Phase 59: build the specialized blender for one non-normal mode.
+ * The body is exactly the W3C formula `blendComposite` has computed
+ * since Phase 44 —
+ *   ao = as + ab·(1 − as)
+ *   co = [ as·(1 − ab)·Cs + as·ab·B(Cb, Cs) + (1 − as)·ab·Cb ] / ao
+ * — with the mode's per-channel B(Cb, Cs) inlined and every
+ * arithmetic expression written in the same operation order as the
+ * original generic implementation, so results are byte-identical
+ * (pinned by the Phase 59 hash fixtures). The specialization only
+ * removes work from the hot loop: the per-channel mode switch, the
+ * per-pixel scratch array and two function calls per pixel.
+ */
+function makeBlendPixel(blend: (cb: number, cs: number) => number): PixelBlender {
+  return (dst, i, sr, sg, sb, sa) => {
+    const ab = dst[i + 3] / 255;
+    const ao = sa + ab * (1 - sa);
+    if (ao <= 0) {
+      dst[i] = dst[i + 1] = dst[i + 2] = dst[i + 3] = 0;
+      return;
+    }
+    const csr = sr / 255;
+    const csg = sg / 255;
+    const csb = sb / 255;
+    const cbr = dst[i] / 255;
+    const cbg = dst[i + 1] / 255;
+    const cbb = dst[i + 2] / 255;
+    dst[i] = Math.round(((sa * (1 - ab) * csr + sa * ab * blend(cbr, csr) + (1 - sa) * ab * cbr) / ao) * 255);
+    dst[i + 1] = Math.round(((sa * (1 - ab) * csg + sa * ab * blend(cbg, csg) + (1 - sa) * ab * cbg) / ao) * 255);
+    dst[i + 2] = Math.round(((sa * (1 - ab) * csb + sa * ab * blend(cbb, csb) + (1 - sa) * ab * cbb) / ao) * 255);
+    dst[i + 3] = Math.round(ao * 255);
+  };
 }
+
+/** One specialized blender per blend mode; 'normal' is exactly source-over (blendOver). */
+const PIXEL_BLENDERS: Record<BlendMode, PixelBlender> = {
+  normal: (dst, i, sr, sg, sb, sa) => blendOver(dst, i, sr, sg, sb, sa),
+  multiply: makeBlendPixel((cb, cs) => cb * cs),
+  screen: makeBlendPixel((cb, cs) => 1 - (1 - cb) * (1 - cs)),
+  overlay: makeBlendPixel((cb, cs) => (cb <= 0.5 ? 2 * cb * cs : 1 - 2 * (1 - cb) * (1 - cs))),
+  darken: makeBlendPixel((cb, cs) => Math.min(cb, cs)),
+  lighten: makeBlendPixel((cb, cs) => Math.max(cb, cs))
+};
 
 /**
  * Phase 44: composite one source pixel over the destination pixel at
@@ -113,6 +171,8 @@ function blendChannel(mode: BlendMode, cb: number, cs: number): number {
  * For 'normal' (B = Cs) this reduces exactly to source-over (blendOver).
  * sr/sg/sb are 0..255; sa is the effective source alpha in 0..1 (source
  * alpha × layer opacity × mask factor × clip factor, computed by callers).
+ * Phase 59: dispatches to the per-mode specialized blender above —
+ * same math, less per-pixel overhead.
  */
 function blendComposite(
   dst: Uint8ClampedArray,
@@ -123,24 +183,7 @@ function blendComposite(
   sa: number,
   mode: BlendMode
 ): void {
-  if (mode === 'normal') {
-    blendOver(dst, i, sr, sg, sb, sa);
-    return;
-  }
-  const ab = dst[i + 3] / 255;
-  const ao = sa + ab * (1 - sa);
-  if (ao <= 0) {
-    dst[i] = dst[i + 1] = dst[i + 2] = dst[i + 3] = 0;
-    return;
-  }
-  const src = [sr / 255, sg / 255, sb / 255];
-  for (let c = 0; c < 3; c++) {
-    const cb = dst[i + c] / 255;
-    const blended = blendChannel(mode, cb, src[c]);
-    const co = (sa * (1 - ab) * src[c] + sa * ab * blended + (1 - sa) * ab * cb) / ao;
-    dst[i + c] = Math.round(co * 255);
-  }
-  dst[i + 3] = Math.round(ao * 255);
+  PIXEL_BLENDERS[mode](dst, i, sr, sg, sb, sa);
 }
 
 /**
@@ -523,7 +566,7 @@ export function applyLayerMask(project: ImageProject, layerId: string): void {
  */
 
 export function createSelection(width: number, height: number, fill = 0): SelectionMask {
-  if (width <= 0 || height <= 0) throw new Error(`Invalid selection size ${width}x${height}`);
+  assertImageDimensions(width, height, 'selection');
   if (!Number.isInteger(fill) || fill < 0 || fill > 255) throw new Error(`Selection fill out of range: ${fill}`);
   return { width, height, data: new Uint8ClampedArray(width * height).fill(fill) };
 }
@@ -1001,7 +1044,22 @@ function renderLayerBandInto(layer: Layer, view: LayerView, out: PixelImage, y0:
 function renderNodesBand(project: ImageProject, nodes: CompositeNode[], out: PixelImage, y0: number, views: LayerViewCache): void {
   // Alpha footprint of the nearest non-clipped node below, per pixel —
   // the base that clipped siblings are clipped to at this level.
+  // Phase 59: the map is materialized LAZILY, only when a clipped
+  // sibling actually consumes it. The pre-Phase-59 code computed a
+  // full-canvas Float32Array pass (plus its allocation) after every
+  // non-clipped node even when nothing at the level was clipped —
+  // the common case. The values are identical whenever computed;
+  // only the wasted work is gone (byte-identity pinned by the
+  // Phase 59 hash fixtures and the Phase 44 exact-value tests).
   let clipBase: Float32Array | null = null;
+  let clipPending: (() => Float32Array) | null = null;
+  const clipFor = (): Float32Array | null => {
+    if (clipBase === null && clipPending !== null) {
+      clipBase = clipPending();
+      clipPending = null;
+    }
+    return clipBase;
+  };
   for (const node of nodes) {
     if (node.kind === 'layer') {
       const layer = node.layer;
@@ -1016,10 +1074,13 @@ function renderNodesBand(project: ImageProject, nodes: CompositeNode[], out: Pix
       }
       // A clipped layer with no non-clipped node below it has nothing
       // to clip to: it contributes nothing (Photoshop behaves the same).
-      if (layer.clipped && !clipBase) continue;
+      if (layer.clipped && clipFor() === null) continue;
       const view = layerView(views, layer);
-      renderLayerBandInto(layer, view, out, y0, layer.clipped ? clipBase : null);
-      if (!layer.clipped) clipBase = layerAlphaMapBand(layer, view, y0, out.height);
+      renderLayerBandInto(layer, view, out, y0, layer.clipped ? clipFor() : null);
+      if (!layer.clipped) {
+        clipBase = null;
+        clipPending = () => layerAlphaMapBand(layer, view, y0, out.height);
+      }
     } else {
       const group = node.group;
       if (!group.visible || group.opacity <= 0) continue;
@@ -1031,9 +1092,12 @@ function renderNodesBand(project: ImageProject, nodes: CompositeNode[], out: Pix
         if (sa <= 0) continue;
         blendComposite(out.data, p, bd[p], bd[p + 1], bd[p + 2], sa, group.blendMode);
       }
-      const map = new Float32Array(project.width * out.height);
-      for (let px = 0, p = 0; px < map.length; px++, p += 4) map[px] = (bd[p + 3] / 255) * group.opacity;
-      clipBase = map;
+      clipBase = null;
+      clipPending = () => {
+        const map = new Float32Array(project.width * out.height);
+        for (let px = 0, p = 0; px < map.length; px++, p += 4) map[px] = (bd[p + 3] / 255) * group.opacity;
+        return map;
+      };
     }
   }
 }
@@ -1434,20 +1498,43 @@ function sampleTipBilinear(tip: BrushTip, u: number, v: number): number {
   );
 }
 
+/** The rectangle a stroke actually deposited coverage into (null when nothing was deposited). */
+interface StrokeBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
 /**
  * Accumulate a stroke's coverage map (values 0..1, before the opacity
  * cap). Stamps are placed every `spacing × size` pixels along the
  * path with the leftover distance carried across segments, and
  * pressure is interpolated linearly between path points.
+ *
+ * Phase 59: the result also carries the bounds of the deposited
+ * region, so the alpha/apply passes iterate the stroke's bounding
+ * box instead of scanning the whole canvas. Every pixel outside the
+ * bounds has coverage exactly 0 (deposits are the only writes, and
+ * every deposit updates the bounds), so results are byte-identical.
  */
-function strokeCoverage(width: number, height: number, points: StrokePoint[], settings: BrushSettings): Float32Array {
+function strokeCoverage(
+  width: number,
+  height: number,
+  points: StrokePoint[],
+  settings: BrushSettings
+): { cov: Float32Array; bounds: StrokeBounds | null } {
   assertBrushSettings(settings);
   assertStrokePoints(points);
   const cov = new Float32Array(width * height);
-  if (points.length === 0) return cov;
+  if (points.length === 0) return { cov, bounds: null };
   const smoothed = settings.smoothing > 0 ? smoothStrokePoints(points, settings.smoothing) : points;
   const path: PathPoint[] = smoothed.map((p) => ({ x: p.x, y: p.y, pressure: pointPressure(p) }));
   const step = Math.max(settings.spacing * settings.size, 0.5);
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
 
   const stampAt = (cx: number, cy: number, pressure: number): void => {
     const diameter = settings.size * (settings.pressureSize ? pressure : 1);
@@ -1455,10 +1542,15 @@ function strokeCoverage(width: number, height: number, points: StrokePoint[], se
     if (r < 0.25) return; // pressure (or size) too small to leave a mark
     const strength = settings.flow * (settings.pressureOpacity ? pressure : 1);
     if (strength <= 0) return;
-    const deposit = (idx: number, shape: number): void => {
+    const deposit = (x: number, y: number, shape: number): void => {
       if (shape <= 0) return;
       const d = shape * strength;
+      const idx = y * width + x;
       cov[idx] += d * (1 - cov[idx]);
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
     };
     if (settings.tip) {
       const tip = settings.tip;
@@ -1473,7 +1565,7 @@ function strokeCoverage(width: number, height: number, points: StrokePoint[], se
           const x = left + fx;
           if (x < 0 || x >= width) continue;
           const u = ((fx + 0.5) * tip.width) / side - 0.5;
-          deposit(y * width + x, sampleTipBilinear(tip, u, v) / 255);
+          deposit(x, y, sampleTipBilinear(tip, u, v) / 255);
         }
       }
     } else {
@@ -1485,7 +1577,7 @@ function strokeCoverage(width: number, height: number, points: StrokePoint[], se
         if (y < 0 || y >= height) continue;
         for (let x = x0; x <= x1; x++) {
           if (x < 0 || x >= width) continue;
-          deposit(y * width + x, roundProfile(Math.hypot(x - cx, y - cy) / r, settings.hardness));
+          deposit(x, y, roundProfile(Math.hypot(x - cx, y - cy) / r, settings.hardness));
         }
       }
     }
@@ -1512,7 +1604,7 @@ function strokeCoverage(width: number, height: number, points: StrokePoint[], se
     }
     prev = cur;
   }
-  return cov;
+  return { cov, bounds: maxX >= 0 ? { minX, minY, maxX, maxY } : null };
 }
 
 export interface BrushStrokeOptions {
@@ -1522,12 +1614,28 @@ export interface BrushStrokeOptions {
   selectionMask?: SelectionMask | null;
 }
 
+/**
+ * The region the alpha/apply passes iterate: the deposited bounds,
+ * except when they cover nearly the whole canvas — then the flat
+ * full-canvas scan is the cheaper shape for the same per-pixel
+ * math (every pixel outside the bounds has coverage exactly 0, and
+ * each pixel's write is independent, so the outputs are identical).
+ * Measured: a localized stroke on 2048² applies ~3.7× faster
+ * bounded; a canvas-filling stroke was ~10% slower bounded and is
+ * back at parity through this fallback.
+ */
+function strokeApplyRange(bounds: StrokeBounds, width: number, height: number): StrokeBounds {
+  const area = (bounds.maxX - bounds.minX + 1) * (bounds.maxY - bounds.minY + 1);
+  return area >= width * height * 0.9 ? { minX: 0, minY: 0, maxX: width - 1, maxY: height - 1 } : bounds;
+}
+
 /** Per-pixel stroke alpha: coverage × opacity, scoped by the rect selection and/or the raster selection. */
 function strokeAlphas(
   layer: Layer,
   cov: Float32Array,
   settings: BrushSettings,
-  options?: BrushStrokeOptions
+  options: BrushStrokeOptions | undefined,
+  bounds: StrokeBounds | null
 ): Float32Array {
   const { width, height } = layer.image;
   const selMask = options?.selectionMask ?? null;
@@ -1535,8 +1643,11 @@ function strokeAlphas(
     throw new Error(`Selection size ${selMask.width}x${selMask.height} does not match layer size ${width}x${height}`);
   }
   const out = new Float32Array(cov.length);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
+  if (bounds === null) return out;
+  // Phase 59: only the deposited bounds can hold a nonzero alpha.
+  const range = strokeApplyRange(bounds, width, height);
+  for (let y = range.minY; y <= range.maxY; y++) {
+    for (let x = range.minX; x <= range.maxX; x++) {
       const idx = y * width + x;
       if (cov[idx] <= 0) continue;
       if (!inSelection(x, y, options?.selection)) continue;
@@ -1562,12 +1673,19 @@ export function paintBrushStroke(
   options?: BrushStrokeOptions
 ): void {
   const layer = requirePaintableLayer(project, layerId);
-  const cov = strokeCoverage(layer.image.width, layer.image.height, points, settings);
-  const alphas = strokeAlphas(layer, cov, settings, options);
+  const { cov, bounds } = strokeCoverage(layer.image.width, layer.image.height, points, settings);
+  const alphas = strokeAlphas(layer, cov, settings, options, bounds);
+  if (bounds === null) return;
   const data = layer.image.data;
-  for (let px = 0, p = 0; px < alphas.length; px++, p += 4) {
-    if (alphas[px] <= 0) continue;
-    blendPaint(data, p, color.r, color.g, color.b, alphas[px], layer.alphaLock);
+  const width = layer.image.width;
+  // Phase 59: apply only inside the deposited bounds (alpha is 0 elsewhere).
+  const range = strokeApplyRange(bounds, width, layer.image.height);
+  for (let y = range.minY; y <= range.maxY; y++) {
+    for (let x = range.minX; x <= range.maxX; x++) {
+      const px = y * width + x;
+      if (alphas[px] <= 0) continue;
+      blendPaint(data, px * 4, color.r, color.g, color.b, alphas[px], layer.alphaLock);
+    }
   }
 }
 
@@ -1586,14 +1704,22 @@ export function eraseBrushStroke(
 ): void {
   const layer = requirePaintableLayer(project, layerId);
   if (layer.alphaLock) return;
-  const cov = strokeCoverage(layer.image.width, layer.image.height, points, settings);
-  const alphas = strokeAlphas(layer, cov, settings, options);
+  const { cov, bounds } = strokeCoverage(layer.image.width, layer.image.height, points, settings);
+  const alphas = strokeAlphas(layer, cov, settings, options, bounds);
+  if (bounds === null) return;
   const data = layer.image.data;
-  for (let px = 0, p = 0; px < alphas.length; px++, p += 4) {
-    if (alphas[px] <= 0) continue;
-    data[p + 3] = Math.round(data[p + 3] * (1 - alphas[px]));
-    if (data[p + 3] === 0) {
-      data[p] = data[p + 1] = data[p + 2] = 0;
+  const width = layer.image.width;
+  // Phase 59: apply only inside the deposited bounds (alpha is 0 elsewhere).
+  const range = strokeApplyRange(bounds, width, layer.image.height);
+  for (let y = range.minY; y <= range.maxY; y++) {
+    for (let x = range.minX; x <= range.maxX; x++) {
+      const px = y * width + x;
+      if (alphas[px] <= 0) continue;
+      const p = px * 4;
+      data[p + 3] = Math.round(data[p + 3] * (1 - alphas[px]));
+      if (data[p + 3] === 0) {
+        data[p] = data[p + 1] = data[p + 2] = 0;
+      }
     }
   }
 }
@@ -2466,30 +2592,72 @@ export function separableConvolveRows(img: PixelImage, kernel: number[], y0: num
   if (!Number.isInteger(y0) || !Number.isInteger(y1) || y0 < 0 || y1 > height || y0 >= y1) {
     throw new Error(`Invalid convolution row band [${y0}, ${y1}) for image height ${height}`);
   }
+  const K = kernel.length;
   const tmpY0 = Math.max(0, y0 - r);
   const tmpY1 = Math.min(height, y1 + r);
   const tmp = new Float32Array((tmpY1 - tmpY0) * width * 4);
+  const data = img.data;
+  // Phase 59: the clamped source column for every (tap, x) pair is
+  // precomputed once instead of a clampIndex() call per tap per
+  // channel, and the four channels accumulate side by side with the
+  // tap loop innermost per pixel. Each channel's additions still run
+  // in ascending tap order into one float64 accumulator with a
+  // single store — the exact summation order of the original
+  // per-channel loops — so results are byte-identical (pinned by
+  // the Phase 59 hash fixtures). A sliding-window box blur was
+  // considered and rejected: it changes the summation order.
+  const colIdx = new Int32Array(K * width);
+  for (let k = 0; k < K; k++) {
+    for (let x = 0; x < width; x++) colIdx[k * width + x] = clampIndex(x + k - r, width);
+  }
   for (let y = tmpY0; y < tmpY1; y++) {
+    const srcRow = y * width * 4;
+    const dstRow = (y - tmpY0) * width * 4;
     for (let x = 0; x < width; x++) {
-      for (let c = 0; c < 4; c++) {
-        let sum = 0;
-        for (let k = 0; k < kernel.length; k++) {
-          sum += kernel[k] * img.data[(y * width + clampIndex(x + k - r, width)) * 4 + c];
-        }
-        tmp[((y - tmpY0) * width + x) * 4 + c] = sum;
+      let a0 = 0;
+      let a1 = 0;
+      let a2 = 0;
+      let a3 = 0;
+      for (let k = 0; k < K; k++) {
+        const w = kernel[k];
+        const s = srcRow + colIdx[k * width + x] * 4;
+        a0 += w * data[s];
+        a1 += w * data[s + 1];
+        a2 += w * data[s + 2];
+        a3 += w * data[s + 3];
       }
+      const t = dstRow + x * 4;
+      tmp[t] = a0;
+      tmp[t + 1] = a1;
+      tmp[t + 2] = a2;
+      tmp[t + 3] = a3;
     }
   }
   const out = createPixelImage(width, y1 - y0);
-  for (let y = y0; y < y1; y++) {
+  const bandRows = y1 - y0;
+  const rowIdx = new Int32Array(K * bandRows);
+  for (let k = 0; k < K; k++) {
+    for (let y = 0; y < bandRows; y++) rowIdx[k * bandRows + y] = clampIndex(y0 + y + k - r, height) - tmpY0;
+  }
+  for (let y = 0; y < bandRows; y++) {
     for (let x = 0; x < width; x++) {
-      for (let c = 0; c < 4; c++) {
-        let sum = 0;
-        for (let k = 0; k < kernel.length; k++) {
-          sum += kernel[k] * tmp[((clampIndex(y + k - r, height) - tmpY0) * width + x) * 4 + c];
-        }
-        out.data[((y - y0) * width + x) * 4 + c] = Math.round(sum);
+      let a0 = 0;
+      let a1 = 0;
+      let a2 = 0;
+      let a3 = 0;
+      for (let k = 0; k < K; k++) {
+        const w = kernel[k];
+        const s = (rowIdx[k * bandRows + y] * width + x) * 4;
+        a0 += w * tmp[s];
+        a1 += w * tmp[s + 1];
+        a2 += w * tmp[s + 2];
+        a3 += w * tmp[s + 3];
       }
+      const t = (y * width + x) * 4;
+      out.data[t] = Math.round(a0);
+      out.data[t + 1] = Math.round(a1);
+      out.data[t + 2] = Math.round(a2);
+      out.data[t + 3] = Math.round(a3);
     }
   }
   return out;
@@ -2580,12 +2748,19 @@ function noiseImpl(img: PixelImage, p: Record<string, number>): PixelImage {
   const amount = p.amount;
   if (amount === 0) return clonePixelImage(img);
   const rand = mulberry32(Math.floor(p.seed));
-  return mapPixels(img, (c) => ({
-    r: clamp255(c.r + Math.round((rand() * 2 - 1) * amount)),
-    g: clamp255(c.g + Math.round((rand() * 2 - 1) * amount)),
-    b: clamp255(c.b + Math.round((rand() * 2 - 1) * amount)),
-    a: c.a
-  }));
+  // Phase 59: direct loop instead of mapPixels' per-pixel objects.
+  // The PRNG is consumed in the same order (r, g, b per pixel, in
+  // pixel order) and the math is unchanged — byte-identical output.
+  const out = createPixelImage(img.width, img.height);
+  const src = img.data;
+  const dst = out.data;
+  for (let i = 0; i < src.length; i += 4) {
+    dst[i] = clamp255(src[i] + Math.round((rand() * 2 - 1) * amount));
+    dst[i + 1] = clamp255(src[i + 1] + Math.round((rand() * 2 - 1) * amount));
+    dst[i + 2] = clamp255(src[i + 2] + Math.round((rand() * 2 - 1) * amount));
+    dst[i + 3] = src[i + 3];
+  }
+  return out;
 }
 
 function edgeDetectImpl(img: PixelImage, p: Record<string, number>): PixelImage {
@@ -2739,17 +2914,25 @@ function hueRotateImpl(img: PixelImage, p: Record<string, number>): PixelImage {
 function sepiaImpl(img: PixelImage, p: Record<string, number>): PixelImage {
   const a = p.amount;
   if (a === 0) return clonePixelImage(img);
-  return mapPixels(img, (c) => {
-    const sr = 0.393 * c.r + 0.769 * c.g + 0.189 * c.b;
-    const sg = 0.349 * c.r + 0.686 * c.g + 0.168 * c.b;
-    const sb = 0.272 * c.r + 0.534 * c.g + 0.131 * c.b;
-    return {
-      r: clamp255(c.r * (1 - a) + sr * a),
-      g: clamp255(c.g * (1 - a) + sg * a),
-      b: clamp255(c.b * (1 - a) + sb * a),
-      a: c.a
-    };
-  });
+  // Phase 59: direct loop instead of mapPixels' per-pixel objects;
+  // the sepia matrix and mix are unchanged — byte-identical output.
+  const out = createPixelImage(img.width, img.height);
+  const src = img.data;
+  const dst = out.data;
+  const keep = 1 - a;
+  for (let i = 0; i < src.length; i += 4) {
+    const r = src[i];
+    const g = src[i + 1];
+    const b = src[i + 2];
+    const sr = 0.393 * r + 0.769 * g + 0.189 * b;
+    const sg = 0.349 * r + 0.686 * g + 0.168 * b;
+    const sb = 0.272 * r + 0.534 * g + 0.131 * b;
+    dst[i] = clamp255(r * keep + sr * a);
+    dst[i + 1] = clamp255(g * keep + sg * a);
+    dst[i + 2] = clamp255(b * keep + sb * a);
+    dst[i + 3] = src[i + 3];
+  }
+  return out;
 }
 
 function posterizeImpl(img: PixelImage, p: Record<string, number>): PixelImage {
@@ -2979,6 +3162,31 @@ export function applyFilterToImageRows(
   if (filterId === 'gaussian-blur') {
     if (resolved.sigma <= 0) return sliceImageRows(img, y0, y1);
     return separableConvolveRows(img, gaussianKernel(resolved.sigma, resolved.radius), y0, y1);
+  }
+  throw new Error(
+    `Filter '${filterId}' cannot be computed on a row band (only ${[...BANDED_FILTER_IDS].join(' and ')} are band-separable); run it with the serial provider`
+  );
+}
+
+/**
+ * Phase 59: the vertical halo, in rows, that a banded filter's
+ * output band depends on — the kernel radius of its separable
+ * convolution (0 for the identity parameterizations). The parallel
+ * provider uses it to slice band+halo row ranges for transfer
+ * instead of cloning the whole input image per band. Computed from
+ * the same kernel builders `applyFilterToImageRows` uses, so the
+ * two can never drift apart. Throws for non-bandable filters and
+ * for invalid parameters, exactly as the filter entry points do.
+ */
+export function bandedFilterRadius(filterId: string, params?: Record<string, number>): number {
+  const resolved = resolveFilterParams(filterId, params);
+  if (filterId === 'box-blur') {
+    const radius = Math.round(resolved.radius);
+    return radius <= 0 ? 0 : radius;
+  }
+  if (filterId === 'gaussian-blur') {
+    if (resolved.sigma <= 0) return 0;
+    return (gaussianKernel(resolved.sigma, resolved.radius).length - 1) / 2;
   }
   throw new Error(
     `Filter '${filterId}' cannot be computed on a row band (only ${[...BANDED_FILTER_IDS].join(' and ')} are band-separable); run it with the serial provider`
@@ -4009,6 +4217,21 @@ export function deserializeProject(data: SerializedProject): ImageProject {
   }
   if (!Array.isArray(data.layers) || data.layers.length === 0) {
     throw new Error('Project has no layers');
+  }
+  // Phase 59: the header dimensions drive every allocation below
+  // (expected layer sizes, mask buffers) — validate them before use.
+  // A zero/fractional/absurd size in a corrupt file previously flowed
+  // through unchecked.
+  if (
+    !Number.isInteger(data.width) ||
+    !Number.isInteger(data.height) ||
+    data.width < 1 ||
+    data.height < 1 ||
+    data.width * data.height > MAX_IMAGE_PIXELS
+  ) {
+    throw new Error(
+      `Project dimensions out of range: ${data.width}x${data.height} (positive integers totalling at most ${MAX_IMAGE_PIXELS} pixels)`
+    );
   }
   // Phase 44 groups: validate ids, parent references and acyclicity up
   // front — corrupt hierarchy data is rejected, never silently loaded.

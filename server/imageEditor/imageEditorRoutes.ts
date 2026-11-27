@@ -4,6 +4,7 @@ import { Build } from '../types.js';
 import { ImageProjectGenerator } from './imageProjectGenerator.js';
 import { composite, deserializeProject } from './imageCore.js';
 import { exportImage } from './imageCodec.js';
+import type { ImageFormat } from './imageCodec.js';
 import type { SerializedProject } from './types.js';
 
 export interface ImageEditorRouteDependencies {
@@ -42,15 +43,27 @@ export function createImageEditorRouter(deps: ImageEditorRouteDependencies): Rou
     return res.json({ success: true, config, fileCount: Object.keys(files).length, files: Object.keys(files) });
   }));
 
-  // 2. Flatten a project (real compositing) and export it as PNG or BMP
+  // 2. Flatten a project (real compositing) and export it as PNG,
+  // BMP, JPEG or TIFF (Phase 58 widened the original PNG/BMP pair;
+  // an unknown format is a named 400, not a silent PNG).
   router.post('/export', requireAuth, owned(async (_build, req, res) => {
-    const format = req.body?.format === 'bmp' ? 'bmp' : 'png';
+    const requested = (req.body?.format as string) || 'png';
+    const contentTypes: Record<ImageFormat, string> = {
+      png: 'image/png',
+      bmp: 'image/bmp',
+      jpeg: 'image/jpeg',
+      tiff: 'image/tiff'
+    };
+    if (!(requested in contentTypes)) {
+      return res.status(400).json({ error: `Unsupported export format: ${requested} (supported: png, bmp, jpeg, tiff)` });
+    }
+    const format = requested as ImageFormat;
     const projectData = req.body?.project as SerializedProject;
     if (!projectData) return res.status(400).json({ error: 'project is required' });
     const project = deserializeProject(projectData);
     const flat = composite(project);
     const buf = exportImage(flat, format);
-    res.setHeader('Content-Type', format === 'png' ? 'image/png' : 'image/bmp');
+    res.setHeader('Content-Type', contentTypes[format]);
     res.setHeader('Content-Disposition', `attachment; filename="export.${format}"`);
     return res.send(buf);
   }));
