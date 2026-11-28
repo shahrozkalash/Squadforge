@@ -12,6 +12,8 @@ import {
   validateProject
 } from './timeline.js';
 import {
+  CAPTION_BOX_ALPHA,
+  CAPTION_BOX_BORDER,
   escapeDrawtext,
   findFontFile,
   overlayTransformChain,
@@ -786,9 +788,12 @@ export function buildPreviewArgs(
 
   const drawtexts: { text: string; x: number; y: number; fontSize: number; color: string; opacity?: number; boxAlpha: number; boxBorder: number }[] = [];
   // Phase 5: the box styling is per-kind and matches the exporter's
-  // constants (title 0.5/8, caption 0.55/8, text element 0.35/6) —
-  // before this, the preview used 0.4/6 for all three and the boxes
-  // rendered visibly lighter than the export's.
+  // constants (title 0.5/8, text element 0.35/6, and the caption from
+  // the shared CAPTION_BOX_ALPHA / CAPTION_BOX_BORDER constants the
+  // exporter also uses) — before this, the preview used 0.4/6 for
+  // all three and the boxes rendered visibly lighter than the
+  // export's. The caption constants live in videoExporter.ts so the
+  // two renderers cannot drift apart on them again (CI #194).
   // Phase 5: during a transition the drawn title is the INCOMING
   // clip's — the exporter's window for the outgoing clip's title ends
   // where the junction starts, and the incoming clip's title runs
@@ -802,7 +807,7 @@ export function buildPreviewArgs(
   // exactly as the exporter burns it in.
   const activeCue = (project.captions ?? []).find((c) => timeSec >= c.startSec && timeSec < c.endSec && c.text.trim());
   if (activeCue) {
-    drawtexts.push({ text: activeCue.text, x: -1, y: height - 52, fontSize: 28, color: 'white', boxAlpha: 0.55, boxBorder: 8 });
+    drawtexts.push({ text: activeCue.text, x: -1, y: height - 52, fontSize: 28, color: 'white', boxAlpha: CAPTION_BOX_ALPHA, boxBorder: CAPTION_BOX_BORDER });
   }
   for (const el of project.texts ?? []) {
     if (timeSec >= el.trackStart && timeSec < el.trackStart + el.durationSec && el.text.trim()) {

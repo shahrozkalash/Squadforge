@@ -120,11 +120,69 @@ function findJar(dir: string, pattern: RegExp): string | undefined {
   }
 }
 
-function gradleLibRoots(): string[] {
-  const roots: string[] = [];
-  if (process.env.F10_GRADLE_LIB_DIR) roots.push(process.env.F10_GRADLE_LIB_DIR);
-  if (process.env.GRADLE_HOME) roots.push(path.join(process.env.GRADLE_HOME, 'lib'));
-  roots.push(path.join(os.homedir(), '.sdkman', 'candidates', 'gradle', 'current', 'lib'));
+/**
+ * The `lib` directory of every Gradle distribution this host — or a
+ * standard CI runner — actually has, in search order:
+ *
+ *   - GRADLE_HOME
+ *   - a `gradle` executable resolved from PATH (SDKMAN installs put
+ *     a shim/symlink on PATH; realpath lands inside the distribution,
+ *     whose parent directory is the distribution home)
+ *   - SDKMAN candidates: `current` plus every versioned sibling
+ *     (~/.sdkman/candidates/gradle/<version>)
+ *   - system package layouts: /opt/gradle (+ versioned /opt/gradle-*),
+ *     /usr/local/gradle, /usr/share/gradle
+ *   - Gradle wrapper distributions under the wrapper-dists roots
+ *     (~/tools/gradle-home/wrapper/dists, ~/.gradle/wrapper/dists)
+ *   - a `gradle` directory bundled beside an Android SDK root
+ *
+ * Jar names are matched by version pattern, never by exact filename,
+ * and each distribution is searched across BOTH its `lib` and its
+ * `lib/plugins` trees — newer distributions keep the Kotlin compiler
+ * and stdlib in `lib` but junit/hamcrest only in `lib/plugins`, and
+ * the pre-broadening search (lib-only, all four pieces required in
+ * that one directory) found nothing on a GitHub ubuntu runner even
+ * though a complete toolchain was installed there (CI #194).
+ *
+ * Seams: F10_GRADLE_LIB_DIR names one lib directory directly and is
+ * prepended. When F10_GRADLE_SEARCH_ROOTS is set (a
+ * path-delimiter-separated list of distribution homes, or of lib
+ * directories), it REPLACES the search list entirely, so a test can
+ * restrict discovery to one synthetic layout and prove both the
+ * find and the refusal-by-name.
+ */
+function gradleLibDirs(): string[] {
+  if (process.env.F10_GRADLE_SEARCH_ROOTS) {
+    return process.env.F10_GRADLE_SEARCH_ROOTS.split(path.delimiter)
+      .filter(Boolean)
+      .map(entry => (path.basename(entry) === 'lib' ? entry : path.join(entry, 'lib')));
+  }
+  const homes: string[] = [];
+  const addHome = (home: string | undefined): void => {
+    if (home && !homes.includes(home)) homes.push(home);
+  };
+  if (process.env.GRADLE_HOME) addHome(process.env.GRADLE_HOME);
+  for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+    try {
+      const real = fs.realpathSync(path.join(dir, 'gradle'));
+      if (fs.statSync(real).isFile()) addHome(path.dirname(path.dirname(real)));
+    } catch { /* no gradle executable in this PATH entry */ }
+  }
+  const sdkmanGradle = path.join(os.homedir(), '.sdkman', 'candidates', 'gradle');
+  addHome(path.join(sdkmanGradle, 'current'));
+  try {
+    for (const v of fs.readdirSync(sdkmanGradle).filter(n => n !== 'current').sort().reverse()) {
+      addHome(path.join(sdkmanGradle, v));
+    }
+  } catch { /* no SDKMAN on this host */ }
+  addHome('/opt/gradle');
+  try {
+    for (const n of fs.readdirSync('/opt').filter(n => /^gradle-/.test(n)).sort().reverse()) {
+      addHome(path.join('/opt', n));
+    }
+  } catch { /* /opt not readable on this host */ }
+  addHome('/usr/local/gradle');
+  addHome('/usr/share/gradle');
   for (const distsRoot of [
     path.join(os.homedir(), 'tools', 'gradle-home', 'wrapper', 'dists'),
     path.join(os.homedir(), '.gradle', 'wrapper', 'dists')
@@ -134,13 +192,22 @@ function gradleLibRoots(): string[] {
         const distDir = path.join(distsRoot, dist);
         for (const hash of fs.readdirSync(distDir)) {
           for (const inner of fs.readdirSync(path.join(distDir, hash))) {
-            roots.push(path.join(distDir, hash, inner, 'lib'));
+            addHome(path.join(distDir, hash, inner));
           }
         }
       }
     } catch { /* root absent on this host */ }
   }
-  return roots;
+  for (const sdk of androidSdkRoots()) addHome(path.join(sdk, 'gradle'));
+
+  const libDirs = homes.map(h => path.join(h, 'lib'));
+  if (process.env.F10_GRADLE_LIB_DIR) libDirs.unshift(process.env.F10_GRADLE_LIB_DIR);
+  return libDirs;
+}
+
+/** A jar in a distribution's `lib` tree or its `lib/plugins` tree. */
+function findJarIn(libDir: string, pattern: RegExp): string | undefined {
+  return findJar(libDir, pattern) || findJar(path.join(libDir, 'plugins'), pattern);
 }
 
 function androidSdkRoots(): string[] {
@@ -174,9 +241,10 @@ function findOrgJsonJar(): string | undefined {
 
 /**
  * Locates the Kotlin/JVM toolchain from the installations this host
- * (and a standard CI runner) actually has: a JDK, the Gradle
- * distribution's lib directory (embeddable Kotlin compiler, stdlib,
- * JUnit, hamcrest), and the Android SDK platform jar. Nothing is
+ * (and a standard CI runner) actually has: a JDK, a Gradle
+ * distribution's lib + lib/plugins trees (embeddable Kotlin
+ * compiler, stdlib, JUnit, hamcrest — see gradleLibDirs for the
+ * layouts searched), and the Android SDK platform jar. Nothing is
  * downloaded and nothing is assumed: every piece is reported, and
  * the pieces that are missing are named in `missing`.
  */
@@ -195,17 +263,17 @@ export function discoverKotlinToolchain(): KotlinToolchain {
   let jetbrainsAnnotationsJar: string | undefined;
   let junitJar: string | undefined;
   let hamcrestJar: string | undefined;
-  for (const root of gradleLibRoots()) {
-    const compiler = findJar(root, /^kotlin-compiler-embeddable-.*\.jar$/);
-    const stdlib = findJar(root, /^kotlin-stdlib-\d.*\.jar$/);
-    const junit = findJar(root, /^junit-4.*\.jar$/) || findJar(root, /^junit-\d.*\.jar$/);
-    const hamcrest = findJar(root, /^hamcrest-core-.*\.jar$/);
+  for (const root of gradleLibDirs()) {
+    const compiler = findJarIn(root, /^kotlin-compiler-embeddable-.*\.jar$/);
+    const stdlib = findJarIn(root, /^kotlin-stdlib-\d.*\.jar$/);
+    const junit = findJarIn(root, /^junit-4.*\.jar$/) || findJarIn(root, /^junit-\d.*\.jar$/);
+    const hamcrest = findJarIn(root, /^hamcrest-core-.*\.jar$/) || findJarIn(root, /^hamcrest-\d.*\.jar$/);
     if (compiler && stdlib && junit && hamcrest) {
       gradleLibDir = root;
       kotlinCompilerJar = compiler;
       kotlinStdlibJar = stdlib;
-      troveJar = findJar(root, /^trove4j-.*\.jar$/);
-      jetbrainsAnnotationsJar = findJar(root, /^annotations-\d.*\.jar$/);
+      troveJar = findJarIn(root, /^trove4j-.*\.jar$/);
+      jetbrainsAnnotationsJar = findJarIn(root, /^annotations-\d.*\.jar$/);
       junitJar = junit;
       hamcrestJar = hamcrest;
       break;

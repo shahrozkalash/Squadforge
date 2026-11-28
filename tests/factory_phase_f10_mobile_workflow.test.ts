@@ -35,6 +35,8 @@ process.env.SQUADFORGE_TRUSTED_HOST_TESTS = '1';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { db } from '../server/store.js';
@@ -48,7 +50,7 @@ import {
 } from '../server/android/videoEditorGenerator.js';
 import { IosProjectGenerator } from '../server/ios/iosProjectGenerator.js';
 import { MobileWorkflow } from '../server/android/mobileWorkflow.js';
-import { verifyAndroidProject } from '../server/android/mobileProjectGate.js';
+import { discoverKotlinToolchain, verifyAndroidProject } from '../server/android/mobileProjectGate.js';
 
 const DESCRIPTION =
   'Build an Android app in Kotlin for cutting and arranging short videos on a multitrack timeline, ' +
@@ -367,6 +369,94 @@ test('Factory F10: an Android app description flows team -> swarm -> contract ->
   assert.match(gate.ciBuildProof.produces, /GitHub-hosted runner/);
 
   assert.equal(delivery.verified, true, 'gate passed + real artifact = verified delivery');
+});
+
+// ---------------------------------------------------------------------------
+// (a2) Toolchain discovery covers CI layouts — and still refuses by
+// name when a toolchain genuinely cannot be found (CI #194: on the
+// GitHub ubuntu runner the pre-broadening search found nothing,
+// because it required all four jars in a single `lib` directory and
+// never looked in `lib/plugins`, SDKMAN versioned candidates, a
+// PATH-resolved gradle, or the system package layouts).
+// ---------------------------------------------------------------------------
+
+test('Factory F10: Kotlin toolchain discovery finds a CI-layout Gradle home and refuses a genuinely absent one', { timeout: 600_000 }, async () => {
+  const GRADLE_PIECES = [
+    'kotlin-compiler-embeddable jar (Gradle distribution lib)',
+    'kotlin-stdlib jar (Gradle distribution lib)',
+    'junit jar (Gradle distribution lib)',
+    'hamcrest-core jar (Gradle distribution lib)'
+  ];
+
+  // The host's own discovered toolchain supplies the real jars this
+  // test rearranges into a synthetic layout (the suite above already
+  // requires a working host toolchain — nothing is fabricated here).
+  const host = discoverKotlinToolchain();
+  for (const piece of GRADLE_PIECES) {
+    assert.ok(!host.missing.includes(piece), 'host toolchain must be complete for this test, missing: ' + piece);
+  }
+
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'squadforge_f10_gradle_layout_'));
+  const savedRoots = process.env.F10_GRADLE_SEARCH_ROOTS;
+  try {
+    // A CI-like fake Gradle home: compiler/stdlib (and the
+    // compiler's trove + annotations companions) in lib/, and
+    // junit/hamcrest ONLY in lib/plugins/ — the layout the old
+    // lib-only search could not see.
+    const fakeHome = path.join(scratch, 'sdkman', 'candidates', 'gradle', '8.7');
+    const fakeLib = path.join(fakeHome, 'lib');
+    const fakePlugins = path.join(fakeLib, 'plugins');
+    fs.mkdirSync(fakePlugins, { recursive: true });
+    fs.copyFileSync(host.kotlinCompilerJar, path.join(fakeLib, path.basename(host.kotlinCompilerJar)));
+    fs.copyFileSync(host.kotlinStdlibJar, path.join(fakeLib, path.basename(host.kotlinStdlibJar)));
+    if (host.troveJar) fs.copyFileSync(host.troveJar, path.join(fakeLib, path.basename(host.troveJar)));
+    if (host.jetbrainsAnnotationsJar) fs.copyFileSync(host.jetbrainsAnnotationsJar, path.join(fakeLib, path.basename(host.jetbrainsAnnotationsJar)));
+    fs.copyFileSync(host.junitJar, path.join(fakePlugins, path.basename(host.junitJar)));
+    fs.copyFileSync(host.hamcrestJar, path.join(fakePlugins, path.basename(host.hamcrestJar)));
+
+    // Restricted to that one layout, discovery finds every piece,
+    // gathering junit/hamcrest across the lib/plugins tree.
+    process.env.F10_GRADLE_SEARCH_ROOTS = fakeHome;
+    const found = discoverKotlinToolchain();
+    for (const piece of GRADLE_PIECES) {
+      assert.ok(!found.missing.includes(piece), 'restricted discovery must find: ' + piece);
+    }
+    assert.equal(found.gradleLibDir, fakeLib);
+    assert.ok(found.junitJar.startsWith(fakePlugins), 'junit must be gathered from lib/plugins, got ' + found.junitJar);
+    assert.ok(found.hamcrestJar.startsWith(fakePlugins), 'hamcrest must be gathered from lib/plugins, got ' + found.hamcrestJar);
+
+    // And the gate genuinely compiles + runs the generated app's
+    // JVM tests with the toolchain from that synthetic layout.
+    const gate = await verifyAndroidProject(GENERATED);
+    assert.equal(gate.kotlin.toolchainAvailable, true, gate.kotlin.detail);
+    assert.equal(gate.kotlin.compileOk, true, gate.kotlin.compileErrors.join('\n'));
+    assert.equal(gate.kotlin.testsFailed, 0);
+    assert.equal(gate.kotlin.testsRun, 19);
+    assert.equal(gate.passed, true);
+
+    // Total absence: restricted to an empty directory, discovery
+    // names every missing piece and the gate refuses — it never
+    // fakes a compile it could not run.
+    const emptyHome = path.join(scratch, 'nothing-here');
+    fs.mkdirSync(emptyHome, { recursive: true });
+    process.env.F10_GRADLE_SEARCH_ROOTS = emptyHome;
+    const absent = discoverKotlinToolchain();
+    for (const piece of GRADLE_PIECES) {
+      assert.ok(absent.missing.includes(piece), 'absent toolchain must name: ' + piece);
+    }
+    const refused = await verifyAndroidProject(GENERATED);
+    assert.equal(refused.kotlin.toolchainAvailable, false);
+    assert.equal(refused.kotlin.compileOk, false);
+    assert.match(refused.kotlin.detail, /Kotlin toolchain unavailable on this host — missing: /);
+    for (const piece of GRADLE_PIECES) {
+      assert.ok(refused.kotlin.detail.includes(piece), 'the refusal names: ' + piece);
+    }
+    assert.equal(refused.passed, false, 'a gate that could not compile must not pass');
+  } finally {
+    if (savedRoots === undefined) delete process.env.F10_GRADLE_SEARCH_ROOTS;
+    else process.env.F10_GRADLE_SEARCH_ROOTS = savedRoots;
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

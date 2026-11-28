@@ -136,3 +136,63 @@ phase4 test 19) stay green inside the orchestration suite.
 - Gate wall time is dominated by kotlinc (~25 s per full Android
   gate call on this VM); the suite's three gate calls are budgeted
   in its timeouts.
+
+---
+
+## Addendum (2026-11-28): CI #194 toolchain-discovery fix
+
+**Failure.** In main CI run #194 (commit `daa7606`) the three
+gate-dependent tests in this suite (and F13.6 in the unified-pipeline
+suite) failed on the GitHub ubuntu runner with: *"Kotlin toolchain
+unavailable on this host — missing: kotlin-compiler-embeddable jar
+(Gradle distribution lib); kotlin-stdlib jar; junit jar;
+hamcrest-core jar"* — while the same suites passed locally. The
+sandbox-integration job was unaffected.
+
+**Root cause.** `discoverKotlinToolchain` searched only three
+places (an env override, `GRADLE_HOME`, SDKMAN `current`, and the
+wrapper-dists trees) and, within each, required **all four jars in
+one `lib` directory**. On the runner the installed Gradle keeps the
+compiler/stdlib in `lib` but junit/hamcrest in `lib/plugins` (and
+the distribution is reachable via SDKMAN's versioned candidates /
+the `gradle` on PATH rather than the roots that were searched), so
+every root was discarded as incomplete and all four pieces were
+reported missing — including the two that were present.
+
+**Fix** (`server/android/mobileProjectGate.ts`, discovery only —
+the gate still refuses by name when no complete toolchain exists;
+nothing is downloaded or faked):
+
+- Distribution roots broadened: `GRADLE_HOME`; a `gradle`
+  executable resolved from PATH via realpath (SDKMAN shims land
+  inside the distribution); SDKMAN `current` **plus every versioned
+  candidate**; `/opt/gradle` (+ versioned `/opt/gradle-*`),
+  `/usr/local/gradle`, `/usr/share/gradle`; the wrapper-dists trees
+  (unchanged); a `gradle` dir beside an Android SDK root.
+- Each distribution is now searched across **both** `lib` and
+  `lib/plugins`, and the four pieces are gathered across those two
+  trees of the same distribution. Jar names are matched by version
+  pattern (as before), with a unified-`hamcrest-<version>` fallback
+  after `hamcrest-core`.
+- New seam: `F10_GRADLE_SEARCH_ROOTS` (path-delimited distribution
+  homes or lib dirs) **replaces** the search list when set, so a
+  test can restrict discovery to one synthetic layout.
+  `F10_GRADLE_LIB_DIR` keeps its meaning when the override is unset.
+
+**Proof.** New test in this suite — *"Kotlin toolchain discovery
+finds a CI-layout Gradle home and refuses a genuinely absent one"*:
+it copies the host's real jars into a fake SDKMAN-style Gradle home
+with junit/hamcrest **only** in `lib/plugins`, restricts discovery
+to that home via `F10_GRADLE_SEARCH_ROOTS`, and asserts all four
+pieces are found (junit/hamcrest paths under `lib/plugins`) and
+that the gate then genuinely compiles the generated project and
+runs its 19 JVM tests green. Restricted to an empty directory
+instead, discovery names all four missing pieces and the gate
+refuses (`toolchainAvailable: false`, `passed: false`, refusal
+detail naming each piece). No existing assertion was changed.
+
+**Local verification (2026-11-28).** This suite: **4/4 pass**
+(was 3 tests; the discovery test is the 4th). F13 unified pipeline:
+**12/12 pass**, F13.6 mobile included. Lint clean; build succeeds.
+The CI-side confirmation is the next main CI run on the owner's
+push — this addendum records the local evidence only.

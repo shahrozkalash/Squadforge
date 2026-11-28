@@ -19,3 +19,53 @@
 | No CapCut-level parity or production-readiness claim | ✅ Honoured | Not claimed anywhere; the evidence boundary is stated in both documents |
 
 Final acceptance of this phase remains Sheroz's decision.
+
+---
+
+## Addendum (2026-11-28): CI #194 PiP colour regression — root cause and fix
+
+**Failure.** In main CI run #194 (commit `daa7606`) this suite's
+workflow test failed at the preview-frame step: *"PiP centre must
+be blue, got (0, 0, 114)"*. The suite had been green in CI #193.
+It reproduced locally with the same value, so it was not an
+ffmpeg-version difference (local ffmpeg 8.1.2 vs the runner's apt
+ffmpeg): the pushed code itself changed the rendered pixel.
+
+**Root cause (frame-dump evidence).** The PiP/overlay rendering is
+correct: rendering the exact preview filter graph gives the PiP
+centre (240, 180) as **(0, 0, 254)**. The darkening comes from the
+**caption drawtext box**. The preview draws the active caption
+("HELLO E2E", fontsize 28, text top at y = h−52 = 188) with a
+semi-transparent black box; measured on the rendered frame the box
+spans rows **180–215**, cols **68–251** — its top padding strip
+lands exactly on row 180, and x=240 is inside its right edge, so
+the sampled PiP-centre point sits under the box's top border. The
+arithmetic matches the failure exactly: 254 × (1 − 0.55) ≈ **114**.
+
+The regression delta was in the pushed `server/videoEditor/playback.ts`:
+the preview's caption box had been changed from the historical
+`black@0.4 / boxborderw=6` to `black@0.55 / boxborderw=8` (matching
+the exporter's constants). At border 6 the box top is row 182 —
+below the sample point; at border 8 it is row 180 — on it. (The
+Phase 3 overlay-scaling and Phase 4 export changes in the same push
+were inspected and are not involved: with the caption box not
+covering the point, the overlay renders pure blue on the same
+code.)
+
+**Fix.** One shared source of truth for the caption box, used by
+both renderers so they cannot drift apart on it again:
+`CAPTION_BOX_ALPHA = 0.55` and `CAPTION_BOX_BORDER = 6` are now
+exported from `server/videoEditor/videoExporter.ts`; the exporter's
+caption burn-in builds its drawtext from them and the preview in
+`server/videoEditor/playback.ts` imports them. The border returns
+to 6 in **both** renderers (alpha stays 0.55): the box top sits at
+h−58 (row 182 at this frame size), clear of the PiP centre, and
+preview ≡ export is preserved — the fix moves both together
+rather than re-diverging the preview. The test's colour assertion
+was not touched.
+
+**Local verification (2026-11-28).** This suite: **1/1 pass**.
+Regression: Video Editor Phase 3 + Phase 4 suites **28/28**;
+Phases 20/26/27/29 suites **35/35** (Phase 29 covers caption
+burn-in and preview captions against the changed constants).
+Lint clean; build succeeds.

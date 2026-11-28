@@ -158,6 +158,20 @@ export function runFfmpeg(
 }
 
 /**
+ * The caption drawtext box styling, shared verbatim between the
+ * exporter (caption burn-in below) and the preview renderer in
+ * playback.ts, which imports these constants — one source of truth,
+ * so the two renderers cannot drift apart on caption styling again
+ * (the CI #194 Phase 31 regression was exactly such a drift: the
+ * preview adopted border 8 while the integrated workflow's PiP
+ * centre sample sits at h-60, the row the border-8 box's top
+ * padding strip reaches; the 55% black fill darkened the blue
+ * (0,0,254) to (0,0,114)).
+ */
+export const CAPTION_BOX_ALPHA = 0.55;
+export const CAPTION_BOX_BORDER = 6;
+
+/**
  * Phase 27: the spatial transform chain for one clip (crop → effect →
  * scale → rgba → rotate → opacity → SAR), shared verbatim between the
  * stream exporter below and the single-frame preview renderer in
@@ -582,7 +596,12 @@ export async function exportVideo(
 
   // Phase 29: caption burn-in (drawtext per cue, bottom-centre),
   // above text elements. Disable with settings.burnInCaptions=false.
+  // The box styling comes from the shared CAPTION_BOX_ALPHA /
+  // CAPTION_BOX_BORDER constants above: the preview renderer in
+  // playback.ts imports the same values, so the two can never drift
+  // apart again (see the constants' comment for the CI #194 story).
   const captionCues = (project.captions ?? []).filter((c) => c.text && c.text.trim());
+  const captionBox = `boxcolor=black@${CAPTION_BOX_ALPHA}:boxborderw=${CAPTION_BOX_BORDER}`;
   if (captionCues.length > 0 && settings.burnInCaptions !== false) {
     const font = findFontFile();
     if (!font) return fail('Captions are present but no usable font file was found on this host for drawtext.');
@@ -591,7 +610,7 @@ export async function exportVideo(
       const outLabel = `vcap${videoLabel}`;
       filters.push(
         `[${videoLabel}]drawtext=fontfile='${fontEscaped}':text='${escapeDrawtext(cue.text)}':fontsize=28:` +
-          `fontcolor=white:borderw=2:box=1:boxcolor=black@0.55:boxborderw=8:x=(w-text_w)/2:y=h-52:` +
+          `fontcolor=white:borderw=2:box=1:${captionBox}:x=(w-text_w)/2:y=h-52:` +
           `enable='between(t,${cue.startSec.toFixed(3)},${cue.endSec.toFixed(3)})'[${outLabel}]`
       );
       videoLabel = outLabel;
