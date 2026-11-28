@@ -308,6 +308,8 @@ export type EventType =
   | 'code_review_requested'
   | 'code_review_completed'
   | 'patch_proposed'
+  | 'fact_conflict'
+  | 'architectural_conflict'
   | 'file_conflict_detected'
   | 'file_conflict_resolved'
   | 'ai_challenge_started'
@@ -329,7 +331,8 @@ export type EventType =
   | 'repair_applied'
   | 'repair_verified'
   | 'repair_failed'
-  | 'repair_rolled_back';
+  | 'repair_rolled_back'
+  | 'factory_delivery';
 
 export interface SwarmEvent {
   id: string;
@@ -483,6 +486,7 @@ export type CanonicalProjectType =
   | '3d_application' 
   | 'engineering_application' 
   | 'game_application' 
+  | 'ai_application' 
   | 'fullstack' 
   | 'custom';
 
@@ -501,7 +505,7 @@ export const CANONICAL_PROJECT_TYPES: CanonicalProjectType[] = [
   'cross_platform_desktop', 'android_application', 'cross_platform_mobile',
   'cli_tool', 'developer_tool', 'automation_tool', 'data_application',
   'creative_application', 'multimedia_application', '3d_application',
-  'engineering_application', 'game_application', 'fullstack', 'custom'
+  'engineering_application', 'game_application', 'ai_application', 'fullstack', 'custom'
 ];
 
 export const LEGACY_PROJECT_TYPES: LegacyProjectType[] = [
@@ -1929,7 +1933,8 @@ export type GenerationProfileType =
   | 'automation_software'
   | 'data_processing_application'
   | 'game_creative_application'
-  | 'multimedia_application';
+  | 'multimedia_application'
+  | 'ai_application';
 
 export interface GenerationProfilePlatformConstraints {
   supported: boolean;
@@ -1950,6 +1955,78 @@ export interface GenerationProfile {
   codingConventions: string[];
   validationRules: string[];
   platformConstraints: GenerationProfilePlatformConstraints;
+}
+
+// ==========================================
+// FACTORY PHASE F5: CATEGORY AI TEAMS AS DATA
+// ==========================================
+
+/**
+ * The stage of a build a team member primarily works in. Stages follow
+ * the swarm's actual assembly order: foundation (project configuration)
+ * -> architecture (contracts) -> data -> backend -> frontend ->
+ * integration (entry point / cross-module) -> verification -> release.
+ */
+export type CategoryTeamStage =
+  | 'foundation'
+  | 'architecture'
+  | 'data'
+  | 'backend'
+  | 'frontend'
+  | 'integration'
+  | 'verification'
+  | 'release';
+
+export interface CategoryTeamMember {
+  role: AgentRole;
+  stage: CategoryTeamStage;
+}
+
+/**
+ * The completion/verification chain a category team is held to. The
+ * roles are resolved to models through the registry (AGENT_SPECS
+ * assignedModelId), never hardcoded model ids.
+ */
+export interface CategoryTeamVerificationChain {
+  /** SandboxRunner integrity checks gate completion. */
+  sandboxIntegrityCheck: boolean;
+  /** Role whose model issues the completion verdict. */
+  verifierRole: AgentRole;
+  /** Role whose model runs cross-module contract/integration analysis. */
+  integrationRole: AgentRole;
+  /** Role that fix tasks spawned by failed verification are assigned to. */
+  repairRole: AgentRole;
+}
+
+/**
+ * A specialized AI team for one project category, as declarative data
+ * (see server/swarm/categoryTeams.ts). Model bindings are NOT stored
+ * here: each role resolves to its model through the registry, so
+ * replacing a team's model is a registry data change, not a code change.
+ */
+export interface CategoryTeamDefinition {
+  category: CanonicalProjectType;
+  displayName: string;
+  /** Generation profile this category builds with. */
+  profileId: GenerationProfileType;
+  /** Roles that receive build tasks for this category, in stage order. */
+  members: CategoryTeamMember[];
+  /** Roles the initial planner may assign new tasks to for this category. */
+  assignableRoles: AgentRole[];
+  verification: CategoryTeamVerificationChain;
+}
+
+export interface ResolvedCategoryTeamMember extends CategoryTeamMember {
+  modelId: string;
+}
+
+/** A team definition with every role resolved to a registered model. */
+export interface ResolvedCategoryTeam {
+  team: CategoryTeamDefinition;
+  members: ResolvedCategoryTeamMember[];
+  verifierModelId: string;
+  integrationModelId: string;
+  repairModelId: string;
 }
 
 export type ProjectContractType = 

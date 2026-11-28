@@ -49,6 +49,14 @@ export class GenerationProfileRegistry {
       return this.get('cli_tool_developer_utility');
     }
 
+    // 3b. AI Applications (Factory Phase F12) — placed before the
+    // automation branch so a "chatbot" request is not captured by its
+    // bare 'bot' substring match. Phrases are deliberately specific;
+    // a generic mention of AI features does not select this profile.
+    if (text.includes('chatbot') || text.includes('ai chat') || text.includes('ai assistant') || text.includes('ai application') || text.includes('conversational ai') || text.includes('llm app') || text.includes('ai-powered chat')) {
+      return this.get('ai_application');
+    }
+
     // 4. Automation / Workflow
     if (text.includes('automation') || text.includes('workflow') || text.includes('cron') || text.includes('bot') || text.includes('scraper') || text.includes('webhook handler')) {
       return this.get('automation_software');
@@ -517,6 +525,45 @@ export class GenerationProfileRegistry {
         supported: true,
         supportedRuntimes: ['browser'],
         recommendedPackaging: 'Web Multimedia App'
+      }
+    });
+
+    // 12. AI Applications (Factory Phase F12)
+    this.register({
+      id: 'ai_application',
+      displayName: 'AI Applications',
+      category: 'AI',
+      description: 'Applications that themselves call AI models at runtime — chat and Q&A assistants, summarizers, and document-grounded helpers — through SquadForge\'s replaceable provider layer (model registry + smart router), never a hard-coded provider.',
+      architectureOverview: 'Platform-hosted TypeScript service in the connected-application topology (server.ts entry, server/app.ts) whose AI features call the platform gateway (callUnifiedGateway) through a thin bridge module; the configured model id is data (AI_MODEL_ID), and provider failures surface to the caller as named errors — the application never fabricates an AI answer.',
+      defaultFileOrganization: [
+        'server.ts',
+        'server/app.ts',
+        'server/platformAi.ts',
+        'public/index.html',
+        'tests/api.test.ts'
+      ],
+      typicalDependencies: [],
+      requiredContracts: [
+        'AiAnswer',
+        'AiProviderError',
+        'ChatRequest'
+      ],
+      codingConventions: [
+        'All model access goes through the platform gateway bridge (server/platformAi.ts); no provider SDK or API key in application code',
+        'The model id is configuration (AI_MODEL_ID), resolved by the registry/router — swapping it changes the provider with no code change',
+        'Provider failures return a named error (the router\'s errorCode and message) with a 503 status; a canned or fabricated answer is a defect',
+        'Non-AI surface (health, UI, data routes) must work with no provider configured'
+      ],
+      validationRules: [
+        'With no provider key configured, the AI endpoint fails with the router\'s named NO_PROVIDER error and returns no answer',
+        'The AI endpoint\'s answer must come from a gateway result (parsed report payload), never from a literal in application code',
+        'The application\'s own tests cover the no-provider failure as a first-class case'
+      ],
+      platformConstraints: {
+        supported: true,
+        supportedRuntimes: ['node'],
+        recommendedPackaging: 'Platform-hosted service (provider layer supplied by the host)',
+        limitationNotice: 'Live model access requires a provider key in the host environment (see CAPABILITY_MATRIX.md); without one the AI features fail loudly by design.'
       }
     });
   }

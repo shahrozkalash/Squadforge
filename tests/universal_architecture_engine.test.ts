@@ -23,8 +23,13 @@ import path from 'node:path';
 describe('Phase 7: Universal Software Architecture Engine Test Suite', () => {
 
   describe('1. Canonical Project Type Classification and Backward Compatibility', () => {
-    test('1.1 Recognizes all 24 canonical project categories', () => {
-      assert.strictEqual(CANONICAL_PROJECT_TYPES.length, 24);
+    test('1.1 Recognizes all 25 canonical project categories', () => {
+      // Count migrated 24 -> 25 in Factory Phase F12 (2026-11-28):
+      // 'ai_application' was registered as a canonical category (with
+      // its generation profile and F5 team) because no AI-application
+      // category existed. The pin still asserts the exact size of the
+      // canonical list; it grew by the one documented category.
+      assert.strictEqual(CANONICAL_PROJECT_TYPES.length, 25);
       for (const cat of CANONICAL_PROJECT_TYPES) {
         assert.strictEqual(normalizeProjectType(cat), cat, `Expected ${cat} to normalize to itself`);
       }

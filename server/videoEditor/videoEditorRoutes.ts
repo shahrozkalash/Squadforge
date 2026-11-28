@@ -8,7 +8,7 @@ import { createProject, deserializeVideoProject, recoverVideoProject, saveVideoP
 import { EDITOR_WEB_APP_HTML } from './editorWebApp.js';
 import { applyEditOperation, type EditOperation } from './editingOps.js';
 import { defaultExportSettings, exportVideo } from './videoExporter.js';
-import { playbackInfo, renderPreviewFrame } from './playback.js';
+import { playbackInfo, renderPreviewFrame, PreviewFrameCache } from './playback.js';
 import { computeWaveform } from './waveform.js';
 import { formatCaptions, parseCaptions } from './captions.js';
 import { analyzeMedia } from './aiEditing.js';
@@ -38,6 +38,20 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
       jobManagers.set(buildId, manager);
     }
     return manager;
+  };
+
+  // Phase 3 (Video Editor Roadmap): one bounded preview-frame cache
+  // per build, so scrubbing back over an already-rendered frame does
+  // not re-decode it. Keys fingerprint the submitted project + media
+  // files, so any edit misses the cache and re-renders.
+  const previewCaches = new Map<string, PreviewFrameCache>();
+  const previewCacheFor = (buildId: string): PreviewFrameCache => {
+    let cache = previewCaches.get(buildId);
+    if (!cache) {
+      cache = new PreviewFrameCache(path.join(process.cwd(), '.video_previews', buildId, 'cache'), 120);
+      previewCaches.set(buildId, cache);
+    }
+    return cache;
   };
 
   const owned = (action: (build: Build, req: Request, res: Response) => Promise<unknown> | unknown) =>
@@ -169,7 +183,10 @@ export function createVideoEditorRouter(deps: VideoEditorRouteDependencies): Rou
     const result = await renderPreviewFrame(project, mediaAssets, timeSec, framePath, {
       hiddenTrackIds,
       width: req.body?.width ? Number(req.body.width) : undefined,
-      height: req.body?.height ? Number(req.body.height) : undefined
+      height: req.body?.height ? Number(req.body.height) : undefined,
+      maxWidth: req.body?.maxWidth ? Number(req.body.maxWidth) : undefined,
+      maxHeight: req.body?.maxHeight ? Number(req.body.maxHeight) : undefined,
+      cache: previewCacheFor(build.id)
     });
     if (result.status === 'error') return res.status(422).json({ success: false, error: result.error });
     return res.json({

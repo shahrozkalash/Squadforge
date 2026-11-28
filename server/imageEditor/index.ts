@@ -10,3 +10,7 @@ export * from './workspace.js';
 export * from './bitmapFont.js';
 export * from './imageProjectGenerator.js';
 export * from './imageEditorRoutes.js';
+export * from './photoDevelop.js';
+export * from './photoProject.js';
+export * from './imageWorkflow.js';
+export * from './photoWorkflow.js';

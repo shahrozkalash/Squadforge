@@ -117,6 +117,14 @@ export class SoftwareRequirementsAnalyzer {
       return 'desktop_application';
     }
 
+    // AI applications (Factory Phase F12): the described product
+    // itself calls AI models at runtime. Phrases are deliberately
+    // specific — a generic "AI-powered" feature mention in another
+    // category's product does not reclassify it.
+    if (/\b(chatbot|ai chat|ai assistant|ai application|ai app|ai companion|ai tutor|conversational ai|llm)\b/i.test(text)) {
+      return 'ai_application';
+    }
+
     // CLI & DevTools & Automation
     if (/\b(cli|command line|terminal tool|shell command|argparse)\b/i.test(text)) {
       return 'cli_tool';

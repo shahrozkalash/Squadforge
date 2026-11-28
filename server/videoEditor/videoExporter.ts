@@ -201,6 +201,53 @@ export function defaultExportSettings(project: VideoProject): ExportSettings {
   };
 }
 
+/** Video Editor Roadmap Phase 4: the standard audio sample rates an export may request. */
+export const EXPORT_AUDIO_SAMPLE_RATES: readonly number[] = [
+  8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000, 88200, 96000, 176400, 192000
+];
+
+/**
+ * Video Editor Roadmap Phase 4: validate export settings BEFORE any
+ * ffmpeg work starts. Until now the values flowed raw into the filter
+ * graph and encoder args, so nonsense (odd dimensions the yuv420p
+ * chain cannot encode, fps <= 0, a negative bitrate, an out-of-range
+ * CRF) failed opaquely inside ffmpeg — or, worse, produced a file
+ * whose properties nobody checked. Returns named errors; an empty
+ * list means the settings are renderable.
+ */
+export function validateExportSettings(settings: ExportSettings): string[] {
+  const errors: string[] = [];
+  const dimension = (label: 'width' | 'height', value: number): void => {
+    if (!Number.isInteger(value) || value <= 0) {
+      errors.push(`Export ${label} must be a positive integer (got ${value})`);
+    } else if (value % 2 !== 0) {
+      errors.push(`Export ${label} must be even — the yuv420p export chain cannot encode odd dimensions (got ${value})`);
+    } else if (value > 16384) {
+      errors.push(`Export ${label} must be at most 16384 (got ${value})`);
+    }
+  };
+  dimension('width', settings.width);
+  dimension('height', settings.height);
+  if (!Number.isFinite(settings.fps) || settings.fps <= 0 || settings.fps > 240) {
+    errors.push(`Export fps must be a number in the range (0, 240] (got ${settings.fps})`);
+  }
+  if (!Number.isFinite(settings.videoBitrateKbps) || settings.videoBitrateKbps <= 0) {
+    errors.push(`Export videoBitrateKbps must be a positive number (got ${settings.videoBitrateKbps})`);
+  }
+  if (settings.audioBitrateKbps !== undefined && (!Number.isFinite(settings.audioBitrateKbps) || settings.audioBitrateKbps <= 0)) {
+    errors.push(`Export audioBitrateKbps must be a positive number when set (got ${settings.audioBitrateKbps})`);
+  }
+  if (settings.crf !== undefined && (!Number.isInteger(settings.crf) || settings.crf < 0 || settings.crf > 51)) {
+    errors.push(`Export crf must be an integer in the range [0, 51] (got ${settings.crf})`);
+  }
+  if (settings.audioSampleRateHz !== undefined && !EXPORT_AUDIO_SAMPLE_RATES.includes(settings.audioSampleRateHz)) {
+    errors.push(
+      `Export audioSampleRateHz must be one of ${EXPORT_AUDIO_SAMPLE_RATES.join(', ')} (got ${settings.audioSampleRateHz})`
+    );
+  }
+  return errors;
+}
+
 export async function exportVideo(
   project: VideoProject,
   mediaAssets: Map<string, MediaAsset>,
@@ -236,6 +283,9 @@ export async function exportVideo(
 
   const validationErrors = validateProject(project, mediaAssets);
   if (validationErrors.length > 0) return fail(`Invalid project: ${validationErrors.join('; ')}`);
+
+  const settingsErrors = validateExportSettings(settings);
+  if (settingsErrors.length > 0) return fail(`Invalid export settings: ${settingsErrors.join('; ')}`);
 
   const ffmpeg = detectFfmpeg();
   if (!ffmpeg) return fail('ffmpeg not found on this host; video export requires the ffmpeg engine. Nothing was rendered.');
@@ -601,8 +651,19 @@ export async function exportVideo(
     a.push('-filter_complex', filters.join(';'));
     a.push('-map', `[${videoLabel}]`);
     if (audioLabel) a.push('-map', `[${audioLabel}]`);
-    a.push('-c:v', codec, '-pix_fmt', 'yuv420p', '-r', String(settings.fps), '-b:v', `${settings.videoBitrateKbps}k`);
-    if (audioLabel) a.push('-c:a', settings.audioCodec, '-b:a', `${settings.audioBitrateKbps ?? 160}k`);
+    a.push('-c:v', codec, '-pix_fmt', 'yuv420p', '-r', String(settings.fps));
+    // Phase 4: CRF constant-quality mode exists only on libx264; any
+    // other encoder is driven by the bitrate setting (noted on the
+    // result when a CRF was requested — see below).
+    if (codec === 'libx264' && settings.crf !== undefined) {
+      a.push('-crf', String(settings.crf));
+    } else {
+      a.push('-b:v', `${settings.videoBitrateKbps}k`);
+    }
+    if (audioLabel) {
+      a.push('-c:a', settings.audioCodec, '-b:a', `${settings.audioBitrateKbps ?? 160}k`);
+      if (settings.audioSampleRateHz !== undefined) a.push('-ar', String(settings.audioSampleRateHz));
+    }
     a.push(outputPath);
     return a;
   };
@@ -671,6 +732,14 @@ export async function exportVideo(
       };
     }
   }
+  if (settings.crf !== undefined && encoderUsed !== 'libx264') {
+    // The render that stands used a hardware encoder, which has no
+    // CRF mode: it was driven by the bitrate setting. Say so — a
+    // requested quality mode is never silently dropped.
+    notes.push(
+      `CRF quality (${settings.crf}) applies to the software libx264 encoder; this render used ${encoderUsed}, driven by the bitrate setting (${settings.videoBitrateKbps} kbps) instead.`
+    );
+  }
   const { code, log } = attempt;
   if (code !== 0) {
     if (options.journalDir) await writeJournal(options.journalDir, 'export-failed', `ffmpeg exited ${code}`);
@@ -692,7 +761,21 @@ export async function exportVideo(
     if (probe.width !== settings.width || probe.height !== settings.height) {
       throw new Error(`output dimensions ${probe.width}x${probe.height} != requested ${settings.width}x${settings.height}`);
     }
+    // Phase 4: the frame rate and (when requested) the audio sample
+    // rate are verified like the dimensions always were — a render
+    // that silently came out at the wrong rate is a failed render.
+    if (probe.fps !== undefined && Math.abs(probe.fps - settings.fps) > Math.max(1, settings.fps * 0.05)) {
+      throw new Error(`output frame rate ${probe.fps}fps differs from requested ${settings.fps}fps`);
+    }
     if (audioLabels.length > 0 && !probe.hasAudio) throw new Error('output is missing the expected audio stream');
+    if (
+      settings.audioSampleRateHz !== undefined &&
+      audioLabels.length > 0 &&
+      probe.audioSampleRateHz !== undefined &&
+      probe.audioSampleRateHz !== settings.audioSampleRateHz
+    ) {
+      throw new Error(`output audio sample rate ${probe.audioSampleRateHz}Hz differs from requested ${settings.audioSampleRateHz}Hz`);
+    }
     if (options.journalDir) await writeJournal(options.journalDir, 'exported', `validated ${path.basename(outputPath)}`);
     return {
       status: 'success',

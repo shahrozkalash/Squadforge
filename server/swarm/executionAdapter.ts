@@ -626,6 +626,23 @@ export class ExecutionAdapter {
           status: isSkipped ? 'skipped' : (isOk ? 'passed' : 'failed'),
           message: isOk ? undefined : 'Test assertion failed'
         });
+        continue;
+      }
+
+      // Node spec reporter format (the default on newer Node versions when
+      // TAP is not selected): '✔ test description (1.23ms)' for a pass and
+      // '✖ test description (1.23ms)' for a failure. Without this branch a
+      // fully passing run produced no TAP lines at all and every declared
+      // test fell through to the no-evidence fallback below.
+      const specMatch = line.match(/^\s*(✔|✓|✖|✗)\s+(.+?)\s+\(\d+(?:\.\d+)?m?s\)\s*$/);
+      if (specMatch) {
+        const isOk = specMatch[1] === '✔' || specMatch[1] === '✓';
+        results.push({
+          name: specMatch[2].trim(),
+          passed: isOk,
+          status: isOk ? 'passed' : 'failed',
+          message: isOk ? undefined : 'Test assertion failed'
+        });
       }
     }
 
@@ -636,13 +653,21 @@ export class ExecutionAdapter {
     // name was absent from the output, which inverted the evidence rule
     // ("missing execution evidence must not be treated as success").
     if (results.length === 0) {
+      // Failure evidence must come from the run's own verdict, never from
+      // the bare word 'fail': a passing summary itself prints 'fail 0'
+      // ('# fail 0' in TAP, 'ℹ fail 0' in the spec reporter), which used to
+      // mark every mentioned test as failed on a fully green run.
+      const failSummary = (stdout + '\n' + stderr).match(/^(?:ℹ|#)\s*fail\s+(\d+)\s*$/m);
+      const outputReportsFailures = failSummary
+        ? parseInt(failSummary[1], 10) > 0
+        : /\bnot ok\b/.test(stdout) || stderr.includes('Error');
       for (const tf of testFiles) {
         const matches = tf.content.matchAll(/(?:test|it)(?:\.(skip|only))?\s*\(\s*['"]([^'"]+)['"]/g);
         for (const m of matches) {
           const isSkipped = m[1] === 'skip';
           const name = m[2];
           const mentioned = stdout.includes(name) || stderr.includes(name);
-          const hasError = mentioned && (stdout.includes('fail') || stderr.includes('Error'));
+          const hasError = mentioned && outputReportsFailures;
           results.push({
             name,
             passed: mentioned && !hasError && !isSkipped,

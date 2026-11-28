@@ -5,3 +5,5 @@ export * from './multiplayer.js';
 export * from './profiler.js';
 export * from './gameProjectGenerator.js';
 export * from './gameRoutes.js';
+export * from './playabilityChecker.js';
+export * from './gameWorkflow.js';

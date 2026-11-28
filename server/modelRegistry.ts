@@ -137,7 +137,7 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
     role: 'ui_ux_designer',
     title: 'UI/UX Designer Agent',
     description: 'Designs design systems, accessibility hierarchies, layout proportions, typography, and visual user experience.',
-    assignedModelId: 'llama',
+    assignedModelId: 'claude-uiux',
     responsibilities: [
       'Establish design system tokens, color palettes, and typography scale',
       'Design accessible layouts with clear visual hierarchy and state feedback',
@@ -149,7 +149,7 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
     role: 'performance_engineer',
     title: 'Performance Engineer Agent',
     description: 'Profiles latency, query execution times, asset bundles, memory consumption, and caching strategies.',
-    assignedModelId: 'qwen',
+    assignedModelId: 'deepseek-perf',
     responsibilities: [
       'Benchmark API route latency and database query plans',
       'Audit client bundle sizes and tree-shaking opportunities',
@@ -161,7 +161,7 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
     role: 'documentation_engineer',
     title: 'Documentation Engineer Agent',
     description: 'Authors technical architecture documentation, API specifications, ADR records, and developer guides.',
-    assignedModelId: 'gpt-4o',
+    assignedModelId: 'mistral-docs',
     responsibilities: [
       'Document architecture decisions and contract specifications',
       'Generate clear API reference documentation and code comments',
@@ -206,6 +206,28 @@ export const AGENT_SPECS: Record<AgentRole, AgentSpec> = {
     ]
   }
 };
+
+/**
+ * Role aliases (Factory Phase F5): three AGENT_SPECS roles are alternate
+ * names for a canonical specialist role — same responsibilities, same
+ * assigned model. No registry entry carries the alias as its `agentRole`,
+ * so role resolution canonicalizes through this map (see `getByRole`).
+ * Before F5 these aliases were spec-only and `getByRole` could not
+ * resolve them (documented in Factory Phase F1); the alias set is pinned
+ * by name in tests/factory_phase_f1_capability.test.ts and
+ * tests/factory_phase_f5_category_teams.test.ts so it cannot change
+ * silently.
+ */
+export const AGENT_ROLE_ALIASES: Partial<Record<AgentRole, AgentRole>> = {
+  database_engineer: 'database_specialist',
+  integration_engineer: 'integration_specialist',
+  qa_engineer: 'qa_testing_specialist'
+};
+
+/** Returns the canonical role for an alias, or the role itself. */
+export function canonicalAgentRole(role: AgentRole): AgentRole {
+  return AGENT_ROLE_ALIASES[role] ?? role;
+}
 
 // Pre-configured registry of 10+ AI Models, each mapped to a specialized agent role with tier, pricing, context window, and capability level
 export const INITIAL_MODEL_REGISTRY: ModelConfig[] = [
@@ -529,7 +551,15 @@ class ModelRegistryManager {
   }
 
   getByRole(role: AgentRole): ModelConfig | undefined {
-    return this.getAll().find(m => m.agentRole === role);
+    const direct = this.getAll().find(m => m.agentRole === role);
+    if (direct) return direct;
+    // Alias roles (see AGENT_ROLE_ALIASES) resolve through their
+    // canonical specialist role.
+    const canonical = canonicalAgentRole(role);
+    if (canonical !== role) {
+      return this.getAll().find(m => m.agentRole === canonical);
+    }
+    return undefined;
   }
 
   getEnabled(): ModelConfig[] {

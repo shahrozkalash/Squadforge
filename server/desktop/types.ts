@@ -31,6 +31,16 @@ export interface DesktopBuildOptions {
   configuration: 'Debug' | 'Release';
   /** Run `dotnet restore` before building (dependency management step). */
   restore: boolean;
+  /**
+   * Root directory harvested artifacts are copied into, under a
+   * per-build subdirectory. Defaults to `<cwd>/.desktop_artifacts`.
+   * Callers that report artifact paths of their own (the F6 desktop
+   * environment adapter) pass their root so the reported paths are
+   * the harvested ones — before Factory F11 the pipeline ignored
+   * any other root and the adapter's custom-root paths pointed at
+   * files that were never written there.
+   */
+  artifactsRoot?: string;
 }
 
 export interface DesktopBuildLogEntry {

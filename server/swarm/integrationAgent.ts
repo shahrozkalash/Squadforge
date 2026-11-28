@@ -1,4 +1,5 @@
 import ts from 'typescript';
+import * as path from 'path';
 import { ProjectFile } from '../types.js';
 import { db } from '../store.js';
 import { TaskManager } from './taskManager.js';
@@ -86,6 +87,50 @@ export class IntegrationAgent {
       filesByCleanPath.set(clean.replace(/\.(tsx|ts|jsx|js|mjs|cjs)$/, ''), f);
     }
 
+    // Node-hosted files: the recognized Node roots (server/test files
+    // and package.json script entries) plus every local module they
+    // reach through relative imports. A Node entry's files are server
+    // code wherever they live (see nodeEntryFiles) — and so are the
+    // local modules only they import. Before Factory F11, the
+    // browser-dependency scan in Pass 2 exempted only the entry file
+    // itself, so a Node CLI's command modules were judged as browser
+    // files and their `fs`/`path` imports flagged as broken
+    // contracts. Files not reachable from any Node root are scanned
+    // exactly as before.
+    const nodeHostedFiles = new Set<string>();
+    {
+      const isNodeRoot = (p: string): boolean =>
+        p.startsWith('tests/') ||
+        p.includes('.test.') ||
+        p.includes('.spec.') ||
+        p.startsWith('server/') ||
+        p === 'server.ts' ||
+        nodeEntries.has(p);
+      const queue: string[] = [];
+      for (const f of files) {
+        if (isNodeRoot(f.path) && !nodeHostedFiles.has(f.path)) {
+          nodeHostedFiles.add(f.path);
+          queue.push(f.path);
+        }
+      }
+      while (queue.length > 0) {
+        const current = queue.pop() as string;
+        const currentFile = filesByCleanPath.get(current);
+        if (!currentFile || !/\.(ts|tsx|js|jsx|mjs|cjs)$/.test(current)) continue;
+        const dir = current.includes('/') ? current.substring(0, current.lastIndexOf('/')) : '';
+        for (const match of currentFile.content.matchAll(/(?:from\s+|import\s+)['"](\.[^'"]+)['"]/g)) {
+          const joined = path.posix.normalize(path.posix.join(dir, match[1]));
+          const target =
+            filesByCleanPath.get(joined) ??
+            filesByCleanPath.get(joined.replace(/\.(tsx|ts|jsx|js|mjs|cjs)$/, ''));
+          if (target && !nodeHostedFiles.has(target.path)) {
+            nodeHostedFiles.add(target.path);
+            queue.push(target.path);
+          }
+        }
+      }
+    }
+
     // Pass 1: Parse exports for all TypeScript/JavaScript files using TypeScript compiler API
     const exportsMap = new Map<string, ParsedFileExports>();
     const importGraph = new Map<string, Set<string>>();
@@ -127,7 +172,8 @@ export class IntegrationAgent {
         file.path.includes('.spec.') || 
         file.path.startsWith('server/') || 
         file.path === 'server.ts' ||
-        nodeEntries.has(file.path);
+        nodeEntries.has(file.path) ||
+        nodeHostedFiles.has(file.path);
 
       if (!isServerOrTestFile) {
         const scannedImports = DependencyResolverService.parseCodeImports(content, file.path);

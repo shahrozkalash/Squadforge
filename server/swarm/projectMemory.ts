@@ -99,6 +99,30 @@ export class ProjectMemoryService {
   private static DEFAULT_MAX_REPAIR_ATTEMPTS = 3;
 
   /**
+   * Negation-based contradiction check between two normalized statements:
+   * one asserts exactly what the other denies ("caching is enabled" vs
+   * "caching is not enabled").
+   */
+  private static statementsContradict(a: string, b: string): boolean {
+    return (a.includes('not ') && b.includes(a.replace('not ', ''))) ||
+           (b.includes('not ') && a.includes(b.replace('not ', '')));
+  }
+
+  /**
+   * Trims the fact list toward MAX_FACTS without ever dropping a confirmed
+   * fact: the oldest assumptions are pruned first. When confirmed facts
+   * alone exceed the cap, the cap yields — a confirmed fact is never lost
+   * to bookkeeping.
+   */
+  private static pruneFacts(memory: ProjectMemory): void {
+    if (memory.facts.length <= this.MAX_FACTS) return;
+    const confirmed = memory.facts.filter(f => f.confidence === 'confirmed');
+    const assumptions = memory.facts.filter(f => f.confidence !== 'confirmed');
+    const allowedAssumptions = Math.max(0, this.MAX_FACTS - confirmed.length);
+    memory.facts = [...confirmed, ...assumptions.slice(0, allowedAssumptions)];
+  }
+
+  /**
    * Initializes or loads project memory with strict user isolation.
    */
   static getOrInitializeMemory(buildId: string, userId: string): ProjectMemory | null {
@@ -242,18 +266,25 @@ export class ProjectMemoryService {
       return true;
     }
 
-    // Protect confirmed requirements: an assumption cannot contradict a confirmed fact
-    if (fact.confidence === 'assumption') {
-      const contradictsConfirmed = memory.facts.some(f => 
-        f.confidence === 'confirmed' && 
-        f.category === fact.category &&
-        ((normalized.includes('not ') && f.statement.toLowerCase().includes(normalized.replace('not ', ''))) ||
-         (f.statement.toLowerCase().includes('not ') && normalized.includes(f.statement.toLowerCase().replace('not ', ''))))
-      );
-      if (contradictsConfirmed) {
-        // Reject or mark assumption as contradictory
-        return false;
-      }
+    // Protect confirmed facts: a new fact that contradicts an established
+    // confirmed fact is refused — whatever its own confidence — and the
+    // contradiction is recorded in the build record. A contradiction must
+    // never be silently stored alongside its opposite (two workers would
+    // diverge) and never silently dropped (the dispute itself is signal).
+    const conflicting = memory.facts.find(f =>
+      f.confidence === 'confirmed' &&
+      f.category === (fact.category || 'requirement') &&
+      this.statementsContradict(normalized, f.statement.toLowerCase().trim())
+    );
+    if (conflicting) {
+      db.addEvent({
+        id: `evt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        buildId,
+        timestamp: Date.now(),
+        type: 'fact_conflict',
+        details: `[Fact Conflict] Incoming ${fact.confidence || 'assumption'} fact "${fact.statement.trim()}" (source: ${fact.source || 'architect_agent'}) contradicts confirmed fact "${conflicting.statement}". The confirmed fact remains authoritative; the incoming fact was not recorded.`
+      });
+      return false;
     }
 
     const newFact: ProjectFact = {
@@ -268,12 +299,7 @@ export class ProjectMemoryService {
     memory.facts.unshift(newFact);
 
     // Safe truncation: never drop confirmed facts; prune oldest assumptions first
-    if (memory.facts.length > this.MAX_FACTS) {
-      const confirmed = memory.facts.filter(f => f.confidence === 'confirmed');
-      const assumptions = memory.facts.filter(f => f.confidence !== 'confirmed');
-      const allowedAssumptions = Math.max(0, this.MAX_FACTS - confirmed.length);
-      memory.facts = [...confirmed, ...assumptions.slice(0, allowedAssumptions)];
-    }
+    this.pruneFacts(memory);
 
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);
@@ -779,9 +805,10 @@ export class ProjectMemoryService {
       }
     }
 
-    if (memory.facts.length > this.MAX_FACTS) {
-      memory.facts = memory.facts.slice(0, this.MAX_FACTS);
-    }
+    // Same invariant as recordFact: pruning must never drop confirmed
+    // facts (a plain slice dropped the oldest ones, including the initial
+    // facts derived from the user's own prompt).
+    this.pruneFacts(memory);
 
     memory.lastUpdated = Date.now();
     db.saveProjectMemory(memory);
@@ -1023,7 +1050,9 @@ export class ProjectMemoryService {
    * Produces a token-budgeted, task-relevant context block for autonomous agent prompts.
    * Eliminates hallucination by providing ONLY relevant ADRs, requirements, confirmed facts,
    * and defects for the specific task and target files.
-   * Priority: Confirmed User Requirements > Accepted ADRs > Active Defects > Conventions.
+   * Priority: Pinned Confirmed Facts > Accepted ADRs > Requirements > Active Defects > Conventions.
+   * Confirmed facts are packed immediately after the header so the budget
+   * can never truncate them away behind lower-priority sections.
    * Safe truncation: Never cuts records or lines in half; truncates cleanly at line/section boundaries.
    */
   static retrieveTaskContext(
@@ -1042,7 +1071,18 @@ export class ProjectMemoryService {
       `PROJECT CONTEXT: ${memory.projectType.toUpperCase()} | STACK: ${memory.techStack.frontend} + ${memory.techStack.backend}`
     );
 
-    // 2. Relevant ADRs (accepted decisions only, filtered by module/file relevance or global)
+    // 2. Confirmed Facts — the pinned facts (Prioritized: user_revision > user_prompt > architect).
+    // Packed first after the header: under budget pressure the sections
+    // below are truncated before these are ever reached.
+    const confirmedFacts = memory.facts
+      .filter(f => f.confidence === 'confirmed' && !f.statement.startsWith('[SUPERSEDED'))
+      .slice(0, 3);
+    if (confirmedFacts.length > 0) {
+      const factLines = confirmedFacts.map(f => `- ${f.statement}`);
+      sections.push(`ESTABLISHED FACTS:\n${factLines.join('\n')}`);
+    }
+
+    // 3. Relevant ADRs (accepted decisions only, filtered by module/file relevance or global)
     const activeAdrs = memory.architectureDecisions.filter(d => d.status === 'accepted');
     const relevantAdrs = activeAdrs.filter(adr => {
       if (!adr.affectedFiles || adr.affectedFiles.length === 0) return true;
@@ -1055,7 +1095,7 @@ export class ProjectMemoryService {
       sections.push(`ARCHITECTURE CONSTRAINTS:\n${adrLines.join('\n')}`);
     }
 
-    // 3. Relevant Requirements matching target file paths, keywords, or priority
+    // 4. Relevant Requirements matching target file paths, keywords, or priority
     const taskTokens = `${task.title} ${task.description} ${task.filePaths.join(' ')}`
       .toLowerCase()
       .split(/[^a-z0-9_]+/)
@@ -1099,7 +1139,7 @@ export class ProjectMemoryService {
       sections.push(`TARGET REQUIREMENTS:\n${reqLines.join('\n')}`);
     }
 
-    // 4. Relevant Known Defects (vital for fix tasks)
+    // 5. Relevant Known Defects (vital for fix tasks)
     const relevantDefects = memory.knownDefects.filter(
       d => !d.resolved && d.filePaths.some(fp => task.filePaths.includes(fp))
     );
@@ -1118,15 +1158,6 @@ export class ProjectMemoryService {
         `- [${lesson.outcome === 'verified' ? 'VERIFIED FIX' : 'FAILED APPROACH'}] ${lesson.category.replace(/_/g, ' ')} in ${lesson.files.join(', ')} (seen ${lesson.timesSeen} time(s))`
       );
       sections.push(`REPAIR HISTORY:\n${lessonLines.join('\n')}`);
-    }
-
-    // 5. Confirmed Facts (Prioritized: user_revision > user_prompt > architect)
-    const confirmedFacts = memory.facts
-      .filter(f => f.confidence === 'confirmed' && !f.statement.startsWith('[SUPERSEDED'))
-      .slice(0, 3);
-    if (confirmedFacts.length > 0) {
-      const factLines = confirmedFacts.map(f => `- ${f.statement}`);
-      sections.push(`ESTABLISHED FACTS:\n${factLines.join('\n')}`);
     }
 
     // 6. Coding Conventions

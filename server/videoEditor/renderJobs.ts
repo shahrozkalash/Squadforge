@@ -51,6 +51,8 @@ export class RenderJobManager {
   private controllers = new Map<string, AbortController>();
   private running = false;
   private loaded = false;
+  /** Phase 4: persists are serialized through this chain (see persist()). */
+  private persistChain: Promise<void> = Promise.resolve();
 
   constructor(private readonly jobsDir: string) {}
 
@@ -81,12 +83,42 @@ export class RenderJobManager {
     }
   }
 
-  private async persist(): Promise<void> {
+  /**
+   * Persist the job store. Phase 4 reliability fix: persists are
+   * SERIALIZED through a chain and each write uses a UNIQUE tmp
+   * name. Previously every caller wrote the same `jobs.json.tmp`
+   * and renamed it over the store; two overlapping persists (a
+   * submit's awaited persist, a running job's start/finish persist,
+   * a cancel's fire-and-forget persist) interleaved their
+   * write/rename steps, and the second rename failed with ENOENT
+   * because the first had already moved the tmp file away — the
+   * failure main CI run #173 hit in the Phase 30 jobs test. The
+   * snapshot is taken when the write actually runs, so a queued
+   * persist always stores the latest state.
+   */
+  private persist(): Promise<void> {
+    const run = this.persistChain.then(() => this.writeStore());
+    // The chain itself never rejects (one failed write must not
+    // wedge every later persist); the caller of THIS persist still
+    // sees its own failure through `run`.
+    this.persistChain = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  private async writeStore(): Promise<void> {
     await fs.promises.mkdir(this.jobsDir, { recursive: true });
     const data: PersistedJobs = { version: 1, jobs: [...this.jobs.values()] };
-    const tmp = `${this.storePath}.tmp`;
-    await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2));
-    await fs.promises.rename(tmp, this.storePath);
+    const tmp = `${this.storePath}.${randomUUID()}.tmp`;
+    try {
+      await fs.promises.writeFile(tmp, JSON.stringify(data, null, 2));
+      await fs.promises.rename(tmp, this.storePath);
+    } catch (e) {
+      await fs.promises.rm(tmp, { force: true }).catch(() => undefined);
+      throw e;
+    }
   }
 
   async submit(input: {

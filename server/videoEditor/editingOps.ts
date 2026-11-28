@@ -6,8 +6,10 @@ import {
   addTrack,
   addTransition,
   assertNoOverlap,
+  assertTrackUnlocked,
   clipDuration,
   clipEnd,
+  clipSpeed,
   getClip,
   getTrack,
   moveClip,
@@ -18,6 +20,7 @@ import {
   trimClip,
   validateTransform
 } from './timeline.js';
+import { collectSnapPoints, snapMoveStart, snapTime, type SnapOptions } from './snapping.js';
 import {
   sortedKeyframes,
   validateEffectInstance,
@@ -46,7 +49,8 @@ export function setClipTransform(
   clipId: string,
   patch: Partial<ClipTransform>
 ): TimelineClip {
-  const { clip } = getClip(project, clipId);
+  const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   const media = mediaAssets.get(clip.mediaId);
   const next: ClipTransform = { ...(clip.transform ?? DEFAULT_TRANSFORM), ...patch };
   if (patch.crop === undefined && clip.transform?.crop) next.crop = clip.transform.crop;
@@ -63,6 +67,7 @@ export function setClipSpeed(
 ): TimelineClip {
   if (speed < 0.25 || speed > 4) throw new Error('speed must be between 0.25 and 4');
   const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   const media = mediaAssets.get(clip.mediaId);
   if (!media) throw new Error(`Media asset not found: ${clip.mediaId}`);
   const updated: TimelineClip = { ...clip, speed };
@@ -75,6 +80,7 @@ export function setClipSpeed(
 /** Duplicate a clip immediately after the original (same track), if the space is free. */
 export function duplicateClip(project: VideoProject, clipId: string): TimelineClip {
   const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   const copy: TimelineClip = {
     ...clip,
     id: crypto.randomUUID(),
@@ -133,7 +139,8 @@ export function moveTextElement(project: VideoProject, textId: string, toIndex: 
 // ---------------------------------------------------------------- Phase 28 ops
 
 export function addEffect(project: VideoProject, clipId: string, effectType: EffectType, value: number): ClipEffectInstance {
-  const { clip } = getClip(project, clipId);
+  const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   const instance: ClipEffectInstance = { id: crypto.randomUUID(), type: effectType, value };
   validateEffectInstance(instance);
   (clip.effects ??= []).push(instance);
@@ -141,7 +148,8 @@ export function addEffect(project: VideoProject, clipId: string, effectType: Eff
 }
 
 export function updateEffect(project: VideoProject, clipId: string, effectId: string, value: number): ClipEffectInstance {
-  const { clip } = getClip(project, clipId);
+  const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   const instance = (clip.effects ?? []).find((e) => e.id === effectId);
   if (!instance) throw new Error(`Effect instance not found: ${effectId}`);
   validateEffectInstance({ ...instance, value });
@@ -150,14 +158,16 @@ export function updateEffect(project: VideoProject, clipId: string, effectId: st
 }
 
 export function removeEffect(project: VideoProject, clipId: string, effectId: string): void {
-  const { clip } = getClip(project, clipId);
+  const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   const before = (clip.effects ?? []).length;
   clip.effects = (clip.effects ?? []).filter((e) => e.id !== effectId);
   if (clip.effects.length === before) throw new Error(`Effect instance not found: ${effectId}`);
 }
 
 export function moveEffect(project: VideoProject, clipId: string, effectId: string, toIndex: number): void {
-  const { clip } = getClip(project, clipId);
+  const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   const effects = clip.effects ?? [];
   const from = effects.findIndex((e) => e.id === effectId);
   if (from === -1) throw new Error(`Effect instance not found: ${effectId}`);
@@ -168,7 +178,8 @@ export function moveEffect(project: VideoProject, clipId: string, effectId: stri
 
 /** Replace a clip's keyframe track (validated against the clip's duration). */
 export function setClipKeyframes(project: VideoProject, clipId: string, keyframes: Keyframe[]): TimelineClip {
-  const { clip } = getClip(project, clipId);
+  const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   validateKeyframes(keyframes, clipDuration(clip), { owner: `Clip ${clipId}` });
   clip.keyframes = sortedKeyframes(keyframes).map((kf) => ({ ...kf, id: kf.id || crypto.randomUUID() }));
   return clip;
@@ -186,7 +197,8 @@ export function setTextKeyframes(project: VideoProject, textId: string, keyframe
 // ---------------------------------------------------------------- Phase 29 ops
 
 export function setClipFades(project: VideoProject, clipId: string, fadeInSec: number, fadeOutSec: number): TimelineClip {
-  const { clip } = getClip(project, clipId);
+  const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   if (fadeInSec < 0 || fadeOutSec < 0) throw new Error('audio fades cannot be negative');
   if (fadeInSec + fadeOutSec > clipDuration(clip) + 1e-6) {
     throw new Error(`audio fades (${fadeInSec}s + ${fadeOutSec}s) exceed the clip duration (${clipDuration(clip)}s)`);
@@ -205,12 +217,23 @@ export function setTrackMuted(project: VideoProject, trackId: string, muted: boo
   getTrack(project, trackId).muted = muted;
 }
 
+/**
+ * Phase 2 (Video Editor Roadmap): lock/unlock a track. This is a
+ * track control, so it is deliberately NOT blocked by the lock
+ * itself — a locked track must always be unlockable. While locked,
+ * every clip-level edit on the track throws (see assertTrackUnlocked
+ * in timeline.ts).
+ */
+export function setTrackLocked(project: VideoProject, trackId: string, locked: boolean): void {
+  getTrack(project, trackId).locked = locked;
+}
+
 export type EditOperation =
   | { type: 'addTrack'; kind: 'video' | 'audio'; name?: string }
   | { type: 'addClip'; trackId: string; clip: Parameters<typeof addClip>[3] }
-  | { type: 'trim'; clipId: string; sourceIn: number; sourceOut: number; keepEndFixed?: boolean }
+  | { type: 'trim'; clipId: string; sourceIn: number; sourceOut: number; keepEndFixed?: boolean; snap?: boolean | SnapOptions }
   | { type: 'split'; clipId: string; atTimelineSec: number }
-  | { type: 'move'; clipId: string; trackStart: number; targetTrackId?: string }
+  | { type: 'move'; clipId: string; trackStart: number; targetTrackId?: string; snap?: boolean | SnapOptions }
   | { type: 'remove'; clipId: string }
   | { type: 'duplicate'; clipId: string }
   | { type: 'setVolume'; clipId: string; volume: number }
@@ -231,6 +254,7 @@ export type EditOperation =
   | { type: 'setFades'; clipId: string; fadeInSec: number; fadeOutSec: number }
   | { type: 'setTrackVolume'; trackId: string; volume: number }
   | { type: 'setTrackMuted'; trackId: string; muted: boolean }
+  | { type: 'setTrackLocked'; trackId: string; locked: boolean }
   | { type: 'addCaption'; caption: Omit<CaptionCue, 'id'> }
   | { type: 'updateCaption'; cueId: string; patch: Partial<Omit<CaptionCue, 'id'>> }
   | { type: 'removeCaption'; cueId: string };
@@ -248,12 +272,46 @@ export function applyEditOperation(
     }
     case 'addClip':
       return { clip: addClip(project, mediaAssets, op.trackId, op.clip) };
-    case 'trim':
-      return { clip: trimClip(project, mediaAssets, op.clipId, op.sourceIn, op.sourceOut, op.keepEndFixed) };
+    case 'trim': {
+      // Phase 2: optional snapping of the moving timeline edge. A
+      // plain trim moves the END edge; keepEndFixed moves the START
+      // edge. The snapped edge time is converted back to source
+      // values (source delta = timeline delta × speed); trimClip
+      // then validates the result exactly as for an unsnapped trim.
+      let { sourceIn, sourceOut } = op;
+      if (op.snap) {
+        const snapOptions = op.snap === true ? {} : op.snap;
+        const { clip } = getClip(project, op.clipId);
+        const speed = clipSpeed(clip);
+        const points = collectSnapPoints(project, { ...snapOptions, excludeClipId: clip.id });
+        if (op.keepEndFixed) {
+          const end = clipEnd(clip);
+          const desiredStart = end - (sourceOut - sourceIn) / speed;
+          const snapped = snapTime(desiredStart, points, snapOptions);
+          if (snapped.snapped) sourceIn = sourceOut - (end - snapped.time) * speed;
+        } else {
+          const desiredEnd = clip.trackStart + (sourceOut - sourceIn) / speed;
+          const snapped = snapTime(desiredEnd, points, snapOptions);
+          if (snapped.snapped) sourceOut = sourceIn + (snapped.time - clip.trackStart) * speed;
+        }
+      }
+      return { clip: trimClip(project, mediaAssets, op.clipId, sourceIn, sourceOut, op.keepEndFixed) };
+    }
     case 'split':
       return { clip: splitClip(project, op.clipId, op.atTimelineSec) };
-    case 'move':
-      return { clip: moveClip(project, op.clipId, op.trackStart, op.targetTrackId) };
+    case 'move': {
+      // Phase 2: optional snapping (start or end edge, whichever is
+      // closer to a snap point). Without `snap`, the requested
+      // trackStart is used verbatim — behaviour unchanged.
+      let trackStart = op.trackStart;
+      if (op.snap) {
+        const snapOptions = op.snap === true ? {} : op.snap;
+        const { clip } = getClip(project, op.clipId);
+        const points = collectSnapPoints(project, { ...snapOptions, excludeClipId: clip.id });
+        trackStart = snapMoveStart(clip, trackStart, points, snapOptions).time;
+      }
+      return { clip: moveClip(project, op.clipId, trackStart, op.targetTrackId) };
+    }
     case 'remove':
       removeClip(project, op.clipId);
       return {};
@@ -305,6 +363,9 @@ export function applyEditOperation(
       return {};
     case 'setTrackMuted':
       setTrackMuted(project, op.trackId, op.muted);
+      return {};
+    case 'setTrackLocked':
+      setTrackLocked(project, op.trackId, op.locked);
       return {};
     case 'addCaption':
       return { caption: addCaption(project, op.caption) };

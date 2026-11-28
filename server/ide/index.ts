@@ -7,4 +7,6 @@ export * from './packageService.js';
 export * from './templates.js';
 export * from './aiAssist.js';
 export * from './ideProjectGenerator.js';
+export * from './cliToolGate.js';
+export * from './cliWorkflow.js';
 export * from './ideRoutes.js';

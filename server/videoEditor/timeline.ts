@@ -69,6 +69,16 @@ export function addTrack(project: VideoProject, kind: 'video' | 'audio', name?: 
   return track;
 }
 
+/**
+ * Phase 2 (Video Editor Roadmap): track-lock enforcement. Every
+ * validated clip edit calls this on the track(s) it touches, so the
+ * lock holds no matter which entry point drives the model. Track
+ * controls (volume/mute/lock itself) deliberately do not call it.
+ */
+export function assertTrackUnlocked(track: TimelineTrack): void {
+  if (track.locked) throw new Error(`Track "${track.name}" is locked`);
+}
+
 export function getTrack(project: VideoProject, trackId: string): TimelineTrack {
   const track = project.tracks.find((t) => t.id === trackId);
   if (!track) throw new Error(`Track not found: ${trackId}`);
@@ -152,6 +162,7 @@ export function addClip(
   input: Omit<TimelineClip, 'id' | 'volume' | 'effect'> & Partial<Pick<TimelineClip, 'volume' | 'effect'>>
 ): TimelineClip {
   const track = getTrack(project, trackId);
+  assertTrackUnlocked(track);
   const media = mediaAssets.get(input.mediaId);
   if (!media) throw new Error(`Media asset not found: ${input.mediaId}`);
   if (track.kind === 'video' && !media.hasVideo) throw new Error('Cannot place audio-only media on a video track');
@@ -179,6 +190,7 @@ export function trimClip(
   keepEndFixed: boolean = false
 ): TimelineClip {
   const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   const media = mediaAssets.get(clip.mediaId);
   if (!media) throw new Error(`Media asset not found: ${clip.mediaId}`);
   const updated: TimelineClip = { ...clip, sourceIn: newIn, sourceOut: newOut };
@@ -195,6 +207,7 @@ export function trimClip(
 /** Split a clip at a timeline time; returns the new (right-hand) clip. */
 export function splitClip(project: VideoProject, clipId: string, atTimelineSec: number): TimelineClip {
   const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   if (atTimelineSec <= clip.trackStart || atTimelineSec >= clipEnd(clip)) {
     throw new Error(`Split point ${atTimelineSec}s is outside clip span ${clip.trackStart}s–${clipEnd(clip)}s`);
   }
@@ -214,6 +227,8 @@ export function splitClip(project: VideoProject, clipId: string, atTimelineSec: 
 export function moveClip(project: VideoProject, clipId: string, newTrackStart: number, targetTrackId?: string): TimelineClip {
   const { track, clip } = getClip(project, clipId);
   const target = targetTrackId ? getTrack(project, targetTrackId) : track;
+  assertTrackUnlocked(track);
+  if (target.id !== track.id) assertTrackUnlocked(target);
   if (target.kind !== track.kind) throw new Error('Cannot move a clip between video and audio tracks');
   const moved: TimelineClip = { ...clip, trackStart: newTrackStart };
   if (newTrackStart < 0) throw new Error('trackStart cannot be negative');
@@ -231,13 +246,16 @@ export function moveClip(project: VideoProject, clipId: string, newTrackStart: n
 
 export function removeClip(project: VideoProject, clipId: string): void {
   const { track } = getClip(project, clipId);
+  assertTrackUnlocked(track);
   track.clips = track.clips.filter((c) => c.id !== clipId);
   project.transitions = project.transitions.filter((t) => t.afterClipId !== clipId);
 }
 
 export function setClipVolume(project: VideoProject, clipId: string, volume: number): void {
   if (volume < 0 || volume > 1) throw new Error('volume must be between 0 and 1');
-  getClip(project, clipId).clip.volume = volume;
+  const { track, clip } = getClip(project, clipId);
+  assertTrackUnlocked(track);
+  clip.volume = volume;
 }
 
 export function addTransition(
@@ -248,6 +266,7 @@ export function addTransition(
 ): void {
   validateTransitionType(type);
   const base = baseVideoTrack(project);
+  assertTrackUnlocked(base);
   const idx = base.clips.findIndex((c) => c.id === afterClipId);
   if (idx === -1) throw new Error('Transitions can only be added after a clip on the base video track');
   if (idx === base.clips.length - 1) throw new Error('Cannot add a transition after the last clip');
@@ -263,6 +282,7 @@ export function addTransition(
 
 /** Phase 28: remove the transition after a base clip (no-op-free: throws when absent). */
 export function removeTransition(project: VideoProject, afterClipId: string): void {
+  assertTrackUnlocked(baseVideoTrack(project));
   const before = project.transitions.length;
   project.transitions = project.transitions.filter((t) => t.afterClipId !== afterClipId);
   if (project.transitions.length === before) throw new Error(`No transition after clip ${afterClipId}`);

@@ -1,7 +1,7 @@
 import { detectFfmpeg } from './mediaProbe.js';
 import { detectEncoders, type EncoderInfo } from './hwAccel.js';
 import type { ExportSettings, VideoProject } from './types.js';
-import { defaultExportSettings } from './videoExporter.js';
+import { defaultExportSettings, validateExportSettings } from './videoExporter.js';
 
 /**
  * Phase 30: export presets and render capabilities. A preset is a
@@ -56,7 +56,13 @@ export function settingsForPreset(
           videoBitrateKbps: preset.videoBitrateKbps,
           audioBitrateKbps: preset.audioBitrateKbps
         };
-  return { ...fromPreset, ...overrides, preset: preset.name, format: 'mp4', audioCodec: 'aac' };
+  const settings: ExportSettings = { ...fromPreset, ...overrides, preset: preset.name, format: 'mp4', audioCodec: 'aac' };
+  // Phase 4: overrides are caller input — reject unrenderable values
+  // here with the same named errors exportVideo would produce, so a
+  // bad override fails at resolution time, not inside ffmpeg.
+  const errors = validateExportSettings(settings);
+  if (errors.length > 0) throw new Error(`Invalid export settings: ${errors.join('; ')}`);
+  return settings;
 }
 
 export interface RenderCapabilities {

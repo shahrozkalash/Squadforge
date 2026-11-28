@@ -1,6 +1,8 @@
 export * from './types.js';
 export * from './timeline.js';
 export * from './editingOps.js';
+export * from './history.js';
+export * from './snapping.js';
 export * from './playback.js';
 export * from './effects.js';
 export * from './captions.js';
@@ -15,3 +17,4 @@ export * from './mediaProbe.js';
 export * from './videoExporter.js';
 export * from './videoProjectGenerator.js';
 export * from './videoEditorRoutes.js';
+export * from './videoWorkflow.js';

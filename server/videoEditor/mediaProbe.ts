@@ -43,6 +43,10 @@ export interface ProbeResult {
   fps?: number;
   /** Phase 26: probed video codec name (drives image-kind detection). */
   videoCodec?: string;
+  /** Video Editor Roadmap Phase 4: probed audio codec name (e.g. 'aac'). */
+  audioCodec?: string;
+  /** Video Editor Roadmap Phase 4: probed audio sample rate in Hz. */
+  audioSampleRateHz?: number;
 }
 
 const IMAGE_CODECS = new Set(['png', 'mjpeg', 'bmp', 'webp', 'gif', 'tiff', 'jpeg2000', 'avif', 'heic', 'heif']);
@@ -78,7 +82,9 @@ export async function probeMedia(filePath: string): Promise<ProbeResult> {
     width: video?.width,
     height: video?.height,
     fps,
-    videoCodec: video?.codec_name
+    videoCodec: video?.codec_name,
+    audioCodec: audio?.codec_name,
+    audioSampleRateHz: audio?.sample_rate ? Number(audio.sample_rate) : undefined
   };
 }
 

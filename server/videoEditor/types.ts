@@ -168,6 +168,15 @@ export interface TimelineTrack {
   volume?: number;
   /** Phase 29: muted tracks contribute no audio to the mix. */
   muted?: boolean;
+  /**
+   * Phase 2 (Video Editor Roadmap): locked tracks refuse every
+   * clip-level edit (add/trim/split/move/remove/duplicate and all
+   * clip property edits) in the validated operation layer, so every
+   * entry point — routes, sessions, direct model calls — respects
+   * the lock. Track controls themselves (volume, mute, the lock
+   * flag) stay operable on a locked track.
+   */
+  locked?: boolean;
 }
 
 export interface Transition {
@@ -201,8 +210,23 @@ export interface ExportSettings {
   videoCodec: string;
   audioCodec: 'aac';
   videoBitrateKbps: number;
+  /**
+   * Video Editor Roadmap Phase 4: optional constant-quality (CRF)
+   * mode for the software libx264 encoder, integer 0..51 (lower =
+   * higher quality). When set, libx264 renders with `-crf` instead of
+   * the bitrate above. Hardware encoders have no CRF; if one renders
+   * the export, the bitrate setting drives it and the result notes
+   * say so — the CRF is never silently dropped.
+   */
+  crf?: number;
   /** Phase 30: AAC bitrate (default 160). */
   audioBitrateKbps?: number;
+  /**
+   * Video Editor Roadmap Phase 4: optional AAC sample rate for the
+   * exported audio (one of the standard rates in
+   * EXPORT_AUDIO_SAMPLE_RATES). Unset keeps the source/mix rate.
+   */
+  audioSampleRateHz?: number;
   /** Phase 30: the export preset this settings object came from, when any. */
   preset?: string;
   /**

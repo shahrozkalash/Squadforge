@@ -173,7 +173,7 @@ export class DesktopBuildPipeline {
       );
       if (!fs.existsSync(outDir)) throw new Error(`Build output directory not found: ${outDir}`);
 
-      const artifactsDir = path.join(process.cwd(), '.desktop_artifacts', buildId);
+      const artifactsDir = path.join(options.artifactsRoot ?? path.join(process.cwd(), '.desktop_artifacts'), buildId);
       await fsp.mkdir(artifactsDir, { recursive: true });
       const harvested: DesktopArtifact[] = [];
       for (const name of await fsp.readdir(outDir)) {

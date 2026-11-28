@@ -31,6 +31,7 @@ import { CodeGenerationEngine } from './codeGenerationEngine.js';
 import { ProjectContextEngine } from './projectContextEngine.js';
 import { ContractFirstEngine } from './contractFirstEngine.js';
 import { ConnectedApplicationPlanner, ConnectedApplicationValidator } from '../application/index.js';
+import { CategoryTeamRegistry } from './categoryTeams.js';
 import { 
   Build, 
   ModelConfig, 
@@ -488,6 +489,10 @@ export class SwarmOrchestrator {
       }
     ];
 
+    // Factory Phase F5: the roles the planner may assign come from the
+    // category's team definition (data), not a hardcoded list.
+    const plannerTeam = CategoryTeamRegistry.selectForCategory(build.projectType);
+
     const plannerPrompt = `PROJECT MANAGER & ARCHITECT SPECIFICATION:
 Original Requirements: "${build.idea}"
 Project Type: ${build.projectType}
@@ -507,8 +512,7 @@ Key Modules:
 ${blueprint.moduleStructure.map(m => `- ${m.name}: ${m.description}`).join('\n')}
 
 Create the starter file tree and dependency-aware tasks.
-Available Agent Roles: software_architect, backend_developer, frontend_developer, fullstack_developer, database_specialist, qa_testing_specialist, security_specialist, devops_release_specialist, debugging_specialist.
-Assign fullstack_developer when a task bridges both frontend views and backend integration/state orchestration.
+Available Agent Roles: ${plannerTeam.assignableRoles.join(', ')}.${plannerTeam.assignableRoles.includes('fullstack_developer') ? '\nAssign fullstack_developer when a task bridges both frontend views and backend integration/state orchestration.' : ''}
 Output ONLY JSON matching this structure:
 {
   "actions": [
@@ -1391,6 +1395,11 @@ Never write placeholder comments. Implement functional code.`;
     const build = db.getBuild(buildId);
     if (!build || build.status !== 'running') return;
 
+    // Factory Phase F5: the completion chain's verifier model and
+    // repair role come from the category's team definition (data),
+    // resolved through the model registry — not hardcoded literals.
+    const resolvedTeam = CategoryTeamRegistry.resolveForCategory(build.projectType);
+
     const tasks = db.getTasks(buildId);
 
     // 1. Ensure no pending or in_progress tasks remain
@@ -1485,7 +1494,7 @@ Output ONLY JSON in this exact schema:
 }`;
 
     const verifyResult = await callUnifiedGateway({
-      modelId: 'claude',
+      modelId: resolvedTeam.verifierModelId,
       taskComplexity: 'flagship',
       prompt: verifierPrompt,
       systemInstruction: 'You are an objective software verifier. Validate requirement coverage without bias. Output only JSON.',
@@ -1561,7 +1570,7 @@ Output ONLY JSON in this exact schema:
           filePaths: [targetFile],
           priority: 1,
           isFixTask: true,
-          assignedRole: 'debugging_specialist',
+          assignedRole: resolvedTeam.team.verification.repairRole,
           maxRetries: this.MAX_TASK_RETRIES
         });
       }
@@ -1640,7 +1649,7 @@ Output ONLY JSON in this exact schema:
           filePaths: targetFiles,
           priority: 1,
           isFixTask: true,
-          assignedRole: 'debugging_specialist',
+          assignedRole: resolvedTeam.team.verification.repairRole,
           maxRetries: this.MAX_TASK_RETRIES
         });
       }

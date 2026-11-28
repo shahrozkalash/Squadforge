@@ -16,6 +16,16 @@ A user describes an idea, and SquadForge's swarm orchestrator plans it, splits i
 - **Project execution (optional)** — run generated Node projects in Docker sandboxes, with dependency installs and a live preview. Off by default; see `DEPLOYMENT.md`
 - **SQLite persistence** — WAL mode with versioned migrations; no external database to run
 
+## Universal AI Software Factory
+
+The Factory roadmap (Phases F1–F14, completed 2026-11-28) turned the swarm into a describe-to-delivered factory: one entry point classifies a plain-language description, resolves the responsible AI team from data (25 categories), builds through the verified swarm chain and a single web/desktop environment contract, and delivers only when the category's own verification gate passes — games, video/image/photo editors, websites, SaaS and APIs, Android apps, desktop apps and CLI tools, and AI applications.
+
+- Roadmap: [`UNIVERSAL_SOFTWARE_FACTORY_ROADMAP.md`](UNIVERSAL_SOFTWARE_FACTORY_ROADMAP.md)
+- What is actually proven, per model and per category — including the known gaps: [`CAPABILITY_MATRIX.md`](CAPABILITY_MATRIX.md)
+- Release consolidation: [`FACTORY_PHASE_F14_ACCEPTANCE_REPORT.md`](FACTORY_PHASE_F14_ACCEPTANCE_REPORT.md)
+
+Honest status, in one line: the factory machinery is test-proven end to end; live cloud generation is **not** proven — no provider keys are configured in the development environment, and the models refuse by name rather than fabricate (see the capability matrix).
+
 ## Tech Stack
 
 - **Frontend:** React 19, TypeScript, Vite, Tailwind CSS 4
